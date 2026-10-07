@@ -1,0 +1,34 @@
+{
+  "geode": "5.10.1",
+  "gd": {
+    "win": "2.2081",
+    "mac": "2.2081"
+  },
+  "id": "local.separate_song",
+  "name": "OBS Jukebox",
+  "version": "v1.0.0",
+  "developer": "babbur",
+  "description": "Separate GD/Song output for OBS",
+  "settings": {
+    "enabled": {
+      "type": "bool",
+      "name": "Enable OBS Jukebox",
+      "default": true
+    },
+    "offset": {
+      "type": "custom:obs-offset",
+      "name": "Song offset (seconds)",
+      "default": 0.0
+    }
+  },
+  "tags": [
+    "utility",
+    "music"
+  ],
+  "dependencies": {
+    "fleym.nongd": {
+      "version": "v3.8.0",
+      "importance": "required"
+    }
+  }
+}

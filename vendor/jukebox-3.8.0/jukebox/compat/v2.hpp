@@ -1,0 +1,24 @@
+#pragma once
+
+#include <unordered_map>
+
+#include <Geode/Result.hpp>
+
+#include <jukebox/compat/compat.hpp>
+
+namespace jukebox {
+
+namespace compat {
+
+namespace v2 {
+
+bool manifestExists();
+geode::Result<> backupManifest(bool deleteOrig = false);
+std::filesystem::path manifestPath();
+geode::Result<std::unordered_map<int, CompatManifest>> parseManifest();
+
+}
+
+}
+
+}

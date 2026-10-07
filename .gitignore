@@ -1,0 +1,13 @@
+build/
+build-native/
+build-windows/
+artifacts/
+**/bin/
+**/obj/
+installer/windows/payload.zip
+tools/
+downloads/
+backups/
+demo-recording/
+resources/demo.wav
+.DS_Store
