@@ -27,4 +27,6 @@ Toggle between Game/OBS volume control in pause menu.
 
 ## Compatibility
 
+When updating playback synchronization, update both the Geode mod and the OBS plugin together. Protocol v4 adds the game sample's timestamp; older OBS plugins cannot read it. The updated plugin accepts v2/v3 senders, using packet arrival time as a fallback.
+
 MacOS / Linux coming very shortly.

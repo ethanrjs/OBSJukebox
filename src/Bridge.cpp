@@ -15,6 +15,7 @@ void Bridge::publish(const Snapshot& s) {
     p.flags = (s.enabled ? 1 : 0) | (s.playing ? 2 : 0);
     p.epoch = s.epoch; p.attempt = s.attempt;
     p.position = s.position; p.rate = s.rate; p.offset = s.offset;
+    p.timestamp = s.timestamp;
     p.musicVolume = s.musicVolume; p.effectsVolume = s.effectsVolume;
     std::strncpy(p.status, s.status.c_str(), sizeof(p.status) - 1);
     std::strncpy(p.level, s.level.c_str(), sizeof(p.level) - 1);

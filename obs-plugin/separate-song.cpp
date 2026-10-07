@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <iterator>
 #include <memory>
 #include "Decoder.hpp"
 #include <deque>
@@ -31,6 +32,7 @@ class Receiver {
     std::atomic<bool> stop{false};
     std::mutex mutex;
     LinkState state;
+    std::deque<SongLinkPacket> playback;
     std::deque<EffectsPacket> effects;
     int64_t clockOffset=0;bool clockSet=false;
 public:
@@ -70,9 +72,10 @@ public:
                     continue;
                 }
                 SongLinkPacket p{};
-                if(size==sizeof(p) || size==SONG_LINK_V2_SIZE)std::memcpy(&p,buffer.data(),size);
+                if(size==sizeof(p) || size==SONG_LINK_V3_SIZE || size==SONG_LINK_V2_SIZE)std::memcpy(&p,buffer.data(),size);
                 if(size>0 && !sawPacket){sawPacket=true;blog(LOG_INFO,"[OBS Jukebox] Link packet: %zd bytes, version %u",size,p.version);}
-                if(((size==sizeof(p) && p.version==3) || (size==SONG_LINK_V2_SIZE && p.version==2)) &&
+                if(((size==sizeof(p) && p.version==4) || (size==SONG_LINK_V3_SIZE && p.version==3) ||
+                    (size==SONG_LINK_V2_SIZE && p.version==2)) &&
                    !memcmp(p.magic,"GDSONG1",8) &&
                    std::isfinite(p.musicVolume) && p.musicVolume>=0 && p.musicVolume<=1 &&
                    std::isfinite(p.effectsVolume) && p.effectsVolume>=0 && p.effectsVolume<=1 &&
@@ -82,7 +85,13 @@ public:
                     p.status[sizeof(p.status)-1]=0;p.level[sizeof(p.level)-1]=0;
                     p.song[sizeof(p.song)-1]=0;p.path[sizeof(p.path)-1]=0;
 
-                    std::lock_guard lock(mutex);state={p,Clock::now(),true};
+                    auto now=os_gettime_ns();
+                    if(p.version<4)p.timestamp=now; // Older senders can only be timed at arrival.
+                    if(p.timestamp>now+100000000 || p.timestamp<now-1000000000)continue;
+                    std::lock_guard lock(mutex);
+                    if(!playback.empty() && p.timestamp<=playback.back().timestamp)continue;
+                    state={p,Clock::now(),true};playback.push_back(p);
+                    while(playback.size()>256)playback.pop_front();
                 }else {
                     fd_set readable;FD_ZERO(&readable);FD_SET(sock,&readable);
                     timeval timeout{};timeout.tv_usec=10000;
@@ -94,6 +103,15 @@ public:
     }
     ~Receiver(){stop=true;if(worker.joinable())worker.join();if(sock!=BAD_SOCKET)closeSocket(sock);}
     LinkState get(){std::lock_guard lock(mutex);return state;}
+    std::vector<SongLinkPacket> playbackWindow(uint64_t start,uint64_t end){
+        std::lock_guard lock(mutex);
+        std::vector<SongLinkPacket> window(1);
+        auto next=std::upper_bound(playback.begin(),playback.end(),start,
+            [](uint64_t at,const SongLinkPacket& p){return at<p.timestamp;});
+        if(next!=playback.begin())window.front()=*std::prev(next);
+        for(;next!=playback.end() && next->timestamp<end;++next)window.push_back(*next);
+        return window;
+    }
     void mixEffects(float* output,size_t frames,uint64_t start,float gain){
         std::lock_guard lock(mutex);
         for(const auto& p:effects){
@@ -131,27 +149,39 @@ struct SongSource {
             auto link=receiver->get();auto p=link.packet;
             double age=std::chrono::duration<double>(Clock::now()-link.received).count();
             bool connected=link.connected && age<.4;
-            std::string newPath=connected?p.path:"";
-            bool pathChanged=newPath!=loadedPath;
-            if(pathChanged || (!newPath.empty() && !decoder.ready() && Clock::now()>=retryAt)){
-                decoder.open(newPath);loadedPath=newPath;lastEpoch=~0u;
-                retryAt=Clock::now()+std::chrono::seconds(1);
-                if(pathChanged || decoder.ready())blog(LOG_INFO,"[OBS Jukebox] Decoder %s: %s",decoder.ready()?"ready":"unavailable",p.song);
-            }
-            double audioAge=age+(double(timestamp)-double(os_gettime_ns()))/1e9;
-            double target=p.position+p.offset+(connected&&(p.flags&2)?audioAge*p.rate:0);
-            bool playing=connected && (p.flags&3)==3 && active && std::isfinite(target) &&
-                target>=0 && target<=31536000.0 && decoder.ready();
             audio.fill(0);
-            if(playing){
-                if(lastEpoch!=p.epoch || !wasPlaying || std::abs(decoder.position-target)>.04)
-                    playing=decoder.seek(target);
-                if(playing)decoder.render(audio.data(),480,p.rate);
+            auto window=receiver->playbackWindow(timestamp,timestamp+10000000);
+            // Round transitions up to the first sample at or after their capture time.
+            auto frameAt=[&](uint64_t at){return at<=timestamp?size_t(0):
+                size_t(std::min<uint64_t>(480,((at-timestamp)*48000+999999999)/1000000000));};
+            for(size_t i=0;i<window.size();++i){
+                p=window[i];
+                auto first=i?frameAt(p.timestamp):0;
+                auto end=i+1<window.size()?frameAt(window[i+1].timestamp):480;
+                if(end==first)continue;
+                auto segmentTime=timestamp+first*1000000000/48000;
+                auto output=audio.data()+first*2;
+                std::string newPath=connected?p.path:"";
+                bool pathChanged=newPath!=loadedPath;
+                if(pathChanged || (!newPath.empty() && !decoder.ready() && Clock::now()>=retryAt)){
+                    decoder.open(newPath);loadedPath=newPath;lastEpoch=~0u;
+                    retryAt=Clock::now()+std::chrono::seconds(1);
+                    if(pathChanged || decoder.ready())blog(LOG_INFO,"[OBS Jukebox] Decoder %s: %s",decoder.ready()?"ready":"unavailable",p.song);
+                }
+                double audioAge=double(int64_t(segmentTime)-int64_t(p.timestamp))/1e9;
+                double target=p.position+p.offset+((p.flags&2)?audioAge*p.rate:0);
+                bool playing=connected && (p.flags&3)==3 && active && std::isfinite(target) &&
+                    target>=0 && target<=31536000.0 && decoder.ready();
+                if(playing){
+                    if(lastEpoch!=p.epoch || !wasPlaying || std::abs(decoder.position-target)>.04)
+                        playing=decoder.seek(target);
+                    if(playing)decoder.render(output,end-first,p.rate);
+                }
+                for(size_t j=0;j<(end-first)*2;++j)output[j]*=p.musicVolume;
+                if(active && connected && (p.flags&1))receiver->mixEffects(output,end-first,segmentTime,p.effectsVolume);
+                if(playing!=wasPlaying)blog(LOG_INFO,"[OBS Jukebox] %s (%s)",playing?"Playing":"Stopped",connected?p.status:"game disconnected");
+                wasPlaying=playing;lastEpoch=p.epoch;
             }
-            for(auto& sample:audio)sample*=p.musicVolume;
-            if(active && connected && (p.flags&1))receiver->mixEffects(audio.data(),480,timestamp,p.effectsVolume);
-            if(playing!=wasPlaying)blog(LOG_INFO,"[OBS Jukebox] %s (%s)",playing?"Playing":"Stopped",connected?p.status:"game disconnected");
-            wasPlaying=playing;lastEpoch=p.epoch;
             {
                 std::lock_guard lock(mutex);
                 detail=!connected?"Waiting for Geometry Dash":

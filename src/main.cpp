@@ -8,6 +8,7 @@
 #include <Geode/modify/EditLevelLayer.hpp>
 #include <Geode/ui/GeodeUI.hpp>
 #include "Bridge.hpp"
+#include "MonotonicClock.hpp"
 #include "JukeboxLink.hpp"
 #include "AudioTap.hpp"
 #include "OffsetSetting.hpp"
@@ -29,6 +30,7 @@ static double completedPosition = 0;
 static std::chrono::steady_clock::time_point completedAt;
 
 static void sampleCompletedMusic() {
+    state.timestamp = monotonicNs();
     state.position = completedPosition + (completedPaused ? 0.0 :
         std::chrono::duration<double>(std::chrono::steady_clock::now() - completedAt).count() * state.rate);
 }
@@ -61,7 +63,8 @@ static void settings() {
     state.offset = playingLevel ? offset_setting::value() : 0.0;
     jukebox_link::fill(state, playingLevel.data());
 }
-static void publish(const std::string& status, bool playing) {
+static void publish(const std::string& status, bool playing, bool sampled = false) {
+    if (!sampled) state.timestamp = monotonicNs();
     settings();
     state.status = status;
     state.playing = playing;
@@ -79,6 +82,7 @@ $on_mod(Loaded) {
     }).leak();
     selectOffsetLevel(nullptr);
     jukebox_link::initialize();
+    state.timestamp = monotonicNs();
     settings();
     if (!bridge().start()) log::error("OBS Jukebox could not open its OBS link.");
     else log::info("OBS Jukebox native OBS link on loopback port {}", SONG_LINK_PORT);
@@ -106,6 +110,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
             selectOffsetLevel(m_level);
         }
         if (completedPlayback) { sampleCompletedMusic(); return; }
+        state.timestamp = monotonicNs();
         state.position = m_gameState.m_levelTime + (m_levelSettings ? m_levelSettings->m_songOffset : 0);
         state.musicPosition = false;
         state.rate = m_gameState.m_timeWarp > 0 ? std::clamp(double(m_gameState.m_timeWarp), .25, 4.0) : 1.0;
@@ -133,7 +138,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         m_fields->started = true;
         ++state.epoch;
         sample();
-        publish("Playing", m_started && !m_isPaused && m_player1 && !m_player1->m_isDead);
+        publish("Playing", m_started && !m_isPaused && m_player1 && !m_player1->m_isDead, true);
     }
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
@@ -144,11 +149,11 @@ class $modify(SeparateSongPlay, PlayLayer) {
         bool dead = m_player1 && m_player1->m_isDead;
         bool done = m_hasCompletedLevel;
         publish(done ? "Complete" : m_isPaused ? "Paused" : dead ? "Death" : "Playing",
-                completedPlayback ? !completedPaused : (m_fields->started && m_started && !m_isPaused && !dead));
+                completedPlayback ? !completedPaused : (m_fields->started && m_started && !m_isPaused && !dead), true);
     }
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         PlayLayer::destroyPlayer(player, object);
-        if (player->m_isDead) { sample(); publish("Death", false); }
+        if (player->m_isDead) { sample(); publish("Death", false, true); }
     }
     void resetLevel() {
         completedPlayback = false;
@@ -159,14 +164,14 @@ class $modify(SeparateSongPlay, PlayLayer) {
         PlayLayer::resetLevel();
         sample();
         m_fields->started = m_fields->started || alreadyStarted || m_isPracticeMode;
-        publish("Playing", m_fields->started && m_started && !m_isPaused && m_player1 && !m_player1->m_isDead);
+        publish("Playing", m_fields->started && m_started && !m_isPaused && m_player1 && !m_player1->m_isDead, true);
     }
     void pauseGame(bool unfocused) {
         PlayLayer::pauseGame(unfocused);
         if (m_isPaused) {
             sample();
             if (completedPlayback) { completedPosition = state.position; completedPaused = true; }
-            publish("Paused", false);
+            publish("Paused", false, true);
         }
     }
     void resume() {
@@ -176,14 +181,14 @@ class $modify(SeparateSongPlay, PlayLayer) {
         }
         sample();
         publish(completedPlayback ? "Complete" : "Playing", completedPlayback ||
-            (m_fields->started && m_started && !m_isPaused && m_player1 && !m_player1->m_isDead));
+            (m_fields->started && m_started && !m_isPaused && m_player1 && !m_player1->m_isDead), true);
     }
     void onEnterTransitionDidFinish() {
         PlayLayer::onEnterTransitionDidFinish();
         sample();
         bool dead = m_player1 && m_player1->m_isDead;
         publish(completedPlayback ? "Complete" : m_isPaused ? "Paused" : dead ? "Death" : "Playing",
-            completedPlayback ? !completedPaused : (m_fields->started && m_started && !m_isPaused && !dead));
+            completedPlayback ? !completedPaused : (m_fields->started && m_started && !m_isPaused && !dead), true);
     }
     void levelComplete() {
         sample();
@@ -192,7 +197,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         PlayLayer::levelComplete();
         completedPaused = false;
         completedPlayback = true;
-        publish("Complete", true);
+        publish("Complete", true, true);
     }
     void onExit() {
         if (playingLevel.data() == m_level) {
@@ -301,7 +306,7 @@ class $modify(SeparateSongDirector, CCDirector) {
         if (now-last > std::chrono::milliseconds(100)) {
             last = now; audio_tap::install(); jukebox_link::refreshUI();
             if (completedPlayback) { sampleCompletedMusic(); settings(); bridge().publish(state); }
-            else if (!state.playing) { settings(); bridge().publish(state); }
+            else if (!state.playing) { state.timestamp = monotonicNs(); settings(); bridge().publish(state); }
         }
         CCDirector::drawScene();
     }

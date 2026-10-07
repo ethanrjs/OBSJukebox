@@ -2,13 +2,9 @@
 #include "AudioTap.hpp"
 #include "Bridge.hpp"
 #include "LinkPacket.hpp"
+#include "MonotonicClock.hpp"
 #include <Geode/Geode.hpp>
 #include <Geode/fmod/fmod_dsp.h>
-#ifdef __APPLE__
-#include <mach/mach_time.h>
-#elif defined(_WIN32)
-#include <windows.h>
-#endif
 #include <atomic>
 #include <array>
 #include <thread>
@@ -25,21 +21,7 @@ struct Tap {
     std::atomic<bool> enabled{true};
     uint32_t rate=44100, sequence=0, stream=0;
     uint64_t clockStart=0, clockFrames=0;
-#ifdef __APPLE__
-    mach_timebase_info_data_t timebase{};
-    Tap(){mach_timebase_info(&timebase);}
-    uint64_t now()const { auto t=mach_absolute_time(); return (t/timebase.denom)*timebase.numer+(t%timebase.denom)*timebase.numer/timebase.denom; }
-#elif defined(_WIN32)
-    uint64_t frequency=0;
-    Tap(){LARGE_INTEGER value{};QueryPerformanceFrequency(&value);frequency=value.QuadPart;}
-    uint64_t now()const {
-        LARGE_INTEGER value{};QueryPerformanceCounter(&value);
-        auto t=uint64_t(value.QuadPart);
-        return (t/frequency)*1000000000+(t%frequency)*1000000000/frequency;
-    }
-#else
-    uint64_t now()const {return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
-#endif
+    uint64_t now()const {return monotonicNs();}
     FMOD::DSP* dsp=nullptr;
     void push(float* input,unsigned frames,int channels) {
         if(!enabled.load(std::memory_order_relaxed) || channels<1 || frames==0)return;
