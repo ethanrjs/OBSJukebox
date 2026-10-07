@@ -17,4 +17,8 @@ In Jukebox, check 'Game' for your in-game audio (not heard in OBS' output) and '
 
 ## Compatibility
 
-MacOS / Linux coming very shortly.
+Windows, macOS 13+ on Apple Silicon, and x86_64 Linux.
+
+On macOS, extract the ZIP and open **OBS Jukebox Setup**. The installer is not notarized, so macOS may require approval in **System Settings > Privacy & Security**. Add **GD Sounds** in OBS once after installation.
+
+On Linux, Geometry Dash runs through Proton with Geode installed. Extract the archive and run `bash Install.sh`. Use `bash Install.sh --flatpak` for Flatpak OBS. Install Jukebox through Geode if needed, then add **GD Sounds** in OBS once.

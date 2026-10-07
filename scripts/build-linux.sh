@@ -26,5 +26,6 @@ mkdir -p "$song_package/payload"
 install -m 755 "$song_output/build/separate-song.so" "$song_package/payload/separate-song.so"
 install -m 644 "$song_mod" "$song_package/payload/local.separate_song.geode"
 install -m 755 "$song_root/scripts/install-linux.sh" "$song_package/Install.sh"
+install -m 644 "$song_root/LICENSE" "$song_package/LICENSE"
 tar -C "$song_output" -czf "$song_output/OBS-Jukebox-Linux-x86_64.tar.gz" OBS-Jukebox-Linux
 printf 'Package: %s\n' "$song_output/OBS-Jukebox-Linux-x86_64.tar.gz"
