@@ -17,6 +17,7 @@
 #include <deque>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #if defined(__linux__)
 #include "LinuxPaths.hpp"
 #include "LinuxAudioClock.hpp"
@@ -131,6 +132,10 @@ struct SongSource {
         LinuxPaths paths;
         #endif
         std::string loadedPath;unsigned lastEpoch=~0u;bool wasPlaying=false;
+        std::string resolvedPath;
+        uintmax_t loadedSize=0;
+        std::filesystem::file_time_type loadedWriteTime{};
+        bool fileAvailable=false;
         auto retryAt=Clock::time_point{};
         std::array<float,960> audio{};
         auto next=Clock::now();
@@ -143,15 +148,24 @@ struct SongSource {
             bool connected=link.connected && age<.4;
             std::string newPath=connected?p.path:"";
             bool pathChanged=newPath!=loadedPath;
-            if(pathChanged || (!newPath.empty() && !decoder.ready() && Clock::now()>=retryAt)){
+            if(pathChanged || (!newPath.empty() && Clock::now()>=retryAt)){
+                std::string resolved=newPath;
                 #if defined(__linux__)
-                decoder.open(paths.resolve(newPath));
-                #else
-                decoder.open(newPath);
+                resolved=paths.resolve(newPath);
                 #endif
-                loadedPath=newPath;lastEpoch=~0u;
+                std::error_code error;
+                auto file=std::filesystem::u8path(resolved);
+                auto size=resolved.empty()?0:std::filesystem::file_size(file,error);
+                auto modified=resolved.empty() || error?std::filesystem::file_time_type{}:std::filesystem::last_write_time(file,error);
+                bool available=!resolved.empty() && !error;
+                bool fileChanged=resolved!=resolvedPath || available!=fileAvailable ||
+                    (available && (size!=loadedSize || modified!=loadedWriteTime));
+                if(pathChanged || fileChanged || !decoder.ready()){
+                    decoder.open(resolved);loadedPath=newPath;lastEpoch=~0u;
+                    if(pathChanged || fileChanged || decoder.ready())blog(LOG_INFO,"[OBS Jukebox] Decoder %s: %s",decoder.ready()?"ready":"unavailable",p.song);
+                }
+                resolvedPath=resolved;fileAvailable=available;loadedSize=size;loadedWriteTime=modified;
                 retryAt=Clock::now()+std::chrono::seconds(1);
-                if(pathChanged || decoder.ready())blog(LOG_INFO,"[OBS Jukebox] Decoder %s: %s",decoder.ready()?"ready":"unavailable",p.song);
             }
             double audioAge=age+(double(timestamp)-double(os_gettime_ns()))/1e9;
             double target=p.position+p.offset+(connected&&(p.flags&2)?audioAge*p.rate:0);
