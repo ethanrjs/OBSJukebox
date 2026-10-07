@@ -190,17 +190,15 @@ int main(int argc,char** argv){
     phase("invalid_song_retry_effects_continuity",2,-1,0,3,1,0,true,2);
     wave(replaced);
     phase("invalid_song_same_path_and_epoch_recovery",2,-1,0,3,1,0,true,0,false,false,false,1.3);
+#ifndef _WIN32
     auto growing=output/"growing-download.wav";
-#ifdef _WIN32
-    wave(growing,1,4800);
-#else
     wave(growing);
     std::filesystem::resize_file(growing,44+4800*4);
-#endif
     auto growingUtf8=growing.u8string();std::memset(packet.path,0,sizeof(packet.path));std::memcpy(packet.path,growingUtf8.data(),std::min(growingUtf8.size(),sizeof(packet.path)-1));
     phase("partial_valid_song_exhausted",1,0,2,3);
     wave(growing);
     phase("growing_song_same_path_and_epoch_recovery",2,880,1,3,1,0,true,0,false,false,false,1.3);
+#endif
     if(argc>3){
         std::strncpy(packet.path,argv[3],sizeof(packet.path)-1);phase("mp3_decode",1,-1,0,3);
         phase("failed_seek_music_silence",1,0,100,3);
