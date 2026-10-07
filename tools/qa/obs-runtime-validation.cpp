@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -41,11 +42,14 @@ uint64_t cpuTicks(){
     rusage usage{};getrusage(RUSAGE_SELF,&usage);return uint64_t(usage.ru_utime.tv_sec+usage.ru_stime.tv_sec)*10000000+uint64_t(usage.ru_utime.tv_usec+usage.ru_stime.tv_usec)*10;
 #endif
 }
-void wave(const std::filesystem::path& path,double frequencyScale=1) {
-    std::ofstream out(path,std::ios::binary);uint32_t samples=48000*6,size=samples*4;
+void wave(const std::filesystem::path& path,double frequencyScale=1,uint32_t samples=48000*6) {
+    std::ofstream out(path,std::ios::binary);uint32_t size=samples*4;
     auto put=[&](auto n){out.write(reinterpret_cast<const char*>(&n),sizeof(n));};
     out.write("RIFF",4);put(size+36);out.write("WAVEfmt ",8);put(uint32_t(16));put(uint16_t(1));put(uint16_t(2));put(uint32_t(48000));put(uint32_t(192000));put(uint16_t(4));put(uint16_t(16));out.write("data",4);put(size);
     for(uint32_t i=0;i<samples;++i){double hz=(i<48000?440:i<96000?660:i<192000?880:1100)*frequencyScale;int16_t v=int16_t(std::sin(2*3.141592653589793*hz*i/48000)*9000);put(v);put(v);}
+    out.close();
+    std::error_code error;auto written=std::filesystem::file_size(path,error);
+    if(!out || error || written!=size+44){fprintf(stderr,"WAV fixture write failed: %s\n",path.string().c_str());std::exit(2);}
 }
 int main(int argc,char** argv){
     if(argc<3){fprintf(stderr,"Usage: harness plugin-path output-directory [optional-mp3 | --live [seconds]]\n");return 2;}
@@ -186,8 +190,13 @@ int main(int argc,char** argv){
     phase("invalid_song_retry_effects_continuity",2,-1,0,3,1,0,true,2);
     wave(replaced);
     phase("invalid_song_same_path_and_epoch_recovery",2,-1,0,3,1,0,true,0,false,false,false,1.3);
-    auto growing=output/"growing-download.wav";wave(growing);
+    auto growing=output/"growing-download.wav";
+#ifdef _WIN32
+    wave(growing,1,4800);
+#else
+    wave(growing);
     std::filesystem::resize_file(growing,44+4800*4);
+#endif
     auto growingUtf8=growing.u8string();std::memset(packet.path,0,sizeof(packet.path));std::memcpy(packet.path,growingUtf8.data(),std::min(growingUtf8.size(),sizeof(packet.path)-1));
     phase("partial_valid_song_exhausted",1,0,2,3);
     wave(growing);
