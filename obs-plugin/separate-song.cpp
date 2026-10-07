@@ -17,6 +17,10 @@
 #include <deque>
 #include <cstdio>
 #include <cstdlib>
+#if defined(__linux__)
+#include "LinuxPaths.hpp"
+#include "LinuxAudioClock.hpp"
+#endif
 
 OBS_DECLARE_MODULE()
 MODULE_EXPORT const char* obs_module_description(void) { return "OBS Jukebox: Geometry Dash custom song and sound effects"; }
@@ -32,7 +36,9 @@ class Receiver {
     std::mutex mutex;
     LinkState state;
     std::deque<EffectsPacket> effects;
-    int64_t clockOffset=0;bool clockSet=false;
+    #if defined(__linux__)
+    LinuxAudioClock effectsClock;
+    #endif
 public:
     Receiver() {
         if(!socketsReady())return;
@@ -55,15 +61,16 @@ public:
                 if(size>=36 && !memcmp(buffer.data(),"GDSFX1\0",8)){
                     EffectsPacket effect;std::memcpy(&effect,buffer.data(),size);
                     uint64_t now=os_gettime_ns();
-                    #if defined(__linux__)
-                    if(!clockSet){clockOffset=int64_t(now)-int64_t(effect.timestamp);clockSet=true;}
-#endif
-                    effect.timestamp=uint64_t(int64_t(effect.timestamp)+clockOffset);
                     if(effect.version!=1 || effect.frames<1 || effect.frames>512 || size!=36+effect.frames*8 ||
-                       effect.sampleRate<8000 || effect.sampleRate>192000 || effect.timestamp>now+1000000000 ||
-                       effect.timestamp+1000000000<now || effect.stream>1)continue;
+                       effect.sampleRate<8000 || effect.sampleRate>192000 || effect.stream>1)continue;
                     bool finite=true;for(unsigned i=0;i<effect.frames*2;++i)finite&=std::isfinite(effect.samples[i]);
                     if(!finite)continue;
+                    #if defined(__linux__)
+                    if(effectsClock.translate(effect.timestamp,now)){
+                        std::lock_guard lock(mutex);effects.clear();
+                    }
+                    #endif
+                    if(effect.timestamp>now+1000000000 || effect.timestamp+1000000000<now)continue;
                     if(effect.stream==1){if(reference){std::fwrite(&effect,sizeof(effect),1,reference);std::fflush(reference);}continue;}
                     std::lock_guard lock(mutex);effects.push_back(effect);
                     while(effects.size()>64)effects.pop_front();
@@ -120,6 +127,9 @@ struct SongSource {
         detail("Select the OBS checkbox beside a Jukebox song."){}
     void run(){
         Decoder decoder;
+        #if defined(__linux__)
+        LinuxPaths paths;
+        #endif
         std::string loadedPath;unsigned lastEpoch=~0u;bool wasPlaying=false;
         auto retryAt=Clock::time_point{};
         std::array<float,960> audio{};
@@ -134,7 +144,12 @@ struct SongSource {
             std::string newPath=connected?p.path:"";
             bool pathChanged=newPath!=loadedPath;
             if(pathChanged || (!newPath.empty() && !decoder.ready() && Clock::now()>=retryAt)){
-                decoder.open(newPath);loadedPath=newPath;lastEpoch=~0u;
+                #if defined(__linux__)
+                decoder.open(paths.resolve(newPath));
+                #else
+                decoder.open(newPath);
+                #endif
+                loadedPath=newPath;lastEpoch=~0u;
                 retryAt=Clock::now()+std::chrono::seconds(1);
                 if(pathChanged || decoder.ready())blog(LOG_INFO,"[OBS Jukebox] Decoder %s: %s",decoder.ready()?"ready":"unavailable",p.song);
             }

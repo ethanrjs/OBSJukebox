@@ -1,0 +1,57 @@
+name: Linux
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/linux.yml
+      - obs-plugin/**
+      - src/Socket.hpp
+      - src/LinkPacket.hpp
+      - vendor/**
+      - scripts/build-linux.sh
+      - scripts/install-linux.sh
+      - tools/qa/**
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libobs-dev cmake pkg-config ninja-build xvfb libgl1-mesa-dri
+      - name: Build OBS plugin
+        run: |
+          cmake -S obs-plugin -B build-linux/plugin -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-linux/plugin --parallel 2
+      - name: Check Proton paths and audio clock
+        run: |
+          c++ -std=c++20 -O2 tools/qa/linux-paths-check.cpp -o build-linux/linux-paths-check
+          build-linux/linux-paths-check .
+      - name: Build OBS runtime checks
+        run: |
+          cmake -S tools/qa -B build-linux/qa -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-linux/qa --parallel 2
+      - name: Check OBS audio
+        env:
+          OBS_JUKEBOX_TEST_PORT: '39023'
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a build-linux/qa/obs-runtime-validation "$PWD/build-linux/plugin/separate-song.so" "$PWD/artifacts/linux-qa"
+      - name: Stage Linux files
+        run: |
+          mkdir -p artifacts/linux-native/payload
+          install -m 755 build-linux/plugin/separate-song.so artifacts/linux-native/payload/separate-song.so
+          install -m 755 scripts/install-linux.sh artifacts/linux-native/Install.sh
+          ldd build-linux/plugin/separate-song.so > artifacts/linux-native/dependencies.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OBS-Jukebox-Linux-native-x86_64
+          path: artifacts/linux-native
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Linux-audio-checks
+          path: artifacts/linux-qa
+          if-no-files-found: ignore

@@ -3,53 +3,89 @@ set -euo pipefail
 song_root="${0:A:h}"
 song_app="${1:-$HOME/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app}"
 song_obs="${2:-/Applications/OBS.app}"
-[[ -d "$song_obs" ]] || song_obs="$HOME/Applications/OBS.app"
-song_audit="$HOME/Library/Application Support/Separate Song/Install Logs/$(date +%Y%m%d-%H%M%S)-$(uuidgen)"
-mkdir -p "$song_audit/Backups"
-exec > >(tee "$song_audit/install.log") 2>&1
-print -r -- "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
-song_copy_count=0
-copy_file() {
-    (( song_copy_count += 1 ))
-    if [[ -e "$2" ]]; then cp -p "$2" "$song_audit/Backups/$song_copy_count-$(basename "$2")"; fi
-    cp "$1" "$2"
-    print -r -- "Installed: $2"
-    shasum -a 256 "$2"
-}
+if [[ $# -lt 2 && ! -d "$song_obs" ]]; then song_obs="$HOME/Applications/OBS.app"; fi
+song_app="${song_app:A}"
+song_obs="${song_obs:A}"
 finish() { print -r -- "$1"; if [[ -t 0 ]]; then read 'song_reply?Press Return to close. '; fi; }
 fail() { finish "$1"; exit 1; }
-[[ "$(uname -m)" == arm64 ]] || fail 'This build needs an Apple Silicon Mac.'
-[[ -f "$song_app/Contents/MacOS/Geometry Dash" ]] || fail "Geometry Dash was not found. Drag its app into Terminal after this script to use a custom Steam library."
-[[ -d "$song_obs" ]] || fail 'Install OBS Studio 32.2 for Apple Silicon first: https://obsproject.com/download'
-song_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$song_obs/Contents/Info.plist")
-[[ "$song_version" == 32.2.* ]] || fail "This build was tested with OBS 32.2.2. Your OBS version is $song_version."
-if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x OBS >/dev/null; then
-    fail 'Close Geometry Dash and OBS, then run Install again.'
+[[ "$(uname -s)" == Darwin ]] || fail 'Run this installer on macOS.'
+[[ -f "$song_app/Contents/MacOS/Geometry Dash" ]] || fail 'Geometry Dash was not found. Choose its application in your Steam library.'
+[[ -f "$song_obs/Contents/Info.plist" ]] || fail 'OBS Studio was not found. Install OBS Studio first or choose its application.'
+song_obs_executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$song_obs/Contents/Info.plist")
+[[ -f "$song_obs/Contents/MacOS/$song_obs_executable" ]] || fail 'The selected OBS application is incomplete.'
+song_plugin="$song_root/payload/separate-song.plugin/Contents/MacOS/separate-song"
+for song_file in "$song_root/payload/local.separate_song.geode" "$song_root/payload/fleym.nongd.geode" "$song_root/payload/separate-song.plugin/Contents/Info.plist" "$song_plugin"; do
+    [[ -s "$song_file" ]] || fail "The installer is incomplete: $song_file"
+done
+song_arch=$(uname -m)
+/usr/bin/lipo -verify_arch "$song_arch" "$song_plugin" >/dev/null 2>&1 || fail "This installer does not include a plugin for $song_arch."
+/usr/bin/lipo -verify_arch "$song_arch" "$song_obs/Contents/MacOS/$song_obs_executable" >/dev/null 2>&1 || fail 'Install the native OBS Studio build for this Mac before continuing.'
+if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x "$song_obs_executable" >/dev/null; then
+    fail 'Finish any OBS recording, close Geometry Dash and OBS, then click Install again.'
 fi
 song_frameworks="$song_app/Contents/Frameworks"
-[[ -w "$song_frameworks" ]] || fail 'Your account cannot write to this Steam installation. Install GD in a library owned by your account.'
+[[ -d "$song_frameworks" && -w "$song_frameworks" ]] || fail 'Your account cannot write to this Steam installation. Choose a Steam library owned by your account.'
+song_install_geode=0
 if [[ ! -f "$song_frameworks/Geode.dylib" ]]; then
+    song_install_geode=1
     [[ -f "$song_frameworks/libfmod.dylib" ]] || fail 'The original GD audio library is missing. Verify the game in Steam first.'
     [[ ! -e "$song_frameworks/restore_fmod.dylib" ]] || fail 'A partial Geode install already exists. Restore or repair it before installing.'
-    /bin/cp -p "$song_frameworks/libfmod.dylib" "$song_frameworks/restore_fmod.dylib"
-    /bin/cp "$song_root/payload/geode/Geode.dylib" "$song_frameworks/Geode.dylib"
-    /bin/cp "$song_root/payload/geode/GeodeBootstrapper.dylib" "$song_frameworks/GeodeBootstrapper.dylib"
-    /bin/mkdir -p "$song_app/Contents/geode/resources/geode.loader"
-    /usr/bin/ditto "$song_root/payload/geode/resources" "$song_app/Contents/geode/resources/geode.loader"
-    /bin/cp "$song_root/payload/geode/libfmod.dylib" "$song_frameworks/libfmod.dylib"
+    for song_file in Geode.dylib GeodeBootstrapper.dylib libfmod.dylib; do
+        [[ -s "$song_root/payload/geode/$song_file" ]] || fail "The installer is missing Geode's $song_file."
+    done
+    [[ -d "$song_root/payload/geode/resources" ]] || fail 'The installer is missing Geode resources.'
+fi
+song_audit="$HOME/Library/Application Support/OBS Jukebox/Install Logs/$(date +%Y%m%d-%H%M%S)-$(uuidgen)"
+mkdir -p "$song_audit/Backups" "$song_audit/Failed"
+exec > >(tee "$song_audit/install.log") 2>&1
+print -r -- 'OBS Jukebox 1.0.0' "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
+typeset -a song_targets song_previous
+song_success=0
+rollback() {
+    local song_result=$?
+    trap - EXIT
+    if (( ! song_success )); then
+        print 'Installation failed. Restoring changed files.'
+        local song_i
+        for (( song_i=${#song_targets}; song_i>=1; song_i-- )); do
+            if [[ -e "${song_targets[$song_i]}" ]]; then
+                /bin/mv "${song_targets[$song_i]}" "$song_audit/Failed/$song_i" || true
+            fi
+            if [[ "${song_previous[$song_i]}" == 1 ]]; then
+                /usr/bin/ditto "$song_audit/Backups/$song_i" "${song_targets[$song_i]}" || print -r -- "Restore manually: $song_audit/Backups/$song_i -> ${song_targets[$song_i]}"
+            fi
+        done
+    fi
+    exit "$song_result"
+}
+trap rollback EXIT
+copy_item() {
+    local song_source="$1" song_destination="$2" song_index=$(( ${#song_targets} + 1 )) song_existed=0
+    [[ ! -L "$song_destination" ]] || fail "Refusing to replace a symbolic link: $song_destination"
+    if [[ -e "$song_destination" ]]; then
+        /usr/bin/ditto "$song_destination" "$song_audit/Backups/$song_index"
+        song_existed=1
+    fi
+    song_targets+=("$song_destination")
+    song_previous+=("$song_existed")
+    /bin/mkdir -p "${song_destination:h}"
+    /usr/bin/ditto "$song_source" "$song_destination"
+    print -r -- "Installed: $song_destination"
+    if [[ -f "$song_destination" ]]; then /usr/bin/shasum -a 256 "$song_destination"; fi
+}
+if (( song_install_geode )); then
+    copy_item "$song_frameworks/libfmod.dylib" "$song_frameworks/restore_fmod.dylib"
+    copy_item "$song_root/payload/geode/Geode.dylib" "$song_frameworks/Geode.dylib"
+    copy_item "$song_root/payload/geode/GeodeBootstrapper.dylib" "$song_frameworks/GeodeBootstrapper.dylib"
+    copy_item "$song_root/payload/geode/resources" "$song_app/Contents/geode/resources/geode.loader"
+    copy_item "$song_root/payload/geode/libfmod.dylib" "$song_frameworks/libfmod.dylib"
     print 'Installed Geode 5.10.1.'
 else
     print 'Keeping your existing Geode installation.'
 fi
-/bin/mkdir -p "$song_app/Contents/geode/mods" "$HOME/Library/Application Support/obs-studio/plugins" "$HOME/Music/Separate Song"
-copy_file "$song_root/payload/fleym.nongd.geode" "$song_app/Contents/geode/mods/fleym.nongd.geode"
-copy_file "$song_root/payload/local.separate_song.geode" "$song_app/Contents/geode/mods/local.separate_song.geode"
-if [[ -d "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin" ]]; then
-    /usr/bin/ditto "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin" "$song_audit/Backups/separate-song.plugin"
-fi
-/usr/bin/ditto "$song_root/payload/separate-song.plugin" "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
-print -r -- "Installed: $HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
-shasum -a 256 "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin/Contents/MacOS/separate-song"
-/bin/cp "$song_root/Demo Song.mp3" "$HOME/Music/Separate Song/Demo Song.mp3"
-finish $'Installed! No administrator password was needed.\n\n1. Open GD and OBS.\n2. In OBS, Sources + > GD Alternate Song (once).\n3. In GD, right-click a Jukebox song for its purple OBS check.
-4. Leave monitoring off and exclude GD/system audio from the recording.\n\nThe included song is in Music/Separate Song. Add it in Jukebox if you want to try it. GD keeps its own selected song.'
+copy_item "$song_root/payload/fleym.nongd.geode" "$song_app/Contents/geode/mods/fleym.nongd.geode"
+copy_item "$song_root/payload/local.separate_song.geode" "$song_app/Contents/geode/mods/local.separate_song.geode"
+copy_item "$song_root/payload/separate-song.plugin" "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
+/usr/bin/shasum -a 256 "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin/Contents/MacOS/separate-song"
+song_success=1
+finish $'Installed!\n\n1. Open Geometry Dash and OBS.\n2. In OBS, add Sources > GD Sounds once. Keep Audio Monitoring off.\n3. In Jukebox, use the Game and OBS checkboxes to choose each song.\n4. In the pause menu, switch Game / OBS to adjust their volumes.\n\nGD Sounds includes game sound effects. Disable any duplicate GD audio capture in OBS.'
