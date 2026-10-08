@@ -418,10 +418,10 @@ class SongDownloadWait : public CCNode {
     std::chrono::steady_clock::time_point lastPoll{};
 public:
     static void begin(CCNode* parent, GJGameLevel* level, geode::Function<void()> ready) {
-        if (parent->getChildByID("separate-song-download-wait")) return;
+        if (parent->getChildByID("download-wait"_spr)) return;
         auto wait = new SongDownloadWait();
         wait->init(); wait->autorelease();
-        wait->setID("separate-song-download-wait");
+        wait->setID("download-wait"_spr);
         wait->level = level; wait->ready = std::move(ready);
         wait->start = std::chrono::steady_clock::now();
         wait->notice = Notification::create("Downloading game and OBS songs...", NotificationIcon::Loading, 0);
@@ -455,7 +455,7 @@ class $modify(SeparateSongInfo, LevelInfoLayer) {
     }
     void onPlay(CCObject* sender) {
         selectOffsetLevel(m_level);
-        if (getChildByID("separate-song-download-wait")) return;
+        if (getChildByID("download-wait"_spr)) return;
         auto result = jukebox_link::prepare(m_level, true);
         if (result.ready) LevelInfoLayer::onPlay(sender);
         else if (!result.error.empty()) FLAlertLayer::create("OBS Song", result.error, "OK")->show();
@@ -470,7 +470,7 @@ class $modify(SeparateSongPage, LevelPage) {
     }
     void onPlay(CCObject* sender) {
         selectOffsetLevel(m_level);
-        if (getChildByID("separate-song-download-wait")) return;
+        if (getChildByID("download-wait"_spr)) return;
         auto result = jukebox_link::prepare(m_level, true);
         if (result.ready) LevelPage::onPlay(sender);
         else if (!result.error.empty()) FLAlertLayer::create("OBS Song", result.error, "OK")->show();

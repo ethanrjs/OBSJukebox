@@ -91,13 +91,18 @@ struct Tap {
 };
 Tap* effects=nullptr;
 Tap* reference=nullptr;
+bool attachFailureLogged=false;
 
 }
 void install(){
     if(effects)return;
     auto engine=FMODAudioEngine::get();if(!engine || !engine->m_globalChannel)return;
     auto tap=new Tap;
-    if(!tap->attach(engine,engine->m_globalChannel,0)){delete tap;log::error("OBS effects tap could not attach");return;}
+    if(!tap->attach(engine,engine->m_globalChannel,0)){
+        delete tap;
+        if(!attachFailureLogged){attachFailureLogged=true;log::error("OBS effects tap could not attach");}
+        return;
+    }
     effects=tap;log::info("OBS effects tap attached at {} Hz",tap->rate);
     if(std::getenv("SEPARATE_SONG_CALIBRATE")){
         engine->setBackgroundMusicVolume(.5f);

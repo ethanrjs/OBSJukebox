@@ -8,7 +8,10 @@
   "name": "OBS Jukebox",
   "version": "v1.1.0",
   "developer": "babbur",
-  "description": "Separate GD/Song output for OBS",
+  "description": "Separate GD/Song output for OBS. Requires the OBS Jukebox OBS plugin.",
+  "links": {
+    "source": "https://github.com/ethanrjs/OBSJukebox"
+  },
   "settings": {
     "enabled": {
       "type": "bool",
