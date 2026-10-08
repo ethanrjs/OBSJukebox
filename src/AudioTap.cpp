@@ -74,12 +74,17 @@ struct Tap {
         if (state->functions->getclock(state, &block, &offset, &length) == FMOD_OK)
             dspClockOrigin.store(int64_t(timestamp) - int64_t(framesToNs(block, rate)),
                                  std::memory_order_relaxed);
-        if (!enabled.load(std::memory_order_relaxed))
+        if (!enabled.load(std::memory_order_relaxed)) {
+            sequence += (frames + 511) / 512;
             return;
+        }
         for (unsigned start = 0; start < frames; start += 512) {
             auto w = write.load(std::memory_order_relaxed);
-            if (w - read.load(std::memory_order_acquire) >= capacity)
+            if (w - read.load(std::memory_order_acquire) >= capacity) {
+                // Account for dropped packets so the receiver cannot join across missing audio.
+                sequence += (frames - start + 511) / 512;
                 break;
+            }
             auto &p = queue[w % capacity];
             p.frames = std::min(512u, frames - start);
             p.sequence = sequence++;

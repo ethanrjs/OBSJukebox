@@ -54,7 +54,11 @@ class Receiver {
     std::atomic<bool> stop{false};
     std::mutex mutex;
     LinkState state;
-    std::array<std::deque<SongLinkPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
+    struct PlaybackPacket {
+        SongLinkPacket packet;
+        uint64_t senderTimestamp;
+    };
+    std::array<std::deque<PlaybackPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
     std::deque<EffectsPacket> effects, pendingEffects;
     LinkClock clock;
     uint64_t session = 0, lastProbe = 0, lastSongReceived = 0;
@@ -82,16 +86,27 @@ class Receiver {
         state.connected = false;
     }
     void accept(SongLinkPacket p, uint64_t now) {
-        if (p.version >= 5 && !clock.translate(p.timestamp))
+        auto senderTimestamp = p.timestamp;
+        auto &voice = playback[p.channelID + 1];
+        auto existing = std::find_if(voice.begin(), voice.end(), [&](const auto &previous) {
+            return previous.senderTimestamp == senderTimestamp;
+        });
+        // Keep a sampled state's timeline position stable even if its pause/stop update arrives
+        // after a clock correction. Translated timestamps alone cannot identify the same sample.
+        if (existing != voice.end())
+            p.timestamp = existing->packet.timestamp;
+        else if (p.version >= 5 && !clock.translate(p.timestamp))
             return;
         if (p.timestamp > now + 100000000 || p.timestamp + 1000000000 < now)
             return;
-        auto &voice = playback[p.channelID + 1];
         auto next = std::lower_bound(voice.begin(), voice.end(), p.timestamp,
-                                     [](const auto &a, uint64_t t) { return a.timestamp < t; });
-        if (next != voice.end() && next->timestamp == p.timestamp)
-            return;
-        voice.insert(next, p);
+                                     [](const auto &a, uint64_t t) { return a.packet.timestamp < t; });
+        // FMOD's sampled position time can repeat within a mixer block. A later packet at
+        // that time may pause/stop the voice or change its gain; it is not necessarily a duplicate.
+        if (next != voice.end() && next->packet.timestamp == p.timestamp)
+            *next = {p, senderTimestamp};
+        else
+            voice.insert(next, {p, senderTimestamp});
         while (voice.size() > 256)
             voice.pop_front();
         if (!state.connected || p.timestamp >= state.packet.timestamp)
@@ -381,11 +396,11 @@ class Receiver {
             return window;
         auto &voice = playback[channel + 1];
         auto next = std::upper_bound(voice.begin(), voice.end(), start,
-                                     [](uint64_t t, const auto &p) { return t < p.timestamp; });
+                                     [](uint64_t t, const auto &p) { return t < p.packet.timestamp; });
         if (next != voice.begin())
-            window.front() = *std::prev(next);
-        for (; next != voice.end() && next->timestamp < end; ++next)
-            window.push_back(*next);
+            window.front() = std::prev(next)->packet;
+        for (; next != voice.end() && next->packet.timestamp < end; ++next)
+            window.push_back(next->packet);
         return window;
     }
     // A packet runs until the next packet in sequence starts, and its last sample blends into that
@@ -396,15 +411,19 @@ class Receiver {
         for (auto packet = effects.begin(); packet != effects.end(); ++packet) {
             const auto &p = *packet;
             auto after = std::next(packet);
-            const EffectsPacket *next = after != effects.end() && after->sampleRate == p.sampleRate &&
-                                                after->sequence == p.sequence + 1 &&
-                                                after->timestamp > p.timestamp
-                                            ? &*after
-                                            : nullptr;
+            double duration = double(p.frames) / p.sampleRate;
+            // Only join adjacent audio. Sequence numbers alone cannot distinguish a mixer stall
+            // from uninterrupted capture. Two source samples cover tap slew, clock slew and rounding.
+            const EffectsPacket *next =
+                after != effects.end() && after->sampleRate == p.sampleRate &&
+                        after->sequence == p.sequence + 1 && after->timestamp > p.timestamp &&
+                        std::abs((double(after->timestamp) - double(p.timestamp)) / 1e9 - duration) <=
+                            2.0 / p.sampleRate
+                    ? &*after
+                    : nullptr;
             double delta = (double(start) - double(p.timestamp)) / 1e9;
             double lastTime = double(p.frames - 1) / p.sampleRate;
-            double length = next ? (double(next->timestamp) - double(p.timestamp)) / 1e9
-                                 : double(p.frames) / p.sampleRate;
+            double length = next ? (double(next->timestamp) - double(p.timestamp)) / 1e9 : duration;
             if (delta >= length || delta + double(frames) / 48000 < 0)
                 continue;
             for (size_t i = 0; i < frames; ++i) {

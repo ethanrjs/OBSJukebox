@@ -67,6 +67,35 @@ static void pauseTest() {
     }
     receiver.reset();closeSocket(sender);
 }
+static void equalTimestampStopTest() {
+    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    auto stamp=os_gettime_ns();sendState(sender,p,stamp);
+    {
+        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        auto stoppedQuickly=[&]{
+            bool heard=false;
+            for(const auto& b:output())if(b.timestamp>=stamp+10000000)
+                for(float sample:b.samples)heard|=sample>.1f;
+            auto sent=os_gettime_ns();sendState(sender,p,stamp);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            bool silent=true;unsigned blocks=0;
+            for(const auto& b:output())if(b.wall>=sent+70000000){
+                ++blocks;for(float sample:b.samples)silent&=sample==0;
+            }
+            auto state=receiver->playbackWindow(stamp,stamp+1).front();
+            return heard && silent && blocks>0 && state.flags==p.flags && state.epoch==p.epoch;
+        };
+        p.flags=1;
+        check(stoppedQuickly(),"equal-timestamp pause silences music without waiting for staleness");
+        p.flags=3;stamp=os_gettime_ns();sendState(sender,p,stamp);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        p.flags=0;++p.epoch;p.path[0]=0;
+        check(stoppedQuickly(),"equal-timestamp stop with a new epoch replaces the playing state");
+    }
+    receiver.reset();closeSocket(sender);
+}
 static void delayedPositionTest() {
     receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
@@ -362,6 +391,61 @@ struct SyncedSender {
     }
 };
 
+static void v5ClockCorrectedPauseTest() {
+    receiver=std::make_unique<Receiver>();resetOutput();
+    auto sender=socket(AF_INET,SOCK_DGRAM,0);nonblocking(sender);
+    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    bool bound=sender!=BAD_SOCKET && bind(sender,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0;
+    SongLinkPacket p;p.sessionID=os_gettime_ns();sendState(sender,p,os_gettime_ns(),5);
+    auto reply=[&](uint64_t senderOffset,unsigned delayMs){
+        auto limit=os_gettime_ns()+1000000000;
+        while(os_gettime_ns()<limit){
+            ClockSyncPacket probe{};
+#ifdef _WIN32
+            int length=sizeof(addr);
+#else
+            socklen_t length=sizeof(addr);
+#endif
+            auto bytes=recvfrom(sender,reinterpret_cast<char*>(&probe),sizeof(probe),0,
+                reinterpret_cast<sockaddr*>(&addr),&length);
+            if(bytes==sizeof(probe) && probe.sessionID==p.sessionID && probe.kind==1){
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                probe.kind=2;probe.t2=probe.t3=probe.t1+senderOffset;
+                return sendto(sender,reinterpret_cast<const char*>(&probe),sizeof(probe),0,
+                    reinterpret_cast<sockaddr*>(&addr),length)==sizeof(probe);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    };
+    // Initial RTT is slow, then each reply gets faster, so both corrections are accepted.
+    bool synced=bound && reply(15000000,30) && reply(20000000,10);
+    check(synced,"v5 pause test exchanges clock probes");
+    if(synced){
+        auto stamp=os_gettime_ns();p.flags=3;p.position=1;p.epoch=718;
+        std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");sendState(sender,p,stamp,5);
+        {
+            SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            auto playing=receiver->get().packet;
+            bool corrected=reply(20000000,0);
+            auto pausedAt=os_gettime_ns();p.flags=1;sendState(sender,p,stamp,5);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            auto paused=receiver->get().packet;
+            bool heard=false,silent=true;unsigned count=0;
+            for(const auto& block:output()){
+                if(block.wall<pausedAt)for(float sample:block.samples)heard|=sample>.1f;
+                if(block.wall>pausedAt+70000000){
+                    ++count;for(float sample:block.samples)silent&=sample==0;
+                }
+            }
+            check(corrected && heard && silent && count && paused.flags==1 && paused.timestamp==playing.timestamp,
+                "v5 pause replaces a repeated sender timestamp across a clock correction");
+        }
+    }
+    receiver.reset();closeSocket(sender);
+}
+
 static void foreignClockTest(int64_t offset) {
     receiver=std::make_unique<Receiver>();resetOutput();
     {
@@ -594,18 +678,20 @@ static void tapClockDriftTest() {
 }
 // Back-to-back packets of a bright 3 kHz SFX, not aligned to OBS's sample grid. Each packet's
 // last sample must blend into the next packet's first; holding it instead crackles at ~94 Hz.
-static void effectsSeamTest() {
+static void effectsSeamTest(unsigned sampleRate) {
     receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
     sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    sendState(sender,SongLinkPacket{},os_gettime_ns()-200000000); // legacy SFX need a song sender first
     EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=os_gettime_ns();
     sendto(sender,reinterpret_cast<const char*>(&initial),36+initial.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
     auto base=os_gettime_ns(),first=base+7777;
     SongLinkPacket p;p.flags=1;sendState(sender,p,base-50000000);
-    auto tone=[](double frame){return .25*std::sin(frame*2*3.14159265358979*3000/48000);};
+    auto tone=[&](double frame){return .25*std::sin(frame*2*3.14159265358979*3000/sampleRate);};
+    unsigned frames=sampleRate/100;
     for(unsigned k=0;k<12;++k){
-        EffectsPacket e;e.sequence=100+k;e.frames=480;e.sampleRate=48000;e.timestamp=first+k*10000000ULL;
-        for(unsigned i=0;i<480;++i)e.samples[i*2]=e.samples[i*2+1]=float(tone(k*480.+i));
+        EffectsPacket e;e.sequence=100+k;e.frames=frames;e.sampleRate=sampleRate;e.timestamp=first+k*10000000ULL;
+        for(unsigned i=0;i<frames;++i)e.samples[i*2]=e.samples[i*2+1]=float(tone(k*double(frames)+i));
         sendto(sender,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -616,12 +702,38 @@ static void effectsSeamTest() {
         for(const auto& b:output())for(size_t i=0;i<480;++i){
             auto at=b.timestamp+i*1000000000/48000;
             if(at<first+10000000 || at>first+100000000)continue;
-            double u=double(at-first)*48000/1e9,whole=std::floor(u);
+            double u=double(at-first)*sampleRate/1e9,whole=std::floor(u);
             double expected=tone(whole)+(tone(whole+1)-tone(whole))*(u-whole);
             worst=std::max(worst,std::abs(b.samples[i*2]-expected));++count;
         }
-        check(count>4000 && worst<.0001,"effects blend across packet seams");
+        check(count>4000 && worst<.0001,sampleRate==44100?
+            "44.1 kHz effects blend across packet seams":"48 kHz effects blend across packet seams");
     }
+    receiver.reset();closeSocket(sender);
+}
+static void effectsGapTest() {
+    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);
+    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    sendState(sender,SongLinkPacket{},os_gettime_ns()-200000000); // legacy SFX need a song sender first
+    auto base=os_gettime_ns();
+    // Consecutive sequence numbers do not prove continuity: the producer may have stalled.
+    for(unsigned k=0;k<2;++k){
+        EffectsPacket e;e.sequence=100+k;e.frames=441;e.sampleRate=44100;e.timestamp=base+k*100000000ULL;
+        std::fill_n(e.samples,e.frames*2,k?0.f:.5f);
+        sendto(sender,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // Legacy effects are dated by receipt on Linux. Locate the actual first sample on the
+    // rendered timeline instead of assuming the sender's timestamp was left unchanged.
+    std::array<float,9600> observed{};
+    receiver->mixEffects(observed.data(),4800,base,1);
+    auto first=std::find(observed.begin(),observed.end(),.5f);
+    bool received=first!=observed.end();
+    auto mappedBase=base+uint64_t((first-observed.begin())/2)*1000000000/48000;
+    std::array<float,960> audio{};
+    receiver->mixEffects(audio.data(),480,mappedBase+50000000,1);
+    check(received && std::all_of(audio.begin(),audio.end(),[](float s){return s==0;}),
+        "SFX interpolation leaves real gaps silent at 44.1 kHz");
     receiver.reset();closeSocket(sender);
 }
 // GD's position runs 20 ms ahead of what OBS is playing (FMOD's output clock drifted). The
@@ -696,11 +808,11 @@ int main(){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();return failures?1:0;}
-    pauseTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();
-    foreignClockTest(3600000000000LL);
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();
+    v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);
     foreignClockTest(-int64_t(std::min<uint64_t>(os_gettime_ns()/2,3600000000000ULL)));
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
-    tapClockDriftTest();effectsSeamTest();driftCorrectionTest();senderTest();
+    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();
     receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();
     musicDeadlineTest(false);musicDeadlineTest(true);
