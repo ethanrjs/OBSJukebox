@@ -13,6 +13,7 @@ int main(int argc,char** argv) {
         Decoder decoder;
         std::array<float,960> audio{};
         auto audible=[&]{return std::any_of(audio.begin(),audio.end(),[](float x){return std::abs(x)>.00001f;});};
+        auto silent=[&]{return std::all_of(audio.begin(),audio.end(),[](float x){return std::isfinite(x) && std::abs(x)<=.00001f;});};
         auto utf8=std::filesystem::path(argv[i]).u8string();
         std::string path(reinterpret_cast<const char*>(utf8.data()),utf8.size());
         // These fixtures use miniaudio formats. Read their actual length instead of assuming
@@ -66,7 +67,7 @@ int main(int argc,char** argv) {
             if(!sought)pass=pass && !decoder.error.empty();
             audio.fill(1.f);
             decoder.render(audio.data(),480,1);
-            pass=pass && !audible();
+            pass=pass && silent();
         }
         pass=decoder.seek(0) && pass;
         decoder.render(audio.data(),480,1);
@@ -75,7 +76,7 @@ int main(int argc,char** argv) {
 
         pass=!decoder.seek(INFINITY) && pass;
         audio.fill(1.f);decoder.render(audio.data(),480,1);
-        pass=pass && !audible();
+        pass=pass && silent();
         pass=decoder.seek(0) && pass;
         decoder.render(audio.data(),480,1);
         decoder.render(audio.data(),480,1);
