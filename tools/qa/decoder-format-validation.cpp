@@ -10,8 +10,13 @@ static void fixture(const std::filesystem::path& path){
     put(uint32_t(44100));put(uint32_t(88200));put(uint16_t(2));put(uint16_t(16));out.write("data",4);put(size);
     for(uint32_t i=0;i<frames;++i){double hz=i<44100?440:880;put(int16_t(std::sin(6.283185307179586*hz*i/44100)*9000));}
 }
+#ifdef _WIN32
 int wmain(int argc,wchar_t** argv){
     if(argc==3 && std::wstring(argv[1])==L"--fixture"){fixture(argv[2]);return 0;}
+#else
+int main(int argc,char** argv){
+    if(argc==3 && std::string(argv[1])=="--fixture"){fixture(argv[2]);return 0;}
+#endif
     if(argc<2)return 2;int failures=0;
     for(int i=1;i<argc;++i){
         auto utf8=std::filesystem::path(argv[i]).u8string();std::string path(reinterpret_cast<const char*>(utf8.data()),utf8.size());

@@ -6,6 +6,9 @@ void rightClick(cocos2d::CCPoint point);
 struct Readiness { bool ready = true; std::string error; };
 void initialize();
 void refreshUI();
-void fill(Snapshot& state, GJGameLevel* level);
+struct MusicSource { bool channel = false; std::string path; std::vector<int> extraIDs; };
+struct LevelSongs { int initialID; std::string declaredIDs; };
+LevelSongs snapshotSongs(GJGameLevel* level);
+void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source);
 Readiness prepare(GJGameLevel* level, bool retry = false);
 }

@@ -26,6 +26,7 @@ fi
 song_frameworks="$song_app/Contents/Frameworks"
 [[ -d "$song_frameworks" && -w "$song_frameworks" ]] || fail 'Your account cannot write to this Steam installation. Choose a Steam library owned by your account.'
 song_install_geode=0
+[[ -f "$song_root/check-geode-version.pl" ]] || fail 'The installer is missing its Geode compatibility check. Download the complete package again.'
 if [[ ! -f "$song_frameworks/Geode.dylib" ]]; then
     song_install_geode=1
     [[ -f "$song_frameworks/libfmod.dylib" ]] || fail 'The original GD audio library is missing. Verify the game in Steam first.'
@@ -34,11 +35,61 @@ if [[ ! -f "$song_frameworks/Geode.dylib" ]]; then
         [[ -s "$song_root/payload/geode/$song_file" ]] || fail "The installer is missing Geode's $song_file."
     done
     [[ -d "$song_root/payload/geode/resources" ]] || fail 'The installer is missing Geode resources.'
+    song_geode_library="$song_root/payload/geode/Geode.dylib"
+else
+    song_geode_library="$song_frameworks/Geode.dylib"
 fi
+song_geode_version=$(/usr/bin/perl "$song_root/check-geode-version.pl" "$song_geode_library") || fail 'Geode compatibility could not be verified. Update or repair Geode with the official installer from https://geode-sdk.org (Geode 5.10.x or later 5.x), then try again. No installation files have been changed.'
+song_mods="$song_app/Contents/geode/mods"
+song_packages=$(/usr/bin/perl -MJSON::PP - "$song_mods" <<'PERL'
+use strict;
+use warnings;
+my ($directory) = @ARGV;
+my %installed;
+if (-d $directory) {
+    opendir my $mods, $directory or die "Cannot read installed mods: $!\n";
+    for my $name (sort grep { /\.geode\z/i } readdir $mods) {
+        my $path = "$directory/$name";
+        my $canonical = lc($name) eq 'fleym.nongd.geode' || lc($name) eq 'local.separate_song.geode';
+        my (@entries, $mod);
+        my $valid = eval {
+        die "Repair the installed package before continuing: $path\n" if !-f $path || $path =~ /[\r\n]/;
+        open my $listing, '-|', '/usr/bin/unzip', '-Z1', $path or die "Cannot inspect $path\n";
+        @entries = <$listing>;
+        close $listing or die "Cannot inspect $path\n";
+        chomp @entries;
+        die "Invalid or ambiguous mod.json in $path\n" unless (grep { $_ eq 'mod.json' } @entries) == 1;
+        open my $metadata, '-|', '/usr/bin/unzip', '-p', $path, 'mod.json' or die "Cannot read $path\n";
+        my $json = do { local $/; <$metadata> };
+        close $metadata or die "Cannot read $path\n";
+        $mod = JSON::PP->new->relaxed->decode($json);
+        die "Invalid mod.json in $path\n" unless ref($mod) eq 'HASH' && defined($mod->{id}) && !ref($mod->{id}) && $mod->{id} =~ /\A[a-z0-9_-]+\.[a-z0-9_.-]+\z/i;
+        1;
+        };
+        if (!$valid) { die $@ if $canonical; next; }
+        my $id = $mod->{id};
+        die "Unexpected mod ID in $path\n" if $canonical && "$id.geode" ne lc($name);
+        next unless $id eq 'fleym.nongd' || $id eq 'local.separate_song';
+        die "Refusing to replace or duplicate a symbolic link: $path\n" if -l $path;
+        die "Multiple installed packages have ID $id. Remove the duplicate before continuing.\n" if exists $installed{$id};
+        die "Invalid mod version in $path\n" unless defined($mod->{version}) && !ref($mod->{version}) && $mod->{version} =~ /\Av?\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.+-]+)?\z/;
+        if ($id eq 'fleym.nongd') {
+            die "Install Jukebox 3.8.0 from Geode before continuing.\n" unless $mod->{version} =~ /\Av?3\.8\.0\z/;
+            die "Installed Jukebox has no macOS support: $path\n" unless grep { $_ eq 'fleym.nongd.dylib' } @entries;
+        }
+        $installed{$id} = $path;
+    }
+    closedir $mods;
+}
+print(($installed{'fleym.nongd'} // '-'), "\n", ($installed{'local.separate_song'} // "$directory/local.separate_song.geode"));
+PERL
+) || fail 'Installed mod compatibility could not be verified. No installation files have been changed.'
+song_jukebox=${song_packages%%$'\n'*}
+song_mod_destination=${song_packages#*$'\n'}
 song_audit="$HOME/Library/Application Support/OBS Jukebox/Install Logs/$(date +%Y%m%d-%H%M%S)-$(uuidgen)"
 mkdir -p "$song_audit/Backups" "$song_audit/Failed"
 exec > >(tee "$song_audit/install.log") 2>&1
-print -r -- 'OBS Jukebox 1.0.0' "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
+print -r -- 'OBS Jukebox 1.1.0' "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
 typeset -a song_targets song_previous
 song_success=0
 rollback() {
@@ -79,12 +130,16 @@ if (( song_install_geode )); then
     copy_item "$song_root/payload/geode/GeodeBootstrapper.dylib" "$song_frameworks/GeodeBootstrapper.dylib"
     copy_item "$song_root/payload/geode/resources" "$song_app/Contents/geode/resources/geode.loader"
     copy_item "$song_root/payload/geode/libfmod.dylib" "$song_frameworks/libfmod.dylib"
-    print 'Installed Geode 5.10.1.'
+    print -r -- "Installed Geode $song_geode_version."
 else
-    print 'Keeping your existing Geode installation.'
+    print -r -- "Keeping your compatible Geode $song_geode_version installation."
 fi
-copy_item "$song_root/payload/fleym.nongd.geode" "$song_app/Contents/geode/mods/fleym.nongd.geode"
-copy_item "$song_root/payload/local.separate_song.geode" "$song_app/Contents/geode/mods/local.separate_song.geode"
+if [[ "$song_jukebox" == - ]]; then
+    copy_item "$song_root/payload/fleym.nongd.geode" "$song_mods/fleym.nongd.geode"
+else
+    print -r -- "Keeping your compatible Jukebox 3.8.0 installation: $song_jukebox"
+fi
+copy_item "$song_root/payload/local.separate_song.geode" "$song_mod_destination"
 copy_item "$song_root/payload/separate-song.plugin" "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
 /usr/bin/shasum -a 256 "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin/Contents/MacOS/separate-song"
 song_success=1

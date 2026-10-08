@@ -8,6 +8,7 @@
 #include <sys/resource.h>
 #endif
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -106,15 +107,34 @@ int main(int argc,char** argv){
         obs_source_dec_active(source);obs_source_release(source);obs_shutdown();return frames&&invalid==0?0:1;
     }
     socketsReady();auto sock=socket(AF_INET,SOCK_DGRAM,0);sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    SongLinkPacket packet;std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));std::strcpy(packet.song,"Runtime synthetic tone");std::strcpy(packet.status,"playing");packet.flags=3;packet.epoch=1;
+    nonblocking(sock);
+    std::atomic<bool> finishClock{false};
+    std::thread clockResponder([&]{
+        while(!finishClock){
+            ClockSyncPacket reply{};sockaddr_in from{};
+#ifdef _WIN32
+            int length=sizeof(from);
+#else
+            socklen_t length=sizeof(from);
+#endif
+            auto size=recvfrom(sock,reinterpret_cast<char*>(&reply),sizeof(reply),0,reinterpret_cast<sockaddr*>(&from),&length);
+            if(size==sizeof(reply)&&!memcmp(reply.magic,"GDCLK1\0",8)&&reply.kind==1){
+                reply.kind=2;reply.t2=os_gettime_ns();reply.t3=os_gettime_ns();
+                sendto(sock,reinterpret_cast<const char*>(&reply),sizeof(reply),0,reinterpret_cast<sockaddr*>(&from),length);
+            }else {fd_set readable;FD_ZERO(&readable);FD_SET(sock,&readable);timeval wait{};wait.tv_usec=1000;select(int(sock)+1,&readable,nullptr,nullptr,&wait);}
+        }
+    });
+    SongLinkPacket packet;packet.version=3;std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));std::strcpy(packet.song,"Runtime synthetic tone");std::strcpy(packet.status,"playing");packet.flags=3;packet.epoch=1;
     std::ofstream json(output/"runtime-results.json");json<<"{\"host\":\"Installed OBS libobs\",\"plugin\":\""<<std::filesystem::path(argv[1]).filename().string()<<"\",\"cases\":[\n";bool first=true;int failures=0;
     auto phase=[&](const char* name,double seconds,double expected,double pos,uint32_t flags,double rate=1,double offset=0,bool transmit=true,int effects=0,bool expectedMuted=false,bool expectEffectMean=false,bool advanceEpoch=true,double settleSeconds=.55){
         packet.position=pos;packet.flags=flags;packet.rate=rate;packet.offset=offset;if(advanceEpoch)packet.epoch++;
         auto start=Clock::now(),end=start+std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));uint64_t cpu=cpuTicks();capture.reset();bool reset=false;
         uint64_t effectClock=os_gettime_ns(),effectFrames=0;uint32_t sequence=0;
         while(Clock::now()<end){double elapsed=std::chrono::duration<double>(Clock::now()-start).count();packet.position=pos+((flags&2)?elapsed*rate:0);
-            if(transmit)sendto(sock,reinterpret_cast<const char*>(&packet),packet.version==2?SONG_LINK_V2_SIZE:sizeof(packet),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-            if(effects==1){EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames;++i)e.samples[i*2]=e.samples[i*2+1]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
+            packet.timestamp=os_gettime_ns();
+            if(transmit)sendto(sock,reinterpret_cast<const char*>(&packet),packet.version==2?SONG_LINK_V2_SIZE:packet.version==3?SONG_LINK_V3_SIZE:packet.version==4?SONG_LINK_V4_SIZE:sizeof(packet),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+            if(effects==1 && packet.version>=5){EffectsPacketV2 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),44+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
+            if(effects==1 && packet.version<5){EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames;++i)e.samples[i*2]=e.samples[i*2+1]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
             if(effects==2){
 
                 double jitter=(effectFrames/1024)%2?.006:0;
@@ -205,6 +225,18 @@ int main(int argc,char** argv){
         phase("failed_seek_effects_continue",1,-1,100,3,1,0,true,true,false,true);
         phase("failed_seek_restart_recovery",1,-1,0,3);
     }
+    std::memset(packet.path,0,sizeof(packet.path));std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));
+    packet.version=5;packet.sessionID=0x51414e4154495645ULL;
+    phase("v5_clock_synchronized_playback",1,440,0,3);
+    packet.triggerGain=0;phase("v5_trigger_volume_zero",1,0,0,3);
+    packet.triggerGain=.5f;packet.musicVolume=1;
+    auto gainResult=phase("v5_trigger_and_obs_independent_gain",1,-1,0,3);
+    if(gainResult.rms<.09||gainResult.rms>.105)++failures;
+    packet.triggerGain=1;packet.musicVolume=1;
+    phase("v5_pause_silence",1,0,0,1);
+    phase("v5_resume_playback",1,440,0,3);
+    phase("v5_effects_share_clock_mapping",1,-1,0,1,1,0,true,1);
+    finishClock=true;clockResponder.join();
     json<<"\n],\"failures\":"<<failures<<",\"scope\":\"Native source PCM callbacks; synthetic protocol; not physical audio or live Geometry Dash\"}\n";json.close();
     closeSocket(sock);obs_source_remove_audio_capture_callback(source,Capture::callback,&capture);obs_source_dec_active(source);obs_source_release(source);
     obs_shutdown();return failures?1:0;

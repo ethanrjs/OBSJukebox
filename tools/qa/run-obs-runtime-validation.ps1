@@ -20,6 +20,8 @@ if ($ObsDirectory.TrimEnd('\','/') -ne "$env:ProgramFiles\obs-studio") { throw '
 if ($LASTEXITCODE) { throw 'QA configure failed.' }
 & cmake --build "$root\build-windows\qa" --config Release --parallel 2
 if ($LASTEXITCODE) { throw 'QA build failed.' }
+& ctest --test-dir "$root\build-windows\qa" -C Release --output-on-failure
+if ($LASTEXITCODE) { throw 'Game identity regression failed.' }
 if (!$Mp3Path) {
     $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
     if ($ffmpeg) {
@@ -67,3 +69,22 @@ if ($Mp3Path) {
 }
 & "$root\build-windows\qa\Release\decoder-seek-validation.exe" @decoderFixtures | Tee-Object -FilePath (Join-Path $OutputDirectory 'decoder-seek-results.txt')
 if ($LASTEXITCODE) { throw 'Decoder seek regression failed.' }
+
+$formatTest = "$root\build-windows\qa\Release\decoder-format-validation.exe"
+$formatWave = Join-Path $OutputDirectory 'format-tone.wav'
+& $formatTest --fixture $formatWave
+if ($LASTEXITCODE) { throw 'Decoder format fixture generation failed.' }
+$formatFixtures = @($formatWave)
+$ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+if ($ffmpeg) {
+    foreach ($extension in @('mp3','ogg','flac','aac','m4a','aiff')) {
+        $fixture = Join-Path $OutputDirectory "format-tone.$extension"
+        & $ffmpeg.Source -hide_banner -loglevel error -i $formatWave -y $fixture
+        if ($LASTEXITCODE) { throw "Could not generate $extension format fixture." }
+        $formatFixtures += $fixture
+    }
+} else {
+    Write-Warning 'ffmpeg is unavailable; decoder format checks cover WAV only.'
+}
+& $formatTest @formatFixtures | Tee-Object -FilePath (Join-Path $OutputDirectory 'decoder-format-results.txt')
+if ($LASTEXITCODE) { throw 'Decoder format regression failed.' }

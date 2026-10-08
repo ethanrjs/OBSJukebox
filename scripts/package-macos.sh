@@ -29,6 +29,8 @@ cat > "$song_app/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 cp scripts/Install.command "$song_resources/Install.command"
+cp scripts/check-geode-version.pl "$song_resources/check-geode-version.pl"
+cp logo.png "$song_resources/logo.png"
 cp "$MOD_PACKAGE" "$song_resources/payload/local.separate_song.geode"
 cp "$JUKEBOX_PACKAGE" "$song_resources/payload/fleym.nongd.geode"
 ditto dist/separate-song.plugin "$song_resources/payload/separate-song.plugin"

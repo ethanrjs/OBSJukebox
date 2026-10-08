@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "artifacts/windows/installer-simplified-test"
 JUKebox_SHA = "A0ECA6C82C7FA6149B956A809A9058959957D7C4672368B6933EA030E641B621"
 parser = argparse.ArgumentParser()
-parser.add_argument("--exe", type=Path, default=ROOT / "artifacts/windows/release/OBS-Jukebox-1.0.0-Windows-Setup.exe")
+release_version = json.loads((ROOT / "mod.json").read_text(encoding="utf-8"))["version"].removeprefix("v")
+parser.add_argument("--exe", type=Path, default=ROOT / f"artifacts/windows/release/OBS-Jukebox-{release_version}-Windows-Setup.exe")
 args = parser.parse_args()
 exe = args.exe.resolve()
 run = OUTPUT / (datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])

@@ -6,7 +6,7 @@
   },
   "id": "local.separate_song",
   "name": "OBS Jukebox",
-  "version": "v1.0.0",
+  "version": "v1.1.0",
   "developer": "babbur",
   "description": "Separate GD/Song output for OBS",
   "settings": {
