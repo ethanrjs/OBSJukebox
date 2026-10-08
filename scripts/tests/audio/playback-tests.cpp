@@ -257,6 +257,31 @@ static void clockNoiseTest() {
     probe(t,t+3600000000000ULL,t+3600000000000ULL,t+100000); // sender clock jumped an hour
     check(changed,"a clock jump still recalibrates");
 }
+static void clockSlewTest() {
+    LinkClock clock;bool changed=false;
+    auto probe=[&](uint64_t sent,uint64_t delay){
+        ClockSyncPacket p;p.t1=sent;p.t2=sent+50000;p.t3=p.t2;
+        return clock.observe(p,sent+delay,changed);
+    };
+    uint64_t t=1000000000;
+    probe(t,100000);
+    t+=250000000;
+    uint64_t before=t+50000;clock.translate(before);
+    probe(t,300000); // accepted 0.3 ms probe suggests a 0.1 ms offset change
+    uint64_t after=t+50000;clock.translate(after);
+    check(after==before && !changed,"accepted clock corrections start without a timestamp jump");
+    uint64_t later=t+100050000;clock.translate(later);
+    auto correction=later-(t+100050000);
+    check(correction>0 && correction<=10000,"clock corrections slew at no more than 100 ppm");
+    // A correction in the opposite direction must also remain continuous and monotonic.
+    ClockSyncPacket p;p.t1=t+250000000;p.t2=p.t1+250000;p.t3=p.t2;
+    uint64_t oldTime=p.t3;clock.translate(oldTime);
+    clock.observe(p,p.t1+300000,changed);
+    uint64_t newTime=p.t3;clock.translate(newTime);
+    uint64_t next=p.t3+10000000;clock.translate(next);
+    check(newTime==oldTime && next>newTime && next-newTime>=9999000,
+        "negative clock corrections remain continuous and preserve packet order");
+}
 static void protocolTest() {
     receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);
     SongLinkPacket p;p.flags=3;p.position=1;
@@ -591,7 +616,7 @@ int main(){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();return failures?1:0;}
-    pauseTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();staleStatusEffectsTest();clockNoiseTest();protocolTest();
+    pauseTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();
     foreignClockTest(3600000000000LL);
     foreignClockTest(-int64_t(std::min<uint64_t>(os_gettime_ns()/2,3600000000000ULL)));
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();senderTest();
