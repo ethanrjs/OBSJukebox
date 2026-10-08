@@ -254,7 +254,13 @@ public:
         control->m_obsLabel->setID("obs-label"_spr);
         control->m_obsLabel->setScale(.25f);
         control->addChild(control->m_obsLabel);
+        control->scheduleUpdate();
         return control;
+    }
+    // Jukebox rebuilds the row's buttons menu when the Game song changes, dropping the checkbox.
+    // The scheduler runs before drawing, so re-syncing here restores it in the same frame.
+    void update(float) override {
+        if (auto ui = CellAccess::ui(m_cell)) sync(ui, m_checked);
     }
     void onSelect(CCObject*) { select(m_cell); }
     void sync(jukebox::NongCellUI* ui, bool checked) {
