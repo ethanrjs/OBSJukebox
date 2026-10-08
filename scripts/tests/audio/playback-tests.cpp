@@ -686,6 +686,11 @@ static void effectsSeamTest(unsigned sampleRate) {
     sendto(sender,reinterpret_cast<const char*>(&initial),36+initial.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
     auto base=os_gettime_ns(),first=base+7777;
+    // Linux dates legacy effects by receipt. A ramp ending well before the seams reveals that
+    // shift exactly: its value at any rendered time is the time since the ramp started.
+    EffectsPacket marker;marker.sequence=50;marker.frames=512;marker.sampleRate=8000;marker.timestamp=base-100000000;
+    for(unsigned i=0;i<512;++i)marker.samples[i*2]=marker.samples[i*2+1]=i/1024.f;
+    sendto(sender,reinterpret_cast<const char*>(&marker),36+marker.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
     SongLinkPacket p;p.flags=1;sendState(sender,p,base-50000000);
     auto tone=[&](double frame){return .25*std::sin(frame*2*3.14159265358979*3000/sampleRate);};
     unsigned frames=sampleRate/100;
@@ -695,18 +700,21 @@ static void effectsSeamTest(unsigned sampleRate) {
         sendto(sender,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::array<float,2> ramp{};
+    auto probe=marker.timestamp+32000000;receiver->mixEffects(ramp.data(),1,probe,1);
+    auto mapped=first+(int64_t(probe)-int64_t(std::llround(ramp[0]*1024e9/8000))-int64_t(marker.timestamp));
     {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         std::this_thread::sleep_for(std::chrono::milliseconds(180));
         double worst=0;unsigned count=0;
         for(const auto& b:output())for(size_t i=0;i<480;++i){
             auto at=b.timestamp+i*1000000000/48000;
-            if(at<first+10000000 || at>first+100000000)continue;
-            double u=double(at-first)*sampleRate/1e9,whole=std::floor(u);
+            if(at<mapped+10000000 || at>mapped+100000000)continue;
+            double u=(double(at)-double(mapped))*sampleRate/1e9,whole=std::floor(u);
             double expected=tone(whole)+(tone(whole+1)-tone(whole))*(u-whole);
             worst=std::max(worst,std::abs(b.samples[i*2]-expected));++count;
         }
-        check(count>4000 && worst<.0001,sampleRate==44100?
+        check(ramp[0]>0 && count>4000 && worst<.0001,sampleRate==44100?
             "44.1 kHz effects blend across packet seams":"48 kHz effects blend across packet seams");
     }
     receiver.reset();closeSocket(sender);
