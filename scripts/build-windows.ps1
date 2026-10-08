@@ -1,5 +1,6 @@
 param(
     [string]$ObsDirectory = "$env:ProgramFiles\obs-studio",
+    [string]$GeodeSdk,
     [string]$Configuration = 'Release',
     [int]$Parallel = 4,
     [switch]$SkipMod
@@ -14,8 +15,17 @@ $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Componen
 if (!$vs) { throw 'Visual Studio 2022 C++ Build Tools are required.' }
 $msvc = Get-ChildItem -LiteralPath "$vs\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
 $nativeTools = Join-Path $msvc.FullName 'bin\Hostx64\x64'
-$sdk = Join-Path $root 'tools\geode-sdk'
-$sdkVersion = (Get-Content -LiteralPath (Join-Path $sdk 'VERSION') -Raw).Trim()
+$requiredSdkVersion = (Get-Content -LiteralPath (Join-Path $root 'mod.json') -Raw | ConvertFrom-Json).geode.TrimStart('v')
+if (!$GeodeSdk) {
+    $GeodeSdk = Join-Path $root "tools\geode-sdk$requiredSdkVersion"
+    if (!(Test-Path -LiteralPath (Join-Path $GeodeSdk 'VERSION'))) { $GeodeSdk = Join-Path $root 'tools\geode-sdk' }
+}
+$sdk = (Resolve-Path -LiteralPath $GeodeSdk).Path
+$sdkVersion = (Get-Content -LiteralPath (Join-Path $sdk 'VERSION') -Raw).Trim().TrimStart('v')
+if ($sdkVersion -ne $requiredSdkVersion) {
+    throw "This release requires Geode SDK $requiredSdkVersion; $sdk contains $sdkVersion. Pass -GeodeSdk with the matching checkout."
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'downloads') | Out-Null
 $loaderDirectory = Join-Path $root "tools\geode-windows-$sdkVersion"
 if (!(Test-Path -LiteralPath "$loaderDirectory\Geode.lib")) {
     $zip = Join-Path $root "downloads\geode-v$sdkVersion-win.zip"

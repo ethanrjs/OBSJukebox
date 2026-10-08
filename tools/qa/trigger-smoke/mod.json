@@ -1,0 +1,9 @@
+{
+  "geode": "5.10.1",
+  "gd": { "mac": "2.2081" },
+  "id": "local.jukebox_trigger_smoke",
+  "name": "Isolated Jukebox Trigger Smoke",
+  "version": "v0.1.0",
+  "developer": "local QA",
+  "description": "Environment-gated bounded test-only native trigger runner"
+}

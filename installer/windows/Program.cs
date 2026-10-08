@@ -12,6 +12,8 @@ namespace SeparateSongSetup;
 
 static class Program
 {
+    internal const string ReleaseVersion = "1.1.0";
+    internal const string ProductName = "OBS Jukebox " + ReleaseVersion;
     [STAThread]
     static int Main(string[] args)
     {
@@ -133,7 +135,7 @@ sealed class ChangedFile
 }
 sealed class InstallRecord
 {
-    public string Product { get; set; } = "OBS Jukebox 1.0.0";
+    public string Product { get; set; } = Program.ProductName;
     public string GD { get; set; } = "";
     public string OBS { get; set; } = "";
     public string Status { get; set; } = "installing";
@@ -142,6 +144,7 @@ sealed class InstallRecord
 
 static class Engine
 {
+    static bool IsKnownProduct(string product) => product == Program.ProductName || product is "OBS Jukebox 1.0.0" or "Separate Song 1.0.0";
     static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     public static string Hash(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
     static string HashFile(string path) { using var s = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(s)); }
@@ -192,7 +195,7 @@ static class Engine
         try
         {
             using var client=new System.Net.Http.HttpClient { Timeout=TimeSpan.FromSeconds(60) };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("OBS-Jukebox-Setup/1.0.0");
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("OBS-Jukebox-Setup/" + Program.ReleaseVersion);
             byte[] bytes=client.GetByteArrayAsync(JukeboxUrl).GetAwaiter().GetResult();
             if(Hash(bytes)!=JukeboxHash)throw new IOException("Jukebox download verification failed. No downloaded files were installed.");
             if(PackageVersion(bytes,"fleym.nongd")!="3.8.0")throw new IOException("Jukebox download has unexpected metadata.");
@@ -207,7 +210,7 @@ static class Engine
         {
             string path=o.Manifest??File.ReadAllText(Path.Combine(o.StateRoot,"latest-manifest.txt")).Trim();
             var record=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(path));
-            return record is { Status: "installed" } && (record.Product=="OBS Jukebox 1.0.0" || record.Product=="Separate Song 1.0.0");
+            return record is { Status: "installed" } && IsKnownProduct(record.Product);
         }
         catch(IOException) { return false; }
         catch(UnauthorizedAccessException) { return false; }
@@ -246,8 +249,8 @@ static class Engine
             Add(Path.Combine(o.GD,"geode","mods","fleym.nongd.geode"),o.DownloadedJukebox,"Jukebox 3.8.0 (requested download)");
         }
         byte[] mod=payload["mods/local.separate_song.geode"];
-        if(PackageVersion(mod,"local.separate_song")!="1.0.0") throw new IOException("Unexpected OBS Jukebox payload version.");
-        Add(Path.Combine(o.GD,"geode","mods","local.separate_song.geode"),mod,"OBS Jukebox mod 1.0.0");
+        if(PackageVersion(mod,"local.separate_song")!=Program.ReleaseVersion) throw new IOException("Unexpected OBS Jukebox payload version.");
+        Add(Path.Combine(o.GD,"geode","mods","local.separate_song.geode"),mod,"OBS Jukebox mod " + Program.ReleaseVersion);
         bool portable = File.Exists(Path.Combine(o.OBS,"portable_mode.txt")) || File.Exists(Path.Combine(o.OBS,"portable_mode"));
         string plugin = portable ? Path.Combine(o.OBS,"obs-plugins","64bit","separate-song.dll") : Path.Combine(o.PluginRoot,"separate-song","bin","64bit","separate-song.dll");
         Add(plugin,payload["obs/separate-song.dll"],"Native OBS source GD Sounds");
@@ -277,7 +280,13 @@ static class Engine
             if(existing==null)
             {
                 string name=defaultName;
-                if(sources.OfType<JsonObject>().Any(s=>s["name"]?.ToString()==name)) name=defaultName+" (OBS Jukebox)";
+                var names=sources.OfType<JsonObject>().Select(s=>s["name"]?.ToString()).ToHashSet(StringComparer.Ordinal);
+                if(names.Contains(name))
+                {
+                    string fallback=defaultName+" (OBS Jukebox)";
+                    name=fallback;
+                    for(int suffix=2;names.Contains(name);suffix++) name=fallback+" "+suffix;
+                }
                 existing=new JsonObject { ["name"]=name,["uuid"]=Guid.NewGuid().ToString(),["id"]=type,["versioned_id"]=type,["settings"]=new JsonObject(),["mixers"]=255,["sync"]=0,["flags"]=0,["volume"]=1.0,["balance"]=0.5,["enabled"]=true,["muted"]=false,["monitoring_type"]=0,["hotkeys"]=new JsonObject(),["private_settings"]=new JsonObject() };
                 sources.Add(existing); modified=true;
             }
@@ -289,7 +298,8 @@ static class Engine
             {
                 var settings=scene["settings"] as JsonObject??throw new IOException("Missing scene settings.");
                 var items=settings["items"] as JsonArray??new JsonArray(); if(settings["items"]==null)settings["items"]=items;
-                var item=items.OfType<JsonObject>().FirstOrDefault(i=>i["source_uuid"]?.ToString()==uuid || i["name"]?.ToString()==oldName);
+                var item=items.OfType<JsonObject>().FirstOrDefault(i=>i["source_uuid"]?.ToString()==uuid)
+                    ??items.OfType<JsonObject>().FirstOrDefault(i=>string.IsNullOrEmpty(i["source_uuid"]?.ToString()) && i["name"]?.ToString()==oldName);
                 if(item!=null){Set(item,"name",JsonValue.Create(sourceName));Set(item,"source_uuid",JsonValue.Create(uuid));continue;}
                 int next=items.OfType<JsonObject>().Select(i=>i["id"]?.GetValue<int>()??0).DefaultIfEmpty(0).Max()+1;
                 items.Add(new JsonObject { ["name"]=sourceName,["source_uuid"]=uuid,["id"]=next,["visible"]=true,["locked"]=true,["rot"]=0.0,["pos"]=new JsonObject{["x"]=0.0,["y"]=0.0},["scale"]=new JsonObject{["x"]=1.0,["y"]=1.0},["align"]=5,["bounds_type"]=0,["bounds_align"]=0,["bounds"]=new JsonObject{["x"]=0.0,["y"]=0.0},["crop_left"]=0,["crop_top"]=0,["crop_right"]=0,["crop_bottom"]=0,["private_settings"]=new JsonObject() });
@@ -394,7 +404,7 @@ static class Engine
         if(o.Manifest==null && !CanUndo(o)) { log("There is no previous installation to undo on this computer."); return; }
         string path=o.Manifest??(File.Exists(Path.Combine(o.StateRoot,"latest-manifest.txt"))?File.ReadAllText(Path.Combine(o.StateRoot,"latest-manifest.txt")).Trim():throw new IOException("There is no previous installation to undo on this computer."));
         var record=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(path))??throw new IOException("Invalid manifest.");
-        if(record.Product!="OBS Jukebox 1.0.0" && record.Product!="Separate Song 1.0.0") throw new IOException("Not an OBS Jukebox installation manifest.");
+        if(!IsKnownProduct(record.Product)) throw new IOException("Not an OBS Jukebox installation manifest.");
         if(record.Status!="installed") throw new IOException("This transaction is not installed: "+record.Status);
         if(o.DryRun) { foreach(var f in record.Files) log("Would restore/remove if unchanged: "+f.Destination); return; }
         o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped);

@@ -15,7 +15,7 @@ Separate GD/Song output for OBS. Also keeps sound effects. No driver/audio cable
 
 Done! Change OBS/Game volume in pause menu. Other options in geode mod menu.
 
-Installer creates a new source in OBS.
+On Windows, the installer creates a source in OBS. On macOS, add **GD Sounds** once after installation.
 
 <img width="111" height="233" alt="image" src="https://github.com/user-attachments/assets/3af2ad0d-5e2f-489b-814f-e33b7ae55eb9" />
 
@@ -27,4 +27,4 @@ Toggle between Game/OBS volume control in pause menu.
 
 ## Compatibility
 
-MacOS / Linux coming very shortly.
+Windows x64 and macOS 13+ (Apple Silicon) are supported. Linux support through Proton is experimental.

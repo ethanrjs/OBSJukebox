@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+song_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${1:-}" == --cli ]]; then
+    shift
+    exec bash "$song_root/Install.sh" "$@"
+fi
+if (($#)); then
+    printf 'Usage: ./OBS-Jukebox-Setup [--cli [Install.sh options]]\n' >&2
+    exit 2
+fi
+if ! command -v python3 >/dev/null || ! python3 -c 'import tkinter' >/dev/null 2>&1; then
+    song_message="OBS Jukebox Setup needs Python 3 and Tk. On Ubuntu/Debian: sudo apt install python3-tk. On Fedora: sudo dnf install python3-tkinter. You can also run bash Install.sh from this folder to use the terminal installer."
+    printf '%s\n' "$song_message" >&2
+    if command -v zenity >/dev/null; then zenity --error --title='OBS Jukebox Setup' --text="$song_message" || true
+    elif command -v kdialog >/dev/null; then kdialog --error "$song_message" --title='OBS Jukebox Setup' || true
+    fi
+    exit 1
+fi
+exec python3 "$song_root/installer.py" "$@"

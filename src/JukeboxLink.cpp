@@ -1,4 +1,5 @@
 #include "JukeboxLink.hpp"
+#include "PlaybackIdentity.hpp"
 #include <Geode/utils/Keyboard.hpp>
 #include <jukebox/ui/list/nong_cell.hpp>
 #include <jukebox/events/start_download.hpp>
@@ -11,6 +12,7 @@
 #include <unordered_map>
 #include <chrono>
 #include <filesystem>
+#include <cctype>
 
 using namespace geode::prelude;
 namespace separate_song::jukebox_link {
@@ -132,6 +134,18 @@ Choice resolved(Choice c) {
     return c;
 }
 int songID(GJGameLevel* level) { return level->m_songID > 0 ? level->m_songID : -level->m_audioTrack-1; }
+std::string normalizedMusicPath(const std::string& path) {
+    if (path.empty()) return {};
+    auto full = CCFileUtils::get()->fullPathForFilename(path.c_str(), false);
+    try {
+        auto value = string::pathToString(std::filesystem::u8path(full).lexically_normal());
+        std::replace(value.begin(), value.end(), '\\', '/');
+#ifdef GEODE_IS_WINDOWS
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+#endif
+        return value;
+    } catch (const std::filesystem::filesystem_error&) { return {}; }
+}
 std::string download(Choice c, bool retry) {
     c = resolved(c);
     if (exists(c.path)) return "";
@@ -305,10 +319,31 @@ Readiness prepare(GJGameLevel* level, bool retry) {
     if (!ready) invalidate(id);
     return {ready, ""};
 }
-void fill(Snapshot& state, GJGameLevel* level) {
+LevelSongs snapshotSongs(GJGameLevel* level) {
+    return {songID(level), std::string(level->m_songIDs)};
+}
+void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
     state.path.clear(); state.song.clear();
-    if (!level) return;
-    const auto& cached = forPlayback(songID(level));
+    if (!songs) return;
+    int id = songs->initialID;
+    if (source.channel) {
+        if (source.path.empty()) return;
+        std::vector<MusicCandidate> candidates;
+        auto ids = levelSongIDs(id, songs->declaredIDs);
+        for (int candidate : source.extraIDs)
+            if (std::find(ids.begin(), ids.end(), candidate) == ids.end()) ids.push_back(candidate);
+        for (int candidate : ids)
+            candidates.push_back({candidate, normalizedMusicPath(forPlayback(candidate).game.path)});
+        auto matched = songForPath(normalizedMusicPath(source.path), candidates);
+        if (!matched) {
+            state.song = "In-game song";
+            auto full = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
+            if (exists(full)) state.path = full;
+            return;
+        }
+        id = *matched;
+    }
+    const auto& cached = forPlayback(id);
     const auto& obs = cached.obs ? *cached.obs : cached.game;
     state.song = obs.name;
     if (cached.obs ? cached.obsReady : cached.gameReady) state.path = obs.path;
