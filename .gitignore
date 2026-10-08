@@ -11,7 +11,7 @@ artifacts/
 installer/windows/payload.zip
 tools/*
 !tools/qa/
-tools/qa/__pycache__/
+__pycache__/
 downloads/
 backups/
 demo-recording/

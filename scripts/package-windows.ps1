@@ -56,7 +56,7 @@ try {
     foreach ($name in @('src','obs-plugin','resources','vendor','installer','scripts')) {
         $dest = Join-Path $source $name
         New-Item -ItemType Directory -Path $dest -Force | Out-Null
-        Get-ChildItem -LiteralPath (Join-Path $projectRoot $name) -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' -and $_.Name -ne 'payload.zip' } | ForEach-Object {
+        Get-ChildItem -LiteralPath (Join-Path $projectRoot $name) -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj|__pycache__)[\\/]' -and $_.Name -ne 'payload.zip' } | ForEach-Object {
             $relative = [IO.Path]::GetRelativePath((Join-Path $projectRoot $name), $_.FullName)
             $target = Join-Path $dest $relative
             New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
