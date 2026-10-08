@@ -63,6 +63,17 @@ bool exists(const std::string& path) {
     }
 }
 std::filesystem::path base() { return Loader::get()->getLoadedMod("fleym.nongd")->getSaveDir(); }
+// CellAccess and UIAccess read Jukebox's protected fields using the vendored 3.8.0 headers.
+// Geode lets the dependency update to any newer 3.x, so skip the row UI on other builds.
+bool cellLayoutMatches() {
+    static const bool matches = [] {
+        auto version = Loader::get()->getLoadedMod("fleym.nongd")->getVersion();
+        bool ok = version.getMajor() == 3 && version.getMinor() == 8 && version.getPatch() == 0;
+        if (!ok) log::warn("Jukebox {} is not 3.8.0; OBS checkboxes in Jukebox are disabled", version.toVString());
+        return ok;
+    }();
+    return matches;
+}
 std::string key(int id, const std::string& uid) { return fmt::format("{}:{}", id, uid); }
 matjson::Value saved() { return Mod::get()->getSavedValue<matjson::Value>("obs-selections", matjson::Value::object()); }
 std::optional<Choice> choice(int id) {
@@ -228,19 +239,19 @@ public:
         auto control = new OBSRowControl();
         if (!control->init()) { delete control; return nullptr; }
         control->autorelease(); control->m_cell = cell;
-        control->setID("separate-song-control"); control->setZOrder(20);
+        control->setID("control"_spr); control->setZOrder(20);
         control->m_sprite = CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
         control->m_sprite->setScale(.7f);
         control->m_checkbox = CCMenuItemSpriteExtra::create(control->m_sprite, control, menu_selector(OBSRowControl::onSelect));
-        control->m_checkbox->setID("separate-song-checkbox");
+        control->m_checkbox->setID("checkbox"_spr);
         control->m_checkbox->setContentSize({30.f, 30.f});
         control->m_sprite->setPosition({15.f, 15.f});
         control->m_gameLabel = CCLabelBMFont::create("Game", "bigFont.fnt");
-        control->m_gameLabel->setID("separate-song-game-label");
+        control->m_gameLabel->setID("game-label"_spr);
         control->m_gameLabel->setScale(.25f);
         control->addChild(control->m_gameLabel);
         control->m_obsLabel = CCLabelBMFont::create("OBS", "bigFont.fnt");
-        control->m_obsLabel->setID("separate-song-obs-label");
+        control->m_obsLabel->setID("obs-label"_spr);
         control->m_obsLabel->setScale(.25f);
         control->addChild(control->m_obsLabel);
         return control;
@@ -252,10 +263,13 @@ public:
         if (m_checkbox->getParent() != menu) {
             m_checkbox->removeFromParent();
             menu->insertAfter(m_checkbox.data(), gameCheck);
-            menu->setContentWidth(menu->getContentWidth()+35.f);
-            if (auto info = UIAccess::songInfo(ui)) {
-                info->setContentWidth(std::max(0.f, info->getContentWidth()-35.f));
-                info->updateLayout();
+            if (!menu->getUserFlag("widened"_spr)) {
+                menu->setUserFlag("widened"_spr);
+                menu->setContentWidth(menu->getContentWidth()+35.f);
+                if (auto info = UIAccess::songInfo(ui)) {
+                    info->setContentWidth(std::max(0.f, info->getContentWidth()-35.f));
+                    info->updateLayout();
+                }
             }
             menu->updateLayout();
         }
@@ -275,13 +289,14 @@ void paint(jukebox::NongCell* cell) {
     bool checked = false;
     if (auto c = choice(CellAccess::id(cell)))
         checked = c->uid == CellAccess::uid(cell) || (c->original && CellAccess::original(cell));
-    auto control = static_cast<OBSRowControl*>(cell->getChildByID("separate-song-control"));
+    auto control = static_cast<OBSRowControl*>(cell->getChildByID("control"_spr));
     if (!control) { control = OBSRowControl::create(cell); if (!control) return; cell->addChild(control); }
     control->sync(ui, checked);
 }
 void select(jukebox::NongCell* cell) {
+    auto ui = CellAccess::ui(cell); if (!ui) return;
     Choice c; c.id = CellAccess::id(cell); c.uid = CellAccess::uid(cell); c.original = CellAccess::original(cell);
-    c.name = CellAccess::ui(cell)->m_songName;
+    c.name = ui->m_songName;
     if (auto old = choice(c.id); old && (old->uid == c.uid || (old->original && c.original))) {
         clear(c.id); Notification::create("OBS selection cleared", NotificationIcon::Info)->show(); return;
     }
@@ -300,6 +315,7 @@ void select(jukebox::NongCell* cell) {
 
 void refreshUI() {
     if (auto play = PlayLayer::get(); play && !play->m_isPaused) return;
+    if (!cellLayoutMatches()) return;
     auto scene = CCDirector::get()->getRunningScene(); if (!scene) return;
     auto list = findList(scene); if (!list) return;
     for (auto cell : cells(list)) paint(cell);
@@ -394,6 +410,7 @@ void initialize() {
     }).leak();
 }
 void rightClick(CCPoint point){
+    if(!cellLayoutMatches())return;
     auto scene=CCDirector::get()->getRunningScene();auto list=findList(scene);if(!list || !unobscured(scene,list))return;
     auto scroll=list->getChildByID("list");if(!scroll)return;
     if(!CCRect{{0,0},scroll->getContentSize()}.containsPoint(scroll->convertToNodeSpace(point)))return;

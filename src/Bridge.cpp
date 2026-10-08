@@ -3,6 +3,15 @@
 #include <cstring>
 #include <algorithm>
 namespace separate_song {
+namespace {
+// Copies at most size-1 bytes without splitting a UTF-8 sequence; the rest of out stays zeroed.
+template <size_t N> void copyText(char (&out)[N], const std::string& text) {
+    size_t length = std::min(text.size(), N - 1);
+    if (length < text.size())
+        while (length && (static_cast<unsigned char>(text[length]) & 0xC0) == 0x80) --length;
+    std::memcpy(out, text.data(), length);
+}
+}
 Bridge::~Bridge() {
     stop=true;if(worker.joinable())worker.join();
     if(socket!=BAD_SOCKET)closeSocket(socket);
@@ -46,9 +55,9 @@ void Bridge::publish(const Snapshot& s) {
     p.loopStart=s.loopStart;p.loopEnd=s.loopEnd;
     p.channelID=s.channelID;p.triggerGain=s.triggerGain;p.fadeCount=std::min(s.fadeCount,8u);
     std::copy_n(s.fades.begin(),p.fadeCount,p.fades);
-    std::strncpy(p.status,s.status.c_str(),sizeof(p.status)-1);
-    std::strncpy(p.level,s.level.c_str(),sizeof(p.level)-1);
-    std::strncpy(p.song,s.song.c_str(),sizeof(p.song)-1);
+    copyText(p.status,s.status);
+    copyText(p.level,s.level);
+    copyText(p.song,s.song);
     if(s.path.size()<sizeof(p.path))std::strncpy(p.path,s.path.c_str(),sizeof(p.path)-1);else p.flags&=~2u;
     sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(receiverPort());address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
     sendto(socket,reinterpret_cast<const char*>(&p),sizeof(p),0,reinterpret_cast<sockaddr*>(&address),sizeof(address));
