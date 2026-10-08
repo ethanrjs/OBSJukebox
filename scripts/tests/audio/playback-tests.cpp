@@ -86,30 +86,40 @@ static void delayedPositionTest() {
 }
 static void transitionTest() {
     receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
-    auto base=os_gettime_ns();
-    struct Event {uint64_t at;SongLinkPacket p;};
+    auto base=os_gettime_ns()-10000000; // keeps the last event under the receiver's 100 ms future limit
+    // crossfades: whether the event starts a declick crossfade, whose frames are not compared
+    struct Event {uint64_t at;SongLinkPacket p;bool crossfades;};
     std::vector<Event> events;
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
-    auto add=[&](int milliseconds){auto at=uint64_t(int64_t(base)+int64_t(milliseconds)*1000000);events.push_back({at,p});sendState(sender,p,at);};
+    auto add=[&](int milliseconds,bool crossfades=true){
+        auto at=uint64_t(int64_t(base)+int64_t(milliseconds)*1000000);events.push_back({at,p,crossfades});sendState(sender,p,at);
+    };
     add(-100);
-    p.flags=1;add(35);
-    p.flags=3;p.position=1.4;add(40);
-    p.flags=1;add(50);
-    p.flags=3;p.epoch=2;p.position=2;p.offset=.1;p.rate=2;p.musicVolume=.5;add(60);
-    p.epoch=3;p.position=2.035;add(65);
-    p.position=2.045;p.musicVolume=.25;add(70);
-    p.position=2.055;
-    std::strcpy(p.path,"artifacts/audio-tests/negative.wav");add(75);
-    p.flags=0;add(85);
+    // Events sit 10 ms apart: a 5 ms crossfade, then 5 ms compared exactly. The first leaves the
+    // source time to start before it.
+    p.flags=1;add(35);                                             // pause
+    p.flags=3;p.position=1.4;add(45);                              // resume
+    p.flags=1;add(55);                                             // death
+    p.flags=3;p.epoch=2;p.position=2;p.offset=.1;p.rate=2;p.musicVolume=.5;add(65); // restart
+    p.epoch=3;p.position=2.035;add(75);                            // seek
+    p.position=2.055;p.musicVolume=.25;add(85,false);              // gain change only
+    p.position=2.075;
+    std::strcpy(p.path,"artifacts/audio-tests/negative.wav");add(95); // song change
+    p.flags=0;add(105);                                            // disable
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
     {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(210));
+        std::this_thread::sleep_for(std::chrono::milliseconds(230));
+        constexpr uint64_t crossfadeNs=(declickFrames+2)*1000000000ULL/48000;
         bool correct=true;std::vector<unsigned> counts(events.size());
+        auto fadedIn=std::max(base,output().front().timestamp)+crossfadeNs; // the source fades in when it starts
         for(const auto& block:output())for(size_t frame=0;frame<480;++frame){
             auto at=block.timestamp+frame*1000000000/48000;
+            if(at<base)continue;
             size_t event=0;while(event+1<events.size() && events[event+1].at<=at)++event;
             const auto& current=events[event];
+            ++counts[event];
+            if(at<fadedIn || (current.crossfades && at<current.at+crossfadeNs))continue;
             double expected=0;
             if((current.p.flags&3)==3){
                 auto position=current.p.position+current.p.offset+double(int64_t(at)-int64_t(current.at))/1e9*current.p.rate;
@@ -119,11 +129,55 @@ static void transitionTest() {
                 if(correct)std::cerr<<"First mismatch: event "<<event<<", time "<<double(int64_t(at)-int64_t(base))/1e6<<" ms, expected "<<expected<<", actual "<<block.samples[frame*2]<<'\n';
                 correct=false;
             }
-            ++counts[event];
         }
         check(correct && std::all_of(counts.begin(),counts.end(),[](unsigned n){return n>0;}),
             "pause, resume, death, restart, path and gain changes occur at the correct sample");
     }
+    receiver.reset();closeSocket(sender);
+}
+// A hard cut drops a ~0.2 sample to silence (or jumps to another song position) in one frame,
+// which OBS viewers hear as a click. Every transition should instead ramp over a few ms.
+static void declickTest() {
+    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
+    auto base=os_gettime_ns();
+    auto at=[&](int milliseconds){return uint64_t(int64_t(base)+int64_t(milliseconds)*1000000);};
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sendState(sender,p,at(0));
+    p.flags=1;sendState(sender,p,at(20));                        // pause
+    p.flags=3;p.position=1.5;sendState(sender,p,at(40));         // resume
+    p.epoch=2;p.position=.2;sendState(sender,p,at(60));          // restart
+    p.position=.24;std::strcpy(p.path,"artifacts/audio-tests/negative.wav");sendState(sender,p,at(80)); // song change
+    p.flags=0;sendState(sender,p,at(95));                        // OBS Jukebox disabled
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        float previous=0,largestStep=0;bool silentWhilePaused=false,negativeAfterChange=false;
+        for(const auto& block:output())for(size_t frame=0;frame<480;++frame){
+            float sample=block.samples[frame*2];
+            largestStep=std::max(largestStep,std::abs(sample-previous));previous=sample;
+            auto time=block.timestamp+frame*1000000000ULL/48000;
+            silentWhilePaused|=time>at(28) && time<at(36) && sample==0;
+            negativeAfterChange|=time>at(87) && time<at(93) && sample<-.1f;
+        }
+        check(silentWhilePaused && negativeAfterChange && largestStep<.005f,
+            "start, pause, resume, restart, song change and disable ramp instead of clicking");
+    }
+    receiver.reset();closeSocket(sender);
+}
+// A stale packet only fades out a voice that was playing. The source drops idle voices, so one
+// that is recreated for a stale packet must not open the song again every block.
+static void staleVoiceTest() {
+    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sendState(sender,p,os_gettime_ns()-600000000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    auto opens=Decoder::testOpens.load();
+    {
+        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    check(Decoder::testOpens.load()==opens,"a stale packet does not reopen the song for a dropped voice");
     receiver.reset();closeSocket(sender);
 }
 static void effectsTransitionTest() {
@@ -347,10 +401,12 @@ static void shortLoopTest() {
             SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
             std::this_thread::sleep_for(std::chrono::milliseconds(160));
             unsigned count=0;bool correct=true;
+            // Voices fade in over 5 ms when the source starts, which scheduling can delay into this window.
+            auto faded=output().empty()?0:output().front().timestamp+5000000;
             for(const auto& block:output())for(unsigned frame=0;frame<480;++frame){
                 auto at=block.timestamp+frame*1000000000ULL/48000;
                 double elapsed=double(int64_t(at)-int64_t(mapped))/1e9;
-                if(elapsed<.12 || elapsed>.20)continue;
+                if(elapsed<.12 || elapsed>.20 || at<faded)continue;
                 double loopPosition=loop.loopStart+std::fmod(loop.position+elapsed*loop.rate-loop.loopStart,loop.loopEnd-loop.loopStart);
                 double expected=(.1+(loopPosition+loop.offset)*.1)*loop.musicVolume*loop.triggerGain
                     -(.1+(other.position+elapsed*other.rate+other.offset)*.1)*other.musicVolume;
@@ -478,7 +534,7 @@ int main(){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();return failures?1:0;}
-    pauseTest();delayedPositionTest();transitionTest();effectsTransitionTest();protocolTest();
+    pauseTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();protocolTest();
     foreignClockTest(3600000000000LL);
     foreignClockTest(-int64_t(std::min<uint64_t>(os_gettime_ns()/2,3600000000000ULL)));
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();senderTest();

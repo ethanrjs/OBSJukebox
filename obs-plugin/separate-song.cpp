@@ -418,6 +418,10 @@ class Receiver {
 };
 static std::shared_ptr<Receiver> receiver;
 
+// Length of the crossfade at every music discontinuity (pause, resume, restart, seek, song
+// change): 5 ms at 48 kHz. FMOD ramps these in game; without it OBS hears a click.
+constexpr size_t declickFrames = 240;
+
 struct SongSource {
     obs_source_t *source;
     std::atomic<bool> stop{false}, active{false};
@@ -451,6 +455,42 @@ struct SongSource {
         Clock::time_point retryAt{};
         uint64_t lastUsed = 0;
         Clock::time_point reopenAt{};
+        double lastRate = 1;
+        float lastGain = 0;              // gain applied to the most recent playing frame
+        size_t fadeIn = declickFrames;   // frames of the current fade-in already played
+        std::array<float, declickFrames * 2> tail{};
+        size_t tailRead = declickFrames; // next tail frame to mix; declickFrames when empty
+
+        // Continues the audio that was playing for declickFrames while fading it to silence,
+        // so the next state crossfades in instead of cutting. Call before the decoder seeks or
+        // reopens. Ignores loop points, which only matters if a loop ends inside those 5 ms.
+        void captureTail() {
+            if (!wasPlaying)
+                return;
+            std::array<float, declickFrames * 2> next{};
+            decoder.render(next.data(), declickFrames, lastRate);
+            for (size_t j = 0; j < declickFrames; ++j) {
+                float fade = lastGain * float(declickFrames - 1 - j) / declickFrames;
+                for (size_t ch = 0; ch < 2; ++ch) {
+                    next[j * 2 + ch] *= fade;
+                    if (tailRead + j < declickFrames)
+                        next[j * 2 + ch] += tail[(tailRead + j) * 2 + ch];
+                }
+            }
+            tail = next;
+            tailRead = 0;
+            wasPlaying = false;
+        }
+        float nextFadeIn() {
+            if (fadeIn >= declickFrames)
+                return 1;
+            return float(++fadeIn) / declickFrames;
+        }
+        void mixTail(float *output, size_t frames) {
+            for (size_t j = 0; j < frames && tailRead < declickFrames; ++j, ++tailRead)
+                for (size_t ch = 0; ch < 2; ++ch)
+                    output[j * 2 + ch] += tail[tailRead * 2 + ch];
+        }
     };
     void decodeMusic() {
         configureAudioThread();
@@ -485,17 +525,23 @@ struct SongSource {
                                        : size_t(std::min<uint64_t>(
                                              480, ((at - timestamp) * 48000 + 999999999) / 1000000000));
             };
+            auto frameTime = [&](size_t frame) { return timestamp + frame * 1000000000 / 48000; };
+            // Calls render(packet, first, end, time, live) for each run of frames one packet describes.
+            // A packet goes stale 400 ms after its timestamp; that stretch is still passed, with
+            // live=false, so a playing voice fades out instead of cutting off.
             auto segments = [&](int channel, auto render) {
                 auto window = linkReceiver->playbackWindow(timestamp, timestamp + 10000000, channel);
                 for (size_t i = 0; i < window.size(); ++i) {
                     auto &p = window[i];
+                    if (!p.timestamp)
+                        continue;
                     size_t first = i ? frameAt(p.timestamp) : 0;
                     size_t end = i + 1 < window.size() ? frameAt(window[i + 1].timestamp) : 480;
-                    if (p.timestamp && timestamp + first * 1000000000 / 48000 >= p.timestamp + 400000000)
-                        continue;
-                    end = std::min(end, frameAt(p.timestamp + 400000000));
-                    if (end > first && p.timestamp)
-                        render(p, first, end, timestamp + first * 1000000000 / 48000);
+                    size_t stale = std::clamp(frameAt(p.timestamp + 400000000), first, end);
+                    if (stale > first)
+                        render(p, first, stale, frameTime(first), true);
+                    if (end > stale)
+                        render(p, stale, end, frameTime(stale), false);
                 }
             };
             for (int channel : channels) {
@@ -506,8 +552,11 @@ struct SongSource {
                 auto &v = *voices[channel];
                 auto &decoder = v.decoder;
                 segments(channel, [&](const SongLinkPacket &p, size_t first, size_t end,
-                                      uint64_t segmentTime) {
+                                      uint64_t segmentTime, bool live) {
                     v.lastUsed = p.timestamp;
+                    // A stale packet only fades out what was playing.
+                    if (!live && !v.wasPlaying && v.tailRead >= declickFrames)
+                        return;
                     std::string newPath = p.path;
                     bool pathChanged = newPath != v.loadedPath;
                     if (pathChanged || (!newPath.empty() && Clock::now() >= v.retryAt)) {
@@ -526,6 +575,7 @@ struct SongSource {
                             resolved != v.resolvedPath || available != v.fileAvailable ||
                             (available && (size != v.loadedSize || modified != v.loadedWriteTime));
                         if (pathChanged || fileChanged || (!decoder.ready() && Clock::now() >= v.reopenAt)) {
+                            v.captureTail();
                             decoder.open(resolved);
                             v.reopenAt = Clock::now() + std::chrono::seconds(30);
                             v.loadedPath = newPath;
@@ -547,44 +597,53 @@ struct SongSource {
                         sourcePosition =
                             p.loopStart + std::fmod(sourcePosition - p.loopStart, p.loopEnd - p.loopStart);
                     double target = sourcePosition + p.offset;
-                    bool playing = (p.flags & 3) == 3 && active && std::isfinite(target) && target >= 0 &&
+                    bool playing = live && (p.flags & 3) == 3 && active && std::isfinite(target) && target >= 0 &&
                                    target <= 31536000.0 && decoder.ready();
+                    bool seek = playing && (v.lastEpoch != p.epoch || !v.wasPlaying ||
+                                            std::abs(decoder.position - target) > .04);
+                    if (!playing || seek)
+                        v.captureTail();
                     voiceAudio.fill(0);
+                    if (seek) {
+                        playing = decoder.seek(target);
+                        v.fadeIn = 0;
+                    }
+                    bool audible = playing;
                     if (playing) {
-                        if (v.lastEpoch != p.epoch || !v.wasPlaying ||
-                            std::abs(decoder.position - target) > .04)
-                            playing = decoder.seek(target);
-                        if (playing) {
-                            size_t rendered = 0;
-                            while (rendered < end - first) {
-                                size_t count = end - first - rendered;
-                                if (looping) {
-                                    double untilEnd = (p.loopEnd - sourcePosition) * 48000 / p.rate;
-                                    count = std::min(count, size_t(std::max(1.0, std::ceil(untilEnd))));
-                                }
-                                decoder.render(voiceAudio.data() + rendered * 2, count, p.rate);
-                                rendered += count;
-                                sourcePosition += double(count) * p.rate / 48000;
-                                if (looping && sourcePosition >= p.loopEnd) {
-                                    sourcePosition = p.loopStart + std::fmod(sourcePosition - p.loopStart,
-                                                                             p.loopEnd - p.loopStart);
-                                    if (!decoder.seek(sourcePosition + p.offset)) {
-                                        playing = false;
-                                        break;
-                                    }
+                        size_t rendered = 0;
+                        while (rendered < end - first) {
+                            size_t count = end - first - rendered;
+                            if (looping) {
+                                double untilEnd = (p.loopEnd - sourcePosition) * 48000 / p.rate;
+                                count = std::min(count, size_t(std::max(1.0, std::ceil(untilEnd))));
+                            }
+                            decoder.render(voiceAudio.data() + rendered * 2, count, p.rate);
+                            rendered += count;
+                            sourcePosition += double(count) * p.rate / 48000;
+                            if (looping && sourcePosition >= p.loopEnd) {
+                                sourcePosition = p.loopStart + std::fmod(sourcePosition - p.loopStart,
+                                                                         p.loopEnd - p.loopStart);
+                                if (!decoder.seek(sourcePosition + p.offset)) {
+                                    playing = false;
+                                    break;
                                 }
                             }
                         }
                     }
-                    for (size_t j = 0; j < end - first; ++j) {
-                        float gain = p.musicVolume * songGainAt(p, segmentTime + j * 1000000000 / 48000);
-                        for (size_t ch = 0; ch < 2; ++ch)
-                            audio[(first + j) * 2 + ch] += voiceAudio[j * 2 + ch] * gain;
-                    }
+                    if (audible)
+                        for (size_t j = 0; j < end - first; ++j) {
+                            float gain = p.musicVolume * songGainAt(p, segmentTime + j * 1000000000 / 48000) *
+                                         v.nextFadeIn();
+                            for (size_t ch = 0; ch < 2; ++ch)
+                                audio[(first + j) * 2 + ch] += voiceAudio[j * 2 + ch] * gain;
+                            v.lastGain = gain;
+                        }
+                    v.mixTail(audio.data() + first * 2, end - first);
                     if (!newPath.empty() && !decoder.error.empty())
                         decoderError = decoder.error;
                     v.wasPlaying = playing;
                     v.lastEpoch = p.epoch;
+                    v.lastRate = p.rate;
                 });
             }
             for (auto &voice : voices)

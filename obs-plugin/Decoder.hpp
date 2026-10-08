@@ -39,6 +39,7 @@ class Decoder {
 #ifdef OBS_JUKEBOX_QA
     inline static std::atomic<int> testOpenDelayMs{0};
     inline static std::atomic<int> testOpenHandles{0};
+    inline static std::atomic<int> testOpens{0};
 #endif
     double position = 0;
     std::string error;
@@ -98,8 +99,10 @@ class Decoder {
         }
         seekValid = opened;
 #ifdef OBS_JUKEBOX_QA
-        if (opened)
+        if (opened) {
             ++testOpenHandles;
+            ++testOpens;
+        }
 #endif
         if (!opened) {
 #ifdef _WIN32
