@@ -211,6 +211,52 @@ static void effectsTransitionTest() {
     }
     receiver.reset();closeSocket(sender);
 }
+// SFX audio comes from FMOD's mixer thread and keeps arriving while GD's main thread stalls,
+// so a stale status packet must not mute it.
+static void staleStatusEffectsTest() {
+    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
+    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=os_gettime_ns();
+    sendto(sender,reinterpret_cast<const char*>(&initial),36+initial.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    auto base=os_gettime_ns();
+    SongLinkPacket p;p.flags=1;sendState(sender,p,base-600000000);
+    for(int i=0;i<12;++i){
+        EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=base+i*10000000ULL;
+        std::fill_n(e.samples,960,.25f);
+        sendto(sender,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
+        std::this_thread::sleep_for(std::chrono::milliseconds(180));
+        bool correct=true;unsigned count=0;
+        for(const auto& b:output())for(size_t i=0;i<480;++i){
+            auto at=b.timestamp+i*1000000000/48000;
+            if(at<base+10000000 || at>base+90000000)continue;
+            correct&=std::abs(b.samples[i*2]-.25f)<.00001;++count;
+        }
+        check(correct && count>3000,"effects keep playing when the latest status packet is over 400 ms old");
+    }
+    receiver.reset();closeSocket(sender);
+}
+// One probe delayed on its way back can suggest an offset several ms off; it must neither move
+// the clock nor clear buffered audio. A real clock jump (suspend) still recalibrates.
+static void clockNoiseTest() {
+    LinkClock clock;bool changed=false;
+    auto probe=[&](uint64_t t1,uint64_t t2,uint64_t t3,uint64_t t4){
+        ClockSyncPacket p;p.t1=t1;p.t2=t2;p.t3=t3;return clock.observe(p,t4,changed);
+    };
+    uint64_t t=1000000000;
+    probe(t,t+50000,t+50000,t+100000);                       // 0.1 ms round trip, offset 0
+    t+=6000000000;
+    probe(t,t+50000,t+50000,t+20100000);                     // reply delayed 20 ms
+    uint64_t sample=t;clock.translate(sample);
+    check(!changed && sample==t,"a delayed clock probe neither shifts the offset nor clears audio");
+    t+=1000000000;
+    probe(t,t+3600000000000ULL,t+3600000000000ULL,t+100000); // sender clock jumped an hour
+    check(changed,"a clock jump still recalibrates");
+}
 static void protocolTest() {
     receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);
     SongLinkPacket p;p.flags=3;p.position=1;
@@ -375,6 +421,11 @@ static void malformedV5Test() {
         p.loopStart=1;p.loopEnd=1;sender.send(p,os_gettime_ns());
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
         check(receiver->get().packet.epoch==718,"v5 rejects oversized fades, nonfinite gain, invalid channels and invalid loop bounds");
+        // FMOD can hold two fade points at the same DSP clock
+        p=SongLinkPacket{};p.flags=1;p.epoch=720;p.fadeCount=2;p.fades[0]={1000000,.5f};p.fades[1]={1000000,0};
+        sender.send(p,os_gettime_ns());
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        check(receiver->get().packet.epoch==720,"v5 accepts fade points that share a time");
     }
     receiver.reset();
 }
@@ -540,7 +591,7 @@ int main(){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();return failures?1:0;}
-    pauseTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();protocolTest();
+    pauseTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();staleStatusEffectsTest();clockNoiseTest();protocolTest();
     foreignClockTest(3600000000000LL);
     foreignClockTest(-int64_t(std::min<uint64_t>(os_gettime_ns()/2,3600000000000ULL)));
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();senderTest();

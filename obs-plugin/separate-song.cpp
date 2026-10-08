@@ -289,7 +289,7 @@ class Receiver {
                 uint64_t previous = 0;
                 for (unsigned i = 0; i < p.fadeCount; ++i) {
                     const auto &f = p.fades[i];
-                    if (f.offsetNs <= previous || f.offsetNs > 86400000000000ULL || !std::isfinite(f.gain) ||
+                    if (f.offsetNs < previous || f.offsetNs > 86400000000000ULL || !std::isfinite(f.gain) ||
                         f.gain < 0 || f.gain > 16)
                         valid = false;
                     previous = f.offsetNs;
@@ -704,12 +704,13 @@ struct SongSource {
                                        : size_t(std::min<uint64_t>(
                                              480, ((at - timestamp) * 48000 + 999999999) / 1000000000));
             };
+            // Effects ignore staleness: they arrive from FMOD's mixer thread even while GD's main
+            // thread (which sends status packets) stalls, and stop on their own when GD does.
             if (active)
                 for (size_t i = 0; i < window.size(); ++i) {
                     const auto &packet = window[i];
                     size_t first = i ? frameAt(packet.timestamp) : 0;
                     size_t end = i + 1 < window.size() ? frameAt(window[i + 1].timestamp) : 480;
-                    end = std::min(end, frameAt(packet.timestamp + staleNs));
                     if (packet.timestamp && end > first && (packet.flags & 1))
                         linkReceiver->mixEffects(audio.data() + first * 2, end - first,
                                                  timestamp + first * 1000000000 / 48000,
