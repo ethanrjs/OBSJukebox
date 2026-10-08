@@ -388,29 +388,37 @@ class Receiver {
             window.push_back(*next);
         return window;
     }
+    // A packet runs until the next packet in sequence starts, and its last sample blends into that
+    // packet's first, so seams sound like any other pair of samples. The tap's timestamps can leave
+    // a sub-sample gap or overlap between packets as it follows the wall clock; this absorbs it.
     void mixEffects(float *output, size_t frames, uint64_t start, float gain) {
         std::lock_guard lock(mutex);
         for (auto packet = effects.begin(); packet != effects.end(); ++packet) {
             const auto &p = *packet;
-            auto next = std::next(packet);
-            bool continuous = next != effects.end() && next->sampleRate == p.sampleRate &&
-                              next->sequence == p.sequence + 1 && next->timestamp >= p.timestamp &&
-                              std::abs(double(next->timestamp - p.timestamp) -
-                                       double(p.frames) * 1e9 / p.sampleRate) <= 2.0;
+            auto after = std::next(packet);
+            const EffectsPacket *next = after != effects.end() && after->sampleRate == p.sampleRate &&
+                                                after->sequence == p.sequence + 1 &&
+                                                after->timestamp > p.timestamp
+                                            ? &*after
+                                            : nullptr;
             double delta = (double(start) - double(p.timestamp)) / 1e9;
-            if (delta > double(p.frames) / p.sampleRate || delta + double(frames) / 48000 < 0)
+            double lastTime = double(p.frames - 1) / p.sampleRate;
+            double length = next ? (double(next->timestamp) - double(p.timestamp)) / 1e9
+                                 : double(p.frames) / p.sampleRate;
+            if (delta >= length || delta + double(frames) / 48000 < 0)
                 continue;
             for (size_t i = 0; i < frames; ++i) {
-                double at = (delta + double(i) / 48000) * p.sampleRate;
-                if (at < 0 || at >= p.frames)
+                double time = delta + double(i) / 48000;
+                if (time < 0 || time >= length)
                     continue;
-                unsigned a = unsigned(at), b = std::min(a + 1, p.frames - 1);
-                float blend = at - a;
+                unsigned a = std::min(unsigned(time * p.sampleRate), p.frames - 1);
+                bool seam = a + 1 == p.frames;
+                double blend = seam ? (next ? (time - lastTime) / (length - lastTime) : 0)
+                                    : time * p.sampleRate - a;
                 for (unsigned ch = 0; ch < 2; ++ch) {
-                    float after =
-                        (a + 1 == p.frames && continuous) ? next->samples[ch] : p.samples[b * 2 + ch];
-                    output[i * 2 + ch] +=
-                        gain * (p.samples[a * 2 + ch] + (after - p.samples[a * 2 + ch]) * blend);
+                    float from = p.samples[a * 2 + ch],
+                          to = seam ? (next ? next->samples[ch] : from) : p.samples[(a + 1) * 2 + ch];
+                    output[i * 2 + ch] += gain * float(from + (to - from) * blend);
                 }
             }
         }
@@ -608,18 +616,21 @@ struct SongSource {
                         playing = decoder.seek(target);
                         v.fadeIn = 0;
                     }
+                    // Errors under the 40 ms seek threshold (FMOD's output clock drifting against
+                    // OBS's) are steered out by playing up to 0.5% fast or slow, under 9 cents.
+                    double rate = p.rate * (1 + std::clamp((target - decoder.position) * .5, -.005, .005));
                     bool audible = playing;
                     if (playing) {
                         size_t rendered = 0;
                         while (rendered < end - first) {
                             size_t count = end - first - rendered;
                             if (looping) {
-                                double untilEnd = (p.loopEnd - sourcePosition) * 48000 / p.rate;
+                                double untilEnd = (p.loopEnd - sourcePosition) * 48000 / rate;
                                 count = std::min(count, size_t(std::max(1.0, std::ceil(untilEnd))));
                             }
-                            decoder.render(voiceAudio.data() + rendered * 2, count, p.rate);
+                            decoder.render(voiceAudio.data() + rendered * 2, count, rate);
                             rendered += count;
-                            sourcePosition += double(count) * p.rate / 48000;
+                            sourcePosition += double(count) * rate / 48000;
                             if (looping && sourcePosition >= p.loopEnd) {
                                 sourcePosition = p.loopStart + std::fmod(sourcePosition - p.loopStart,
                                                                          p.loopEnd - p.loopStart);
@@ -643,7 +654,7 @@ struct SongSource {
                         decoderError = decoder.error;
                     v.wasPlaying = playing;
                     v.lastEpoch = p.epoch;
-                    v.lastRate = p.rate;
+                    v.lastRate = rate;
                 });
             }
             for (auto &voice : voices)

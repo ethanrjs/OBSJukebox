@@ -7,6 +7,7 @@
 #endif
 #include "../../../src/MonotonicClock.hpp"
 #include "../../../src/Bridge.hpp"
+#include "../../../src/TapClock.hpp"
 
 static SongLinkPacket published;
 static int captureSend(SongSocket,const char* data,int size,int,const sockaddr*,
@@ -574,6 +575,85 @@ static void changedClockTest() {
     }
     receiver.reset();
 }
+// Ten minutes of 1024-frame blocks from an output device running 200 ppm slow, mixed with
+// +-5 ms of thread scheduling jitter. Effects timestamps must stay back to back within one
+// sample (a reset would leave a gap OBS hears) and within 3 ms of the real wall clock.
+static void tapClockDriftTest() {
+    separate_song::TapClock clock;
+    uint64_t wall=1000000000,previousEnd=0;
+    int64_t worstSeam=0,worstLag=0;
+    for(int block=0;block<28125;++block){
+        auto observed=uint64_t(int64_t(wall)+(block*7919%11-5)*1000000LL);
+        auto stamp=clock.stamp(observed,48000);
+        if(block)worstSeam=std::max(worstSeam,std::abs(int64_t(stamp-previousEnd)));
+        if(block>2000)worstLag=std::max(worstLag,std::abs(int64_t(wall-stamp)));
+        clock.advance(1024);previousEnd=stamp+1024*1000000000ULL/48000;
+        wall+=uint64_t(1024*1000000000.0/48000*1.0002);
+    }
+    check(worstSeam<=20834 && worstLag<3000000,"effects timestamps follow a drifting output clock without jumping");
+}
+// Back-to-back packets of a bright 3 kHz SFX, not aligned to OBS's sample grid. Each packet's
+// last sample must blend into the next packet's first; holding it instead crackles at ~94 Hz.
+static void effectsSeamTest() {
+    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
+    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=os_gettime_ns();
+    sendto(sender,reinterpret_cast<const char*>(&initial),36+initial.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    auto base=os_gettime_ns(),first=base+7777;
+    SongLinkPacket p;p.flags=1;sendState(sender,p,base-50000000);
+    auto tone=[](double frame){return .25*std::sin(frame*2*3.14159265358979*3000/48000);};
+    for(unsigned k=0;k<12;++k){
+        EffectsPacket e;e.sequence=100+k;e.frames=480;e.sampleRate=48000;e.timestamp=first+k*10000000ULL;
+        for(unsigned i=0;i<480;++i)e.samples[i*2]=e.samples[i*2+1]=float(tone(k*480.+i));
+        sendto(sender,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
+        std::this_thread::sleep_for(std::chrono::milliseconds(180));
+        double worst=0;unsigned count=0;
+        for(const auto& b:output())for(size_t i=0;i<480;++i){
+            auto at=b.timestamp+i*1000000000/48000;
+            if(at<first+10000000 || at>first+100000000)continue;
+            double u=double(at-first)*48000/1e9,whole=std::floor(u);
+            double expected=tone(whole)+(tone(whole+1)-tone(whole))*(u-whole);
+            worst=std::max(worst,std::abs(b.samples[i*2]-expected));++count;
+        }
+        check(count>4000 && worst<.0001,"effects blend across packet seams");
+    }
+    receiver.reset();closeSocket(sender);
+}
+// GD's position runs 20 ms ahead of what OBS is playing (FMOD's output clock drifted). The
+// voice must catch up by playing slightly fast, not stay off or jump with a seek.
+static void driftCorrectionTest() {
+    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
+    auto base=os_gettime_ns();
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sendState(sender,p,base);
+    {
+        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
+        for(int i=0;i<13;++i){                                // keep GD's reports fresh, 20 ms ahead
+            auto at=base+50000000ULL+i*50000000ULL;
+            while(os_gettime_ns()+60000000<at)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            p.position=1.07+i*.05;sendState(sender,p,at);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        // ramp.wav plays .1+seconds*.1, so a sample gives back the song position OBS played
+        auto behind=[&](uint64_t time){
+            for(const auto& b:output())if(time>=b.timestamp && time<b.timestamp+10000000){
+                size_t frame=size_t((time-b.timestamp)*48000/1000000000);
+                double played=(b.samples[frame*2]-.1)/.1,reported=1.07+double(int64_t(time)-int64_t(base)-50000000)/1e9;
+                return reported-played;
+            }
+            return 0.;
+        };
+        double early=behind(base+100000000),late=behind(base+600000000);
+        if(early<.015 || late>early-.0015)std::cerr<<"Drift correction: behind "<<early*1000<<" ms, then "<<late*1000<<" ms\n";
+        check(early>.015 && late<early-.0015,"a 20 ms position error is steered out without a seek");
+    }
+    receiver.reset();closeSocket(sender);
+}
 static void localFilesOnlyTest() {
     Decoder decoder;bool refused=true;
     for(const char* path:{"https://example.com/song.mp3","\\\\server\\share\\song.mp3","//server/share/song.mp3"})
@@ -619,7 +699,8 @@ int main(){
     pauseTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();
     foreignClockTest(3600000000000LL);
     foreignClockTest(-int64_t(std::min<uint64_t>(os_gettime_ns()/2,3600000000000ULL)));
-    multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();senderTest();
+    multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
+    tapClockDriftTest();effectsSeamTest();driftCorrectionTest();senderTest();
     receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();
     musicDeadlineTest(false);musicDeadlineTest(true);
