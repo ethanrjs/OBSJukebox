@@ -51,6 +51,12 @@ struct UIAccess : jukebox::NongCellUI {
     static CCMenuItemSpriteExtra* selected(jukebox::NongCellUI* ui) { return ui->*(&UIAccess::m_selectButton); }
     static CCNode* songInfo(jukebox::NongCellUI* ui) { return ui->*(&UIAccess::m_songInfoNode); }
 };
+// Rows where Jukebox hides its Game button (e.g. "Download nongs") get no OBS checkbox
+// and can't be picked for OBS by right-click.
+bool gameButtonShown(jukebox::NongCellUI* ui) {
+    auto gameCheck = UIAccess::selected(ui);
+    return gameCheck && gameCheck->isVisible();
+}
 bool exists(const std::string& path) {
     if (path.empty()) return false;
     std::error_code ec;
@@ -67,8 +73,10 @@ std::filesystem::path base() { return Loader::get()->getLoadedMod("fleym.nongd")
 // Geode lets the dependency update to any newer 3.x, so skip the row UI on other builds.
 bool cellLayoutMatches() {
     static const bool matches = [] {
-        auto version = Loader::get()->getLoadedMod("fleym.nongd")->getVersion();
-        bool ok = version.getMajor() == 3 && version.getMinor() == 8 && version.getPatch() == 0;
+        auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
+        if (!dependency) return false;
+        auto version = dependency->getVersion();
+        bool ok = version.getMajor() == 3 && version.getMinor() == 8 && version.getPatch() == 0 && !version.getTag();
         if (!ok) log::warn("Jukebox {} is not 3.8.0; OBS checkboxes in Jukebox are disabled", version.toVString());
         return ok;
     }();
@@ -259,16 +267,19 @@ public:
     }
     // Jukebox rebuilds the row's buttons menu when the Game song changes, dropping the checkbox.
     // The scheduler runs before drawing, so re-syncing here restores it in the same frame.
+    // A rebuild destroys the old menu, which clears the checkbox's parent, so these two checks
+    // catch every rebuild. Otherwise the row is still as sync() left it.
     void update(float) override {
-        if (auto ui = CellAccess::ui(m_cell)) sync(ui, m_checked);
+        auto ui = CellAccess::ui(m_cell); if (!ui) return;
+        if (m_checkbox->getParent() == UIAccess::buttons(ui) && m_checkbox->isVisible() == gameButtonShown(ui)) return;
+        sync(ui, m_checked);
     }
     void onSelect(CCObject*) { select(m_cell); }
     void sync(jukebox::NongCellUI* ui, bool checked) {
         auto menu = UIAccess::buttons(ui); auto gameCheck = UIAccess::selected(ui);
         if (!menu || !gameCheck) return;
-        // Show the OBS checkbox only where Jukebox shows its Game button, so rows in
-        // "Download nongs" keep Jukebox's layout. The menu skips invisible children.
-        bool shown = gameCheck->isVisible();
+        // The menu skips invisible children, so hidden rows keep Jukebox's own layout.
+        bool shown = gameButtonShown(ui);
         bool relayout = false;
         if (m_checkbox->getParent() != menu) {
             m_checkbox->removeFromParent();
@@ -276,6 +287,8 @@ public:
             relayout = true;
         }
         if (m_checkbox->isVisible() != shown) { m_checkbox->setVisible(shown); relayout = true; }
+        // The flag lives on the menu but also covers the song info node: Jukebox 3.8.0's build()
+        // recreates both together and only sets the Game button's visibility there.
         if (shown && !menu->getUserFlag("widened"_spr)) {
             menu->setUserFlag("widened"_spr);
             menu->setContentWidth(menu->getContentWidth()+35.f);
@@ -285,17 +298,19 @@ public:
             }
             relayout = true;
         }
-        if (relayout) menu->updateLayout();
+        if (relayout) {
+            menu->updateLayout();
+            m_gameLabel->setPosition(convertToNodeSpace(menu->convertToWorldSpace(gameCheck->getPosition()))+CCPoint{0,-23});
+            m_gameLabel->setVisible(shown);
+            m_obsLabel->setPosition(convertToNodeSpace(menu->convertToWorldSpace(m_checkbox->getPosition()))+CCPoint{0,-23});
+            m_obsLabel->setVisible(shown);
+        }
         if (checked != m_checked) {
             m_checked = checked;
             m_sprite->setDisplayFrame(CCSpriteFrameCache::sharedSpriteFrameCache()->spriteFrameByName(
                 checked ? "GJ_checkOn_001.png" : "GJ_checkOff_001.png"));
             m_sprite->setPosition({15.f, 15.f});
         }
-        m_gameLabel->setPosition(convertToNodeSpace(menu->convertToWorldSpace(gameCheck->getPosition()))+CCPoint{0,-23});
-        m_gameLabel->setVisible(shown);
-        m_obsLabel->setPosition(convertToNodeSpace(menu->convertToWorldSpace(m_checkbox->getPosition()))+CCPoint{0,-23});
-        m_obsLabel->setVisible(shown);
     }
 };
 void paint(jukebox::NongCell* cell) {
@@ -429,9 +444,7 @@ void rightClick(CCPoint point){
     auto scroll=list->getChildByID("list");if(!scroll)return;
     if(!CCRect{{0,0},scroll->getContentSize()}.containsPoint(scroll->convertToNodeSpace(point)))return;
     for(auto cell:cells(list))if(CCRect{{0,0},cell->getContentSize()}.containsPoint(cell->convertToNodeSpace(point))){
-        // Same rule as the checkbox: rows without Jukebox's Game button can't be picked for OBS.
-        auto ui=CellAccess::ui(cell);auto gameCheck=ui?UIAccess::selected(ui):nullptr;
-        if(gameCheck && gameCheck->isVisible())select(cell);
+        if(auto ui=CellAccess::ui(cell); ui && gameButtonShown(ui))select(cell);
         break;
     }
 }

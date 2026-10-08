@@ -58,6 +58,7 @@ void Bridge::publish(const Snapshot& s) {
     copyText(p.status,s.status);
     copyText(p.level,s.level);
     copyText(p.song,s.song);
+    // Paths are never shortened: a cut path names the wrong file, so a long one stops playback instead.
     if(s.path.size()<sizeof(p.path))std::strncpy(p.path,s.path.c_str(),sizeof(p.path)-1);else p.flags&=~2u;
     sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(receiverPort());address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
     sendto(socket,reinterpret_cast<const char*>(&p),sizeof(p),0,reinterpret_cast<sockaddr*>(&address),sizeof(address));
