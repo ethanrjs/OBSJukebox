@@ -2,6 +2,9 @@
 #include <iostream>
 #include <fstream>
 #include <limits>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #include "../../../src/MonotonicClock.hpp"
 #include "../../../src/Bridge.hpp"
 
@@ -452,6 +455,18 @@ static void senderTest() {
 #include "recovery-tests.inc"
 
 int main(){
+#ifdef __APPLE__
+    int relativePriority=0;
+    auto qos=pthread_get_qos_class_np(pthread_self(),&relativePriority);
+    std::cout<<"macOS test thread initial QoS: "<<unsigned(qos)<<", relative priority: "<<relativePriority<<'\n';
+    check(pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0)==0,
+        "macOS test sender uses foreground audio scheduling");
+    qos=pthread_get_qos_class_np(pthread_self(),&relativePriority);
+    auto timingStart=os_gettime_ns();
+    for(unsigned i=0;i<20;++i)std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::cout<<"macOS test thread effective QoS: "<<unsigned(qos)<<", relative priority: "<<relativePriority
+        <<", twenty 10 ms sleeps: "<<double(os_gettime_ns()-timingStart)/1e6<<" ms\n";
+#endif
 #ifdef _WIN32
     _putenv_s("OBS_JUKEBOX_TEST_PORT","49177");
 #else

@@ -20,6 +20,9 @@
 #include <thread>
 #include <util/platform.h>
 #include <vector>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #if defined(__linux__)
 #include "LinuxAudioClock.hpp"
 #include "LinuxPaths.hpp"
@@ -33,6 +36,13 @@ MODULE_EXPORT const char *obs_module_name(void) { return "OBS Jukebox"; }
 MODULE_EXPORT const char *obs_module_author(void) { return "babbur"; }
 
 using Clock = std::chrono::steady_clock;
+static void configureAudioThread() {
+#ifdef __APPLE__
+    // Both workers must meet 10 ms audio deadlines, including in background OBS.
+    if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) != 0)
+        blog(LOG_ERROR, "OBS Jukebox: could not configure audio thread scheduling");
+#endif
+}
 struct LinkState {
     SongLinkPacket packet;
     Clock::time_point received{};
@@ -443,6 +453,7 @@ struct SongSource {
         Clock::time_point reopenAt{};
     };
     void decodeMusic() {
+        configureAudioThread();
         std::array<std::unique_ptr<Voice>, SONG_LINK_MAX_CHANNELS> voices;
 #if defined(__linux__)
         LinuxPaths paths;
@@ -600,6 +611,7 @@ struct SongSource {
         }
     }
     void run() {
+        configureAudioThread();
         // Prefill one block while retaining the existing 40 ms output timeline delay.
         uint64_t timestamp = os_gettime_ns() - bufferingNs + blockNs;
         wantedTimestamp = timestamp;
