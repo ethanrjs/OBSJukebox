@@ -54,7 +54,11 @@ class Receiver {
     std::atomic<bool> stop{false};
     std::mutex mutex;
     LinkState state;
-    std::array<std::deque<SongLinkPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
+    struct PlaybackPacket {
+        SongLinkPacket packet;
+        uint64_t senderTimestamp;
+    };
+    std::array<std::deque<PlaybackPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
     std::deque<EffectsPacket> effects, pendingEffects;
     LinkClock clock;
     uint64_t session = 0, lastProbe = 0, lastSongReceived = 0;
@@ -82,16 +86,27 @@ class Receiver {
         state.connected = false;
     }
     void accept(SongLinkPacket p, uint64_t now) {
-        if (p.version >= 5 && !clock.translate(p.timestamp))
+        auto senderTimestamp = p.timestamp;
+        auto &voice = playback[p.channelID + 1];
+        auto existing = std::find_if(voice.begin(), voice.end(), [&](const auto &previous) {
+            return previous.senderTimestamp == senderTimestamp;
+        });
+        // Keep a sampled state's timeline position stable even if its pause/stop update arrives
+        // after a clock correction. Translated timestamps alone cannot identify the same sample.
+        if (existing != voice.end())
+            p.timestamp = existing->packet.timestamp;
+        else if (p.version >= 5 && !clock.translate(p.timestamp))
             return;
         if (p.timestamp > now + 100000000 || p.timestamp + 1000000000 < now)
             return;
-        auto &voice = playback[p.channelID + 1];
         auto next = std::lower_bound(voice.begin(), voice.end(), p.timestamp,
-                                     [](const auto &a, uint64_t t) { return a.timestamp < t; });
-        if (next != voice.end() && next->timestamp == p.timestamp)
-            return;
-        voice.insert(next, p);
+                                     [](const auto &a, uint64_t t) { return a.packet.timestamp < t; });
+        // FMOD's sampled position time can repeat within a mixer block. A later packet at
+        // that time may pause/stop the voice or change its gain; it is not necessarily a duplicate.
+        if (next != voice.end() && next->packet.timestamp == p.timestamp)
+            *next = {p, senderTimestamp};
+        else
+            voice.insert(next, {p, senderTimestamp});
         while (voice.size() > 256)
             voice.pop_front();
         if (!state.connected || p.timestamp >= state.packet.timestamp)
@@ -289,7 +304,7 @@ class Receiver {
                 uint64_t previous = 0;
                 for (unsigned i = 0; i < p.fadeCount; ++i) {
                     const auto &f = p.fades[i];
-                    if (f.offsetNs <= previous || f.offsetNs > 86400000000000ULL || !std::isfinite(f.gain) ||
+                    if (f.offsetNs < previous || f.offsetNs > 86400000000000ULL || !std::isfinite(f.gain) ||
                         f.gain < 0 || f.gain > 16)
                         valid = false;
                     previous = f.offsetNs;
@@ -361,6 +376,15 @@ class Receiver {
             closeSocket(sock);
     }
     bool available() const { return sock != BAD_SOCKET; }
+    // GD's main thread sends song packets and FMOD's mixer thread sends effects. Effects that keep
+    // arriving after song packets stop mean the main thread is stalled (as while GD tears down a
+    // level), and the game is still playing its music.
+    bool mainThreadStalled() {
+        std::lock_guard lock(mutex);
+        auto now = os_gettime_ns();
+        return lastSongReceived && lastEffectsReceived[0] && now - lastEffectsReceived[0] < 100000000 &&
+               now - lastSongReceived > 200000000;
+    }
     LinkState get() {
         std::lock_guard lock(mutex);
         return state;
@@ -381,42 +405,58 @@ class Receiver {
             return window;
         auto &voice = playback[channel + 1];
         auto next = std::upper_bound(voice.begin(), voice.end(), start,
-                                     [](uint64_t t, const auto &p) { return t < p.timestamp; });
+                                     [](uint64_t t, const auto &p) { return t < p.packet.timestamp; });
         if (next != voice.begin())
-            window.front() = *std::prev(next);
-        for (; next != voice.end() && next->timestamp < end; ++next)
-            window.push_back(*next);
+            window.front() = std::prev(next)->packet;
+        for (; next != voice.end() && next->packet.timestamp < end; ++next)
+            window.push_back(next->packet);
         return window;
     }
+    // A packet runs until the next packet in sequence starts, and its last sample blends into that
+    // packet's first, so seams sound like any other pair of samples. The tap's timestamps can leave
+    // a sub-sample gap or overlap between packets as it follows the wall clock; this absorbs it.
     void mixEffects(float *output, size_t frames, uint64_t start, float gain) {
         std::lock_guard lock(mutex);
         for (auto packet = effects.begin(); packet != effects.end(); ++packet) {
             const auto &p = *packet;
-            auto next = std::next(packet);
-            bool continuous = next != effects.end() && next->sampleRate == p.sampleRate &&
-                              next->sequence == p.sequence + 1 && next->timestamp >= p.timestamp &&
-                              std::abs(double(next->timestamp - p.timestamp) -
-                                       double(p.frames) * 1e9 / p.sampleRate) <= 2.0;
+            auto after = std::next(packet);
+            double duration = double(p.frames) / p.sampleRate;
+            // Only join adjacent audio. Sequence numbers alone cannot distinguish a mixer stall
+            // from uninterrupted capture. Two source samples cover tap slew, clock slew and rounding.
+            const EffectsPacket *next =
+                after != effects.end() && after->sampleRate == p.sampleRate &&
+                        after->sequence == p.sequence + 1 && after->timestamp > p.timestamp &&
+                        std::abs((double(after->timestamp) - double(p.timestamp)) / 1e9 - duration) <=
+                            2.0 / p.sampleRate
+                    ? &*after
+                    : nullptr;
             double delta = (double(start) - double(p.timestamp)) / 1e9;
-            if (delta > double(p.frames) / p.sampleRate || delta + double(frames) / 48000 < 0)
+            double lastTime = double(p.frames - 1) / p.sampleRate;
+            double length = next ? (double(next->timestamp) - double(p.timestamp)) / 1e9 : duration;
+            if (delta >= length || delta + double(frames) / 48000 < 0)
                 continue;
             for (size_t i = 0; i < frames; ++i) {
-                double at = (delta + double(i) / 48000) * p.sampleRate;
-                if (at < 0 || at >= p.frames)
+                double time = delta + double(i) / 48000;
+                if (time < 0 || time >= length)
                     continue;
-                unsigned a = unsigned(at), b = std::min(a + 1, p.frames - 1);
-                float blend = at - a;
+                unsigned a = std::min(unsigned(time * p.sampleRate), p.frames - 1);
+                bool seam = a + 1 == p.frames;
+                double blend = seam ? (next ? (time - lastTime) / (length - lastTime) : 0)
+                                    : time * p.sampleRate - a;
                 for (unsigned ch = 0; ch < 2; ++ch) {
-                    float after =
-                        (a + 1 == p.frames && continuous) ? next->samples[ch] : p.samples[b * 2 + ch];
-                    output[i * 2 + ch] +=
-                        gain * (p.samples[a * 2 + ch] + (after - p.samples[a * 2 + ch]) * blend);
+                    float from = p.samples[a * 2 + ch],
+                          to = seam ? (next ? next->samples[ch] : from) : p.samples[(a + 1) * 2 + ch];
+                    output[i * 2 + ch] += gain * float(from + (to - from) * blend);
                 }
             }
         }
     }
 };
 static std::shared_ptr<Receiver> receiver;
+
+// Length of the crossfade at every music discontinuity (pause, resume, restart, seek, song
+// change): 5 ms at 48 kHz. FMOD ramps these in game; without it OBS hears a click.
+constexpr size_t declickFrames = 240;
 
 struct SongSource {
     obs_source_t *source;
@@ -453,6 +493,42 @@ struct SongSource {
         Clock::time_point reopenAt{};
         uint64_t starvedSince = 0;
         Clock::time_point recoverAt{};
+        double lastRate = 1;
+        float lastGain = 0;              // gain applied to the most recent playing frame
+        size_t fadeIn = declickFrames;   // frames of the current fade-in already played
+        std::array<float, declickFrames * 2> tail{};
+        size_t tailRead = declickFrames; // next tail frame to mix; declickFrames when empty
+
+        // Continues the audio that was playing for declickFrames while fading it to silence,
+        // so the next state crossfades in instead of cutting. Call before the decoder seeks or
+        // reopens. Ignores loop points, which only matters if a loop ends inside those 5 ms.
+        void captureTail() {
+            if (!wasPlaying)
+                return;
+            std::array<float, declickFrames * 2> next{};
+            decoder.render(next.data(), declickFrames, lastRate);
+            for (size_t j = 0; j < declickFrames; ++j) {
+                float fade = lastGain * float(declickFrames - 1 - j) / declickFrames;
+                for (size_t ch = 0; ch < 2; ++ch) {
+                    next[j * 2 + ch] *= fade;
+                    if (tailRead + j < declickFrames)
+                        next[j * 2 + ch] += tail[(tailRead + j) * 2 + ch];
+                }
+            }
+            tail = next;
+            tailRead = 0;
+            wasPlaying = false;
+        }
+        float nextFadeIn() {
+            if (fadeIn >= declickFrames)
+                return 1;
+            return float(++fadeIn) / declickFrames;
+        }
+        void mixTail(float *output, size_t frames) {
+            for (size_t j = 0; j < frames && tailRead < declickFrames; ++j, ++tailRead)
+                for (size_t ch = 0; ch < 2; ++ch)
+                    output[j * 2 + ch] += tail[tailRead * 2 + ch];
+        }
     };
     void decodeMusic() {
         configureAudioThread();
@@ -481,23 +557,31 @@ struct SongSource {
             auto link = linkReceiver->get();
             auto latest = link.packet;
             bool connected = link.connected && Clock::now() - link.received < std::chrono::milliseconds(400);
+            bool stalled = linkReceiver->mainThreadStalled();
             auto channels = linkReceiver->getChannels();
             auto frameAt = [&](uint64_t at) {
                 return at <= timestamp ? size_t(0)
                                        : size_t(std::min<uint64_t>(
                                              480, ((at - timestamp) * 48000 + 999999999) / 1000000000));
             };
+            auto frameTime = [&](size_t frame) { return timestamp + frame * 1000000000 / 48000; };
+            // Calls render(packet, first, end, time, live) for each run of frames one packet describes.
+            // A packet goes stale 400 ms after its timestamp; that stretch is still passed, with
+            // live=false, so a playing voice fades out instead of cutting off. Nothing goes stale
+            // while GD's main thread is stalled but its mixer still plays.
             auto segments = [&](int channel, auto render) {
                 auto window = linkReceiver->playbackWindow(timestamp, timestamp + 10000000, channel);
                 for (size_t i = 0; i < window.size(); ++i) {
                     auto &p = window[i];
+                    if (!p.timestamp)
+                        continue;
                     size_t first = i ? frameAt(p.timestamp) : 0;
                     size_t end = i + 1 < window.size() ? frameAt(window[i + 1].timestamp) : 480;
-                    if (p.timestamp && timestamp + first * 1000000000 / 48000 >= p.timestamp + 400000000)
-                        continue;
-                    end = std::min(end, frameAt(p.timestamp + 400000000));
-                    if (end > first && p.timestamp)
-                        render(p, first, end, timestamp + first * 1000000000 / 48000);
+                    size_t stale = stalled ? end : std::clamp(frameAt(p.timestamp + 400000000), first, end);
+                    if (stale > first)
+                        render(p, first, stale, frameTime(first), true);
+                    if (end > stale)
+                        render(p, stale, end, frameTime(stale), false);
                 }
             };
             for (int channel : channels) {
@@ -508,8 +592,11 @@ struct SongSource {
                 auto &v = *voices[channel];
                 auto &decoder = v.decoder;
                 segments(channel, [&](const SongLinkPacket &p, size_t first, size_t end,
-                                      uint64_t segmentTime) {
+                                      uint64_t segmentTime, bool live) {
                     v.lastUsed = p.timestamp;
+                    // A stale packet only fades out what was playing.
+                    if (!live && !v.wasPlaying && v.tailRead >= declickFrames)
+                        return;
                     std::string newPath = p.path;
                     bool pathChanged = newPath != v.loadedPath;
                     if (pathChanged || (!newPath.empty() && Clock::now() >= v.retryAt)) {
@@ -528,6 +615,7 @@ struct SongSource {
                             resolved != v.resolvedPath || available != v.fileAvailable ||
                             (available && (size != v.loadedSize || modified != v.loadedWriteTime));
                         if (pathChanged || fileChanged || (!decoder.ready() && Clock::now() >= v.reopenAt)) {
+                            v.captureTail();
                             decoder.open(resolved);
                             v.reopenAt = Clock::now() + std::chrono::seconds(30);
                             v.loadedPath = newPath;
@@ -549,34 +637,41 @@ struct SongSource {
                         sourcePosition =
                             p.loopStart + std::fmod(sourcePosition - p.loopStart, p.loopEnd - p.loopStart);
                     double target = sourcePosition + p.offset;
-                    bool playing = (p.flags & 3) == 3 && active && std::isfinite(target) && target >= 0 &&
+                    bool playing = live && (p.flags & 3) == 3 && active && std::isfinite(target) && target >= 0 &&
                                    target <= 31536000.0 && decoder.ready();
                     const bool expectedAudio = playing && decoder.hasAudioAt(target);
-                    voiceAudio.fill(0);
                     bool starved = false;
+                    bool seek = playing && (v.lastEpoch != p.epoch || !v.wasPlaying ||
+                                            std::abs(decoder.position - target) > .04);
+                    if (!playing || seek)
+                        v.captureTail();
+                    voiceAudio.fill(0);
+                    if (seek) {
+                        playing = decoder.seek(target);
+                        v.fadeIn = 0;
+                    }
+                    // Errors under the 40 ms seek threshold (FMOD's output clock drifting against
+                    // OBS's) are steered out by playing up to 0.5% fast or slow, under 9 cents.
+                    double rate = p.rate * (1 + std::clamp((target - decoder.position) * .5, -.005, .005));
+                    bool audible = playing;
                     if (playing) {
-                        if (v.lastEpoch != p.epoch || !v.wasPlaying ||
-                            std::abs(decoder.position - target) > .04)
-                            playing = decoder.seek(target);
-                        if (playing) {
-                            size_t rendered = 0;
-                            while (rendered < end - first) {
-                                size_t count = end - first - rendered;
-                                if (looping) {
-                                    double untilEnd = (p.loopEnd - sourcePosition) * 48000 / p.rate;
-                                    count = std::min(count, size_t(std::max(1.0, std::ceil(untilEnd))));
-                                }
-                                decoder.render(voiceAudio.data() + rendered * 2, count, p.rate);
-                                starved |= decoder.starvedBeforeEnd();
-                                rendered += count;
-                                sourcePosition += double(count) * p.rate / 48000;
-                                if (looping && sourcePosition >= p.loopEnd) {
-                                    sourcePosition = p.loopStart + std::fmod(sourcePosition - p.loopStart,
-                                                                             p.loopEnd - p.loopStart);
-                                    if (!decoder.seek(sourcePosition + p.offset)) {
-                                        playing = false;
-                                        break;
-                                    }
+                        size_t rendered = 0;
+                        while (rendered < end - first) {
+                            size_t count = end - first - rendered;
+                            if (looping) {
+                                double untilEnd = (p.loopEnd - sourcePosition) * 48000 / rate;
+                                count = std::min(count, size_t(std::max(1.0, std::ceil(untilEnd))));
+                            }
+                            decoder.render(voiceAudio.data() + rendered * 2, count, rate);
+                            starved |= decoder.starvedBeforeEnd();
+                            rendered += count;
+                            sourcePosition += double(count) * rate / 48000;
+                            if (looping && sourcePosition >= p.loopEnd) {
+                                sourcePosition = p.loopStart + std::fmod(sourcePosition - p.loopStart,
+                                                                         p.loopEnd - p.loopStart);
+                                if (!decoder.seek(sourcePosition + p.offset)) {
+                                    playing = false;
+                                    break;
                                 }
                             }
                         }
@@ -599,19 +694,24 @@ struct SongSource {
                     } else {
                         v.starvedSince = 0;
                     }
-                    for (size_t j = 0; j < end - first; ++j) {
-                        float gain = p.musicVolume * songGainAt(p, segmentTime + j * 1000000000 / 48000);
-                        for (size_t ch = 0; ch < 2; ++ch)
-                            audio[(first + j) * 2 + ch] += voiceAudio[j * 2 + ch] * gain;
-                    }
+                    if (audible)
+                        for (size_t j = 0; j < end - first; ++j) {
+                            float gain = p.musicVolume * songGainAt(p, segmentTime + j * 1000000000 / 48000) *
+                                         v.nextFadeIn();
+                            for (size_t ch = 0; ch < 2; ++ch)
+                                audio[(first + j) * 2 + ch] += voiceAudio[j * 2 + ch] * gain;
+                            v.lastGain = gain;
+                        }
+                    v.mixTail(audio.data() + first * 2, end - first);
                     if (!newPath.empty() && !decoder.error.empty())
                         decoderError = decoder.error;
                     v.wasPlaying = playing;
                     v.lastEpoch = p.epoch;
+                    v.lastRate = rate;
                 });
             }
             for (auto &voice : voices)
-                if (voice && timestamp > voice->lastUsed + staleNs)
+                if (voice && !stalled && timestamp > voice->lastUsed + staleNs)
                     voice.reset();
             {
                 std::lock_guard lock(mutex);
@@ -621,7 +721,9 @@ struct SongSource {
                          : !connected            ? "Waiting for Geometry Dash"
                          : !latest.song[0]       ? "Select the OBS checkbox beside a Jukebox song."
                                                  : std::string(latest.song) + " | " + latest.status +
-                                                       " | Attempt " + std::to_string(latest.attempt);
+                                                       (latest.attempt > 0
+                                                            ? " | Attempt " + std::to_string(latest.attempt)
+                                                            : "");
             }
             {
                 std::lock_guard lock(musicMutex);
@@ -668,12 +770,13 @@ struct SongSource {
                                        : size_t(std::min<uint64_t>(
                                              480, ((at - timestamp) * 48000 + 999999999) / 1000000000));
             };
+            // Effects ignore staleness: they arrive from FMOD's mixer thread even while GD's main
+            // thread (which sends status packets) stalls, and stop on their own when GD does.
             if (active)
                 for (size_t i = 0; i < window.size(); ++i) {
                     const auto &packet = window[i];
                     size_t first = i ? frameAt(packet.timestamp) : 0;
                     size_t end = i + 1 < window.size() ? frameAt(window[i + 1].timestamp) : 480;
-                    end = std::min(end, frameAt(packet.timestamp + staleNs));
                     if (packet.timestamp && end > first && (packet.flags & 1))
                         linkReceiver->mixEffects(audio.data() + first * 2, end - first,
                                                  timestamp + first * 1000000000 / 48000,

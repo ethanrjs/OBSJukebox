@@ -48,6 +48,7 @@ class Decoder {
     inline static std::atomic<bool> testFailOnNextSeek{false};
     inline static std::atomic<bool> testStarveAllReads{false};
     inline static std::atomic<unsigned> testOpenCount{0};
+    inline static std::atomic<int> testOpens{0};
 #endif
     double position = 0;
     std::string error;
@@ -87,6 +88,11 @@ class Decoder {
             error = "Choose an OBS song in Jukebox.";
             return false;
         }
+        // Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares.
+        if (path.find("://") != std::string::npos || path.starts_with("\\\\") || path.starts_with("//")) {
+            error = "Only local song files can be played.";
+            return false;
+        }
         auto config = ma_decoder_config_init(ma_format_f32, 2, 48000);
         config.seekPointCount = 2048;
 #ifdef _WIN32
@@ -115,8 +121,10 @@ class Decoder {
         }
         seekValid = opened;
 #ifdef OBS_JUKEBOX_QA
-        if (opened)
+        if (opened) {
             ++testOpenHandles;
+            ++testOpens;
+        }
 #endif
         if (!opened) {
 #ifdef _WIN32
