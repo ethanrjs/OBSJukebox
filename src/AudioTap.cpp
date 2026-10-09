@@ -4,12 +4,12 @@
 #include "Bridge.hpp"
 #include "LinkPacket.hpp"
 #include "MonotonicClock.hpp"
+#include "TapClock.hpp"
 #include <Geode/Geode.hpp>
 #include <Geode/fmod/fmod_dsp.h>
 #include <atomic>
 #include <array>
 #include <thread>
-#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <semaphore>
@@ -22,8 +22,10 @@ struct Tap {
     std::array<EffectsPacketV2, capacity> queue;
     std::atomic<unsigned> read{0}, write{0};
     std::atomic<bool> enabled{true};
+    // Wall time of DSP clock 0 on the effects timeline, for dating music positions.
+    std::atomic<int64_t> dspClockOrigin{INT64_MIN};
     uint32_t rate = 44100, sequence = 0, stream = 0;
-    uint64_t clockStart = 0, clockFrames = 0;
+    TapClock clock;
     FMOD::DSP *dsp = nullptr;
     FMOD::ChannelGroup *group = nullptr;
     FMOD::System *system = nullptr;
@@ -62,16 +64,18 @@ struct Tap {
         int outputs = 0;
         return dsp->getNumOutputs(&outputs) == FMOD_OK && outputs > 0;
     }
-    void push(float *input, unsigned frames, int channels) {
-        if (!enabled.load(std::memory_order_relaxed) || channels < 1 || frames == 0)
+    void push(FMOD_DSP_STATE *state, float *input, unsigned frames, int channels) {
+        if (channels < 1 || frames == 0)
             return;
-        auto wall = monotonicNowNs();
-        auto timestamp = clockStart + clockFrames * 1000000000 / rate;
-        if (!clockStart || wall > timestamp + 20000000 || timestamp > wall + 100000000) {
-            clockStart = wall;
-            clockFrames = 0;
-            timestamp = wall;
-        }
+        auto timestamp = clock.stamp(monotonicNowNs(), rate);
+        clock.advance(frames);
+        unsigned long long block = 0;
+        unsigned offset = 0, length = 0;
+        if (state->functions->getclock(state, &block, &offset, &length) == FMOD_OK)
+            dspClockOrigin.store(int64_t(timestamp) - int64_t(framesToNs(block, rate)),
+                                 std::memory_order_relaxed);
+        if (!enabled.load(std::memory_order_relaxed))
+            return;
         for (unsigned start = 0; start < frames; start += 512) {
             auto w = write.load(std::memory_order_relaxed);
             if (w - read.load(std::memory_order_acquire) >= capacity)
@@ -82,7 +86,7 @@ struct Tap {
             p.sampleRate = rate;
             p.stream = stream;
             p.sessionID = processSessionID();
-            p.timestamp = clockStart + (clockFrames + start) * 1000000000 / rate;
+            p.timestamp = timestamp + uint64_t(start) * 1000000000 / rate;
             for (unsigned i = 0; i < p.frames; ++i) {
                 auto stereo = downmixStereo(input + (start + i) * channels, channels);
                 p.samples[i * 2] = stereo[0];
@@ -91,7 +95,6 @@ struct Tap {
             write.store(w + 1, std::memory_order_release);
             ready.release();
         }
-        clockFrames += frames;
     }
     static FMOD_RESULT F_CALL render(FMOD_DSP_STATE *state, float *input, float *output, unsigned frames,
                                      int channels, int *outChannels) {
@@ -99,7 +102,7 @@ struct Tap {
         void *user = nullptr;
         state->functions->getuserdata(state, &user);
         if (user && input)
-            static_cast<Tap *>(user)->push(input, frames, channels);
+            static_cast<Tap *>(user)->push(state, input, frames, channels);
         if (input && output) {
             if (input != output)
                 std::memcpy(output, input, frames * channels * sizeof(float));
@@ -230,5 +233,13 @@ void enable(bool value) {
     captureEnabled = value;
     if (effects)
         effects->enabled = value;
+}
+std::optional<uint64_t> wallAtDspClock(unsigned long long clock) {
+    if (!effects)
+        return std::nullopt;
+    auto origin = effects->dspClockOrigin.load(std::memory_order_relaxed);
+    if (origin == INT64_MIN)
+        return std::nullopt;
+    return uint64_t(origin + int64_t(framesToNs(clock, effects->rate)));
 }
 } // namespace separate_song::audio_tap

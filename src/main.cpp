@@ -90,6 +90,29 @@ static double channelRate(FMOD::Channel* channel, FMOD::Sound* sound) {
     }
     return std::isfinite(rate) ? std::clamp(rate, .25, 4.) : 1.;
 }
+// A channel's position in seconds and the wall time it is true at. FMOD advances the position
+// once per mixer block (~21 ms), so dating it with the DSP clock of the effects group, which the
+// effects tap reads, puts it on the tap's timeline. The main thread's own clock would be up to a
+// block late. The music group's clock would not do: FMOD stops a group's clock while it is
+// paused, and GD pauses the effects group alone when it goes to the background, so the two
+// clocks drift apart. PCM units are exact where milliseconds truncate.
+static std::optional<std::pair<double, uint64_t>> playbackPosition(FMOD::Channel* channel, FMOD::Sound* sound,
+                                                                    FMOD::ChannelGroup* effects) {
+    float soundRate = 0.f;
+    sound->getDefaults(&soundRate, nullptr);
+    auto unit = soundRate > 0 ? FMOD_TIMEUNIT_PCM : FMOD_TIMEUNIT_MS;
+    unsigned position = 0;
+    unsigned long long clock = 0, after = 0;
+    for (int attempt = 0; attempt < 2; ++attempt) { // retry once if a mix lands between the reads
+        if (effects) effects->getDSPClock(&clock, nullptr);
+        if (channel->getPosition(&position, unit) != FMOD_OK) return std::nullopt;
+        if (effects) effects->getDSPClock(&after, nullptr);
+        if (after == clock) break;
+    }
+    double seconds = soundRate > 0 ? position / double(soundRate) : position / 1000.0;
+    auto wall = effects ? audio_tap::wallAtDspClock(after) : std::nullopt;
+    return std::pair{seconds, wall.value_or(monotonicNowNs())};
+}
 static void sampleEnvelope(MusicVoice& voice, FMOD::Channel* channel, unsigned sampleRate) {
     auto& out = voice.snapshot;
     float volume = 1.f;
@@ -166,7 +189,9 @@ static void publish(const std::string& status, bool playing) {
 }
 static void stopVoices() {
     for (auto& [id, voice] : voices) {
-        voice.snapshot.timestamp = monotonicNowNs();
+        // Live positions are dated by the mixer and can be up to a block ahead of now. A stop must
+        // not sort before them, or OBS would play on until they go stale.
+        voice.snapshot.timestamp = std::max(voice.snapshot.timestamp, monotonicNowNs());
         voice.snapshot.playing = false;
         voice.snapshot.path.clear();
         voice.snapshot.epoch = ++nextEpoch;
@@ -189,11 +214,11 @@ static void sampleMusic(PlayLayer* play) {
         auto channel = engine->getActiveMusicChannel(id);
         bool live = false;
         FMOD::Sound* sound = nullptr;
-        unsigned position = 0;
         if (!channel || channel->isPlaying(&live) != FMOD_OK || !live ||
-            channel->getCurrentSound(&sound) != FMOD_OK || sound != music.m_sound ||
-            channel->getPosition(&position, FMOD_TIMEUNIT_MS) != FMOD_OK) continue;
-        auto sampleTime = monotonicNowNs();
+            channel->getCurrentSound(&sound) != FMOD_OK || sound != music.m_sound) continue;
+        auto sampled = playbackPosition(channel, sound, engine->m_globalChannel);
+        if (!sampled) continue;
+        auto [position, sampleTime] = *sampled;
         seen.insert(id);
         auto& voice = voices[id];
         auto& out = voice.snapshot;
@@ -216,7 +241,7 @@ static void sampleMusic(PlayLayer* play) {
                 if (trigger && trigger->m_soundID > 0) voice.source.extraIDs.push_back(trigger->m_soundID);
         }
         out.channelID = id; out.timestamp = sampleTime; out.musicPosition = true;
-        out.position = position / 1000.0;
+        out.position = position;
         out.playing = !channelPaused(channel);
         out.rate = channelRate(channel, sound);
         double elapsed = previousTimestamp && sampleTime >= previousTimestamp ? (sampleTime - previousTimestamp) / 1e9 : 0.;
@@ -271,7 +296,7 @@ static void sampleMusic(PlayLayer* play) {
         if (continueEOF) {
             if (out.playing) out.position += elapsed * out.rate;
             voice.continuing = true;
-            out.timestamp = now;
+            out.timestamp = std::max(now, out.timestamp);
             bool paused = false;
             if (engine->m_backgroundMusicChannel) engine->m_backgroundMusicChannel->getPaused(&paused);
             bool deathPause = play->m_player1 && play->m_player1->m_isDead &&
@@ -296,7 +321,7 @@ static void sampleMusic(PlayLayer* play) {
             if (id == 0 || state.song.empty()) state.song = out.song;
             bridge().publish(out); ++it;
         } else {
-            out.timestamp = now; out.playing = false; out.path.clear(); out.epoch = ++nextEpoch;
+            out.timestamp = std::max(now, out.timestamp); out.playing = false; out.path.clear(); out.epoch = ++nextEpoch;
             bridge().publish(out); it = voices.erase(it);
         }
     }
@@ -367,7 +392,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         selectOffsetLevel(m_level);
         if (m_fields->suspendedContinuation) {
             auto& voice = *m_fields->suspendedContinuation;
-            voice.snapshot.timestamp = monotonicNowNs();
+            voice.snapshot.timestamp = std::max(voice.snapshot.timestamp, monotonicNowNs());
             voice.snapshot.playing = false;
             voice.snapshot.epoch = ++nextEpoch;
             voices[0] = std::move(voice);
