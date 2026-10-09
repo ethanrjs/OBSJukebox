@@ -73,6 +73,11 @@ class Decoder {
             error = "Choose an OBS song in Jukebox.";
             return false;
         }
+        // Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares.
+        if (path.find("://") != std::string::npos || path.starts_with("\\\\") || path.starts_with("//")) {
+            error = "Only local song files can be played.";
+            return false;
+        }
         auto config = ma_decoder_config_init(ma_format_f32, 2, 48000);
         config.seekPointCount = 2048;
 #ifdef _WIN32
