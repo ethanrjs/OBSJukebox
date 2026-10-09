@@ -1,0 +1,3 @@
+• Fixed a crash when opening and closing Jukebox lists
+• Improved OBS audio transitions, timing, and menu music
+• Kept the automatic audio recovery and pause-menu restart fix

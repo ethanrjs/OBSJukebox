@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(SeparateSongOBS VERSION 1.2.1 LANGUAGES CXX C)
+project(SeparateSongOBS VERSION 1.2.2 LANGUAGES CXX C)
 if(APPLE)
   message(FATAL_ERROR "Use scripts/build-obs-plugin.sh for the macOS plugin")
 endif()

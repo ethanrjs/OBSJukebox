@@ -15,7 +15,7 @@ namespace SeparateSongSetup;
 
 static class Program
 {
-    internal const string ReleaseVersion = "1.2.1";
+    internal const string ReleaseVersion = "1.2.2";
     internal const string ProductName = "OBS Jukebox " + ReleaseVersion;
     [STAThread]
     static int Main(string[] args)

@@ -118,9 +118,9 @@ static class InstallerTests
         Check(Engine.AppsForChanges(liveOptions,[Path.Combine(liveOptions.OBS,"obs-plugins","64bit","separate-song.dll")]).Select(a=>a.Name).SequenceEqual(["obs64"]),"plugin-only changes close OBS without closing GD");
         Check(Engine.AppsForChanges(liveOptions,[modDestination,Path.Combine(liveOptions.SceneRoot,"scene.json")]).Count==2,"scene edits still require OBS to close");
         Check(Engine.AppsForChanges(liveOptions,[liveOptions.GD+"-other/plugin.dll"]).Single().Name=="obs64","path prefix collision is not treated as a GD-only change");
-        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.0" }).StartsWith("Successfully updated to 1.2.1."),"existing installation reports successful version update");
-        Check(Engine.SuccessMessage(new Options()).StartsWith("Successfully installed OBS Jukebox 1.2.1."),"fresh installation reports install instead of update");
-        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.1",AlreadyCurrent=true }).Contains("already up to date"),"unchanged installation does not claim an update happened");
+        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.0" }).StartsWith("Successfully updated to 1.2.2."),"existing installation reports successful version update");
+        Check(Engine.SuccessMessage(new Options()).StartsWith("Successfully installed OBS Jukebox 1.2.2."),"fresh installation reports install instead of update");
+        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.2",AlreadyCurrent=true }).Contains("already up to date"),"unchanged installation does not claim an update happened");
         Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.0",ModOnly=true }).Contains("OBS was kept running"),"mod-only success explains the deferred plugin update");
         bool oldOptionRejected=false;
         try { Options.Parse(["--keep-desktop-audio"]); } catch(ArgumentException) { oldOptionRejected=true; }
