@@ -294,10 +294,14 @@ CachedPlayback& forPlayback(int id) {
     return playback.insert_or_assign(id, std::move(value)).first->second;
 }
 
-WeakRef<CCNode> visibleList;
+// The open Jukebox list. Not a WeakRef: assigning a WeakRef that already holds an object
+// repoints its controller without retaining the new one, which left this dangling once the
+// second list opened was closed. Heap-held so no release runs during static teardown.
+Ref<CCNode>& visibleList() { static auto list = new Ref<CCNode>(); return *list; }
 CCNode* findList(CCNode* scene) {
-    auto list = visibleList.lock();
-    if (!list || !list->isRunning()) return nullptr;
+    auto list = visibleList();
+    if (!list) return nullptr;
+    if (!list->isRunning()) { visibleList() = nullptr; return nullptr; }
     for (auto node = list.data(); node; node = node->getParent()) {
         if (!node->isVisible()) return nullptr;
         if (node == scene) return list.data();
@@ -467,7 +471,7 @@ void refreshUI() {
     for (auto cell : cells(list)) paint(cell);
 }
 void observeList(CCNode* node) {
-    if (cellLayoutMatches() && node->getID() == "NongList") visibleList = node;
+    if (cellLayoutMatches() && node->getID() == "NongList") visibleList() = node;
 }
 Readiness prepare(GJGameLevel* level, bool retry) {
     if (!Mod::get()->getSettingValue<bool>("enabled") || !level || !cellLayoutMatches()) return {};
