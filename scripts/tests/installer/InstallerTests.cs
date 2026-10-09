@@ -108,6 +108,20 @@ static class InstallerTests
         }
         finally { Directory.Delete(fixture,true); }
         Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");
+        var liveOptions=Options.Parse(["--mod-only"]);
+        Check(liveOptions.ModOnly,"mod-only update is available from the command line");
+        liveOptions.GD=Path.Combine(Path.GetTempPath(),"GD");
+        liveOptions.OBS=Path.Combine(Path.GetTempPath(),"OBS");
+        string modDestination=Path.Combine(liveOptions.GD,"geode","mods","local.separate_song.geode");
+        Check(Engine.AppsForChanges(liveOptions,[modDestination]).Select(a=>a.Name).SequenceEqual(["GeometryDash"]),"mod-only changes never request OBS to close");
+        Check(Engine.AppsForChanges(liveOptions,[]).Count==0,"unchanged installation closes no apps");
+        Check(Engine.AppsForChanges(liveOptions,[Path.Combine(liveOptions.OBS,"obs-plugins","64bit","separate-song.dll")]).Select(a=>a.Name).SequenceEqual(["obs64"]),"plugin-only changes close OBS without closing GD");
+        Check(Engine.AppsForChanges(liveOptions,[modDestination,Path.Combine(liveOptions.SceneRoot,"scene.json")]).Count==2,"scene edits still require OBS to close");
+        Check(Engine.AppsForChanges(liveOptions,[liveOptions.GD+"-other/plugin.dll"]).Single().Name=="obs64","path prefix collision is not treated as a GD-only change");
+        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.0" }).StartsWith("Successfully updated to 1.2.1."),"existing installation reports successful version update");
+        Check(Engine.SuccessMessage(new Options()).StartsWith("Successfully installed OBS Jukebox 1.2.1."),"fresh installation reports install instead of update");
+        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.1",AlreadyCurrent=true }).Contains("already up to date"),"unchanged installation does not claim an update happened");
+        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.0",ModOnly=true }).Contains("OBS was kept running"),"mod-only success explains the deferred plugin update");
         bool oldOptionRejected=false;
         try { Options.Parse(["--keep-desktop-audio"]); } catch(ArgumentException) { oldOptionRejected=true; }
         Check(oldOptionRejected,"removed audio-prevention CLI switch is rejected");

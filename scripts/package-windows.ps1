@@ -57,7 +57,8 @@ try {
         $dest = Join-Path $source $name
         New-Item -ItemType Directory -Path $dest -Force | Out-Null
         Get-ChildItem -LiteralPath (Join-Path $projectRoot $name) -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj|__pycache__)[\\/]' -and $_.Name -ne 'payload.zip' } | ForEach-Object {
-            $relative = [IO.Path]::GetRelativePath((Join-Path $projectRoot $name), $_.FullName)
+            $sourcePrefix = [IO.Path]::GetFullPath((Join-Path $projectRoot $name)).TrimEnd([char[]]@('\','/')) + [IO.Path]::DirectorySeparatorChar
+            $relative = $_.FullName.Substring($sourcePrefix.Length)
             $target = Join-Path $dest $relative
             New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
             Copy-Item -LiteralPath $_.FullName -Destination $target -Force

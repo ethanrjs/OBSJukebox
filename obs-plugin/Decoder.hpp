@@ -34,11 +34,20 @@ class Decoder {
     std::array<float, 16384> cache{};
     size_t count = 0;
     double phase = 0;
+    bool unexpectedStarvation = false;
+#ifdef OBS_JUKEBOX_QA
+    bool testStarved = false;
+    bool testFailedSeek = false;
+#endif
 
   public:
 #ifdef OBS_JUKEBOX_QA
     inline static std::atomic<int> testOpenDelayMs{0};
     inline static std::atomic<int> testOpenHandles{0};
+    inline static std::atomic<bool> testStarveOnNextSeek{false};
+    inline static std::atomic<bool> testFailOnNextSeek{false};
+    inline static std::atomic<bool> testStarveAllReads{false};
+    inline static std::atomic<unsigned> testOpenCount{0};
 #endif
     double position = 0;
     std::string error;
@@ -61,11 +70,17 @@ class Decoder {
         count = 0;
         phase = 0;
         position = 0;
+        unexpectedStarvation = false;
+#ifdef OBS_JUKEBOX_QA
+        testStarved = false;
+        testFailedSeek = false;
+#endif
     }
     bool open(const std::string &path) {
         close();
         error.clear();
 #ifdef OBS_JUKEBOX_QA
+        ++testOpenCount;
         std::this_thread::sleep_for(std::chrono::milliseconds(testOpenDelayMs.load()));
 #endif
         if (path.empty()) {
@@ -92,7 +107,9 @@ class Decoder {
 #endif
         if (opened) {
 #ifdef _WIN32
-            if (!windowsDecoder)
+            if (windowsDecoder)
+                lengthFrames = windowsDecoder->lengthInFrames();
+            else
 #endif
                 ma_decoder_get_length_in_pcm_frames(&decoder, &lengthFrames);
         }
@@ -111,9 +128,28 @@ class Decoder {
         return opened;
     }
     bool ready() const { return opened; }
+    bool starvedBeforeEnd() const { return unexpectedStarvation; }
+    bool hasAudioAt(double seconds) const {
+        return opened && lengthFrames && std::isfinite(seconds) && seconds >= 0 &&
+               seconds * 48000 + 4800 < double(lengthFrames);
+    }
     bool seek(double seconds) {
         if (!opened)
             return false;
+#ifdef OBS_JUKEBOX_QA
+        testFailedSeek |= testFailOnNextSeek.exchange(false);
+        if (testFailedSeek) {
+            count = 0;
+            seekValid = false;
+            return false;
+        }
+        if (testStarveOnNextSeek.exchange(false)) {
+            testStarved = true;
+            count = 0;
+            phase = 0;
+            seekValid = false;
+        }
+#endif
         // position describes phase within the retained PCM window, not the backend's read-ahead cursor.
         double cachedStart = position - phase / 48000.;
         double cachedPhase = (seconds - cachedStart) * 48000.;
@@ -149,6 +185,7 @@ class Decoder {
         return true;
     }
     void render(float *output, size_t frames, double rate) {
+        unexpectedStarvation = false;
         if (!opened || !seekValid) {
             std::fill_n(output, frames * 2, 0.f);
             return;
@@ -162,6 +199,9 @@ class Decoder {
         size_t needed = size_t(std::ceil(phase + frames * rate)) + 2;
         if (count < needed) {
             ma_uint64 got = 0;
+#ifdef OBS_JUKEBOX_QA
+            if (!testStarved && !testStarveAllReads.load()) {
+#endif
 #ifdef _WIN32
             if (windowsDecoder)
                 got = windowsDecoder->read(cache.data() + count * 2, cache.size() / 2 - count);
@@ -169,10 +209,17 @@ class Decoder {
 #endif
                 ma_decoder_read_pcm_frames(&decoder, cache.data() + count * 2, cache.size() / 2 - count,
                                            &got);
+#ifdef OBS_JUKEBOX_QA
+            }
+#endif
             count += got;
         }
         for (size_t i = 0; i < frames; ++i) {
             auto at = size_t(phase);
+            // Digital silence is valid PCM. Only a missing frame before the
+            // known end of the file is evidence of a stuck decoder.
+            if (at >= count && hasAudioAt(position + i * rate / 48000.))
+                unexpectedStarvation = true;
             double blend = phase - at;
             for (size_t ch = 0; ch < 2; ++ch) {
                 float a = at < count ? cache[at * 2 + ch] : 0,

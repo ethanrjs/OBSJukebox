@@ -14,6 +14,7 @@
 #define MODULE_EXPORT
 #define LOG_ERROR 1
 #define LOG_INFO 2
+#define LOG_WARNING 3
 #define OBS_TEXT_INFO 0
 #define OBS_SOURCE_TYPE_INPUT 0
 #define OBS_SOURCE_DO_NOT_DUPLICATE 2

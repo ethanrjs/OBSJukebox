@@ -1,0 +1,2 @@
+• Auto fixes audio if it’s detected as not playing in OBS when playing in game
+• Fixed very weird edge case with audio

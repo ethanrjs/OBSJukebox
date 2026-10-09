@@ -57,6 +57,7 @@ class WindowsMediaDecoder {
         return false;
     }
 public:
+    uint64_t lengthInFrames() const { return duration / 10000000 * 48000 + duration % 10000000 * 48000 / 10000000; }
     ~WindowsMediaDecoder(){close();}
     void close(){
         reader.Reset();pending.clear();cursor=0;eof=false;duration=0;trimSeek=false;

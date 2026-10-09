@@ -451,6 +451,8 @@ struct SongSource {
         Clock::time_point retryAt{};
         uint64_t lastUsed = 0;
         Clock::time_point reopenAt{};
+        uint64_t starvedSince = 0;
+        Clock::time_point recoverAt{};
     };
     void decodeMusic() {
         configureAudioThread();
@@ -549,7 +551,9 @@ struct SongSource {
                     double target = sourcePosition + p.offset;
                     bool playing = (p.flags & 3) == 3 && active && std::isfinite(target) && target >= 0 &&
                                    target <= 31536000.0 && decoder.ready();
+                    const bool expectedAudio = playing && decoder.hasAudioAt(target);
                     voiceAudio.fill(0);
+                    bool starved = false;
                     if (playing) {
                         if (v.lastEpoch != p.epoch || !v.wasPlaying ||
                             std::abs(decoder.position - target) > .04)
@@ -563,6 +567,7 @@ struct SongSource {
                                     count = std::min(count, size_t(std::max(1.0, std::ceil(untilEnd))));
                                 }
                                 decoder.render(voiceAudio.data() + rendered * 2, count, p.rate);
+                                starved |= decoder.starvedBeforeEnd();
                                 rendered += count;
                                 sourcePosition += double(count) * p.rate / 48000;
                                 if (looping && sourcePosition >= p.loopEnd) {
@@ -575,6 +580,24 @@ struct SongSource {
                                 }
                             }
                         }
+                    }
+                    if (expectedAudio && (!playing || starved)) {
+                        if (!v.starvedSince)
+                            v.starvedSince = segmentTime;
+                        if (segmentTime >= v.starvedSince + 100000000 && Clock::now() >= v.recoverAt) {
+                            // Recreate a backend that accepted a seek but stopped
+                            // delivering PCM. The next block seeks from its fresh
+                            // timestamp, including rate and user offset; it never
+                            // resumes from the position before the stall.
+                            v.recoverAt = Clock::now() + std::chrono::seconds(1);
+                            decoder.open(v.resolvedPath);
+                            v.lastEpoch = ~0u;
+                            playing = false;
+                            v.starvedSince = 0;
+                            blog(LOG_WARNING, "[OBS Jukebox] Recovering stalled music decoder on channel %d", channel);
+                        }
+                    } else {
+                        v.starvedSince = 0;
                     }
                     for (size_t j = 0; j < end - first; ++j) {
                         float gain = p.musicVolume * songGainAt(p, segmentTime + j * 1000000000 / 48000);

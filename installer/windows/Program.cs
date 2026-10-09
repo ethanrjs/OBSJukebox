@@ -15,7 +15,7 @@ namespace SeparateSongSetup;
 
 static class Program
 {
-    internal const string ReleaseVersion = "1.2.0";
+    internal const string ReleaseVersion = "1.2.1";
     internal const string ProductName = "OBS Jukebox " + ReleaseVersion;
     [STAThread]
     static int Main(string[] args)
@@ -49,8 +49,10 @@ sealed class Options
     public string PluginRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "obs-studio", "plugins");
     public string StateRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OBS Jukebox", "Installations");
     public string SceneRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "obs-studio", "basic", "scenes");
-    public bool Silent, DryRun, CloseApps, Restart, Uninstall, InstallJukebox, CreateScene;
+    public bool Silent, DryRun, CloseApps, Restart, Uninstall, InstallJukebox, CreateScene, ModOnly;
     internal byte[]? DownloadedJukebox;
+    internal string? PreviousVersion;
+    internal bool AlreadyCurrent;
     public string? Manifest;
     public static Options Parse(string[] args)
     {
@@ -71,6 +73,7 @@ sealed class Options
                 case "--close-apps": o.CloseApps = true; break;
                 case "--restart": o.Restart = true; break;
                 case "--install-jukebox": o.InstallJukebox = true; break;
+                case "--mod-only": o.ModOnly = true; break;
                 case "--integrate": o.CreateScene = true; break;
                 case "--no-scene": case "--no-integrate": o.CreateScene = false; break;
                 case "--uninstall": o.Uninstall = true; break;
@@ -222,6 +225,21 @@ static class Engine
         catch(UnauthorizedAccessException) { return false; }
         catch(JsonException) { return false; }
     }
+    internal static string? InstalledVersion(string gd)
+    {
+        string path=Path.Combine(gd,"geode","mods","local.separate_song.geode");
+        if(!File.Exists(path)) return null;
+        try { return PackageVersion(File.ReadAllBytes(path),"local.separate_song"); }
+        catch(InvalidDataException) { return null; }
+        catch(JsonException) { return null; }
+    }
+    internal static string SuccessMessage(Options o)
+    {
+        string result=o.AlreadyCurrent ? "OBS Jukebox " + Program.ReleaseVersion + " is already up to date." :
+            o.PreviousVersion!=null ? "Successfully updated to " + Program.ReleaseVersion + "." :
+            "Successfully installed OBS Jukebox " + Program.ReleaseVersion + ".";
+        return result+(o.ModOnly ? " OBS was kept running. Run full setup after your stream to apply OBS plugin fixes." : " You may close setup.");
+    }
     public static List<PlannedFile> Plan(Options o, Action<string> log)
     {
         if (!File.Exists(Path.Combine(o.GD, "GeometryDash.exe"))) throw new IOException("Choose the Geometry Dash folder containing GeometryDash.exe.");
@@ -260,8 +278,13 @@ static class Engine
         Add(Path.Combine(o.GD,"geode","mods","local.separate_song.geode"),mod,"OBS Jukebox mod " + Program.ReleaseVersion);
         bool portable = File.Exists(Path.Combine(o.OBS,"portable_mode.txt")) || File.Exists(Path.Combine(o.OBS,"portable_mode"));
         string plugin = portable ? Path.Combine(o.OBS,"obs-plugins","64bit","separate-song.dll") : Path.Combine(o.PluginRoot,"separate-song","bin","64bit","separate-song.dll");
-        Add(plugin,Required("obs/separate-song.dll"),"Native OBS source GD Sounds");
-        if (o.CreateScene)
+        if (o.ModOnly)
+        {
+            if (!File.Exists(plugin)) throw new IOException("Mod-only updates require an existing OBS Jukebox plugin. Run a full installation first.");
+            log("Mod-only update: OBS stays running. The installed OBS plugin and scenes are kept. Run full setup after your stream to apply OBS plugin fixes.");
+        }
+        else Add(plugin,Required("obs/separate-song.dll"),"Native OBS source GD Sounds");
+        if (o.CreateScene && !o.ModOnly)
         {
             string sceneRoot = portable ? Path.Combine(o.OBS,"config","obs-studio","basic","scenes") : o.SceneRoot;
             if (!Directory.Exists(sceneRoot)) log("No existing OBS collections found. In OBS add Sources > GD Sounds once; setup creates no new collection.");
@@ -434,9 +457,23 @@ static class Engine
         try { var path=new StringBuilder(32768);int length=path.Capacity;return QueryFullProcessImageName(handle,0,path,ref length)?path.ToString():null; }
         finally { CloseHandle(handle); }
     }
-    static void CloseMatchingApps(Options o,Action<string> log,List<string> stopped)
+    internal static List<(string Name,string Exe)> AppsForChanges(Options o,IEnumerable<string> destinations)
     {
-        foreach (var (name, exe) in new[]{("GeometryDash",Path.Combine(o.GD,"GeometryDash.exe")),("obs64",Path.Combine(o.OBS,"bin","64bit","obs64.exe"))})
+        string gdRoot=Path.GetFullPath(o.GD).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar)+Path.DirectorySeparatorChar;
+        bool gd=false,obs=false;
+        foreach(var path in destinations)
+        {
+            if(Path.GetFullPath(path).StartsWith(gdRoot,StringComparison.OrdinalIgnoreCase)) gd=true;
+            else obs=true;
+        }
+        var apps=new List<(string,string)>();
+        if(gd) apps.Add(("GeometryDash",Path.Combine(o.GD,"GeometryDash.exe")));
+        if(obs) apps.Add(("obs64",Path.Combine(o.OBS,"bin","64bit","obs64.exe")));
+        return apps;
+    }
+    static void CloseMatchingApps(Options o,Action<string> log,List<string> stopped,IEnumerable<string> destinations)
+    {
+        foreach (var (name, exe) in AppsForChanges(o,destinations))
         foreach (var p in Process.GetProcessesByName(name))
         {
             using var process=p;
@@ -456,11 +493,12 @@ static class Engine
         void Log(string s) { string line=DateTimeOffset.Now.ToString("O") + " " + s; logLines.Add(line); output(s); if(logPath!=null) File.AppendAllText(logPath,line+Environment.NewLine); }
         var stopped=closedApps??new List<string>();
         if (o.Uninstall) { Uninstall(o,Log,stopped); if(closedApps==null && o.Restart) RestartApps(stopped,Log); return; }
+        o.PreviousVersion=InstalledVersion(o.GD); o.AlreadyCurrent=false;
         var plan=Plan(o,Log);
         foreach(var f in plan) Log($"{f.Reason}: {f.Destination} SHA256={Hash(f.Data)} ({f.Data.Length:N0} bytes)");
         if(o.DryRun) { Log("Dry run complete. No destination files changed and no apps were closed."); return; }
-        if(plan.Count==0) { Log("Already installed and integrated. No files changed; existing restore manifest preserved."); return; }
-        CloseMatchingApps(o,Log,stopped);
+        if(plan.Count==0) { o.AlreadyCurrent=true; Log(SuccessMessage(o)); Log("No files changed; existing restore manifest preserved."); return; }
+        CloseMatchingApps(o,Log,stopped,plan.Select(f=>f.Destination));
         plan=Plan(o,Log);
         string session=Path.Combine(o.StateRoot,DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(session); logPath=Path.Combine(session,"install.log"); File.WriteAllLines(logPath,logLines);
@@ -487,8 +525,9 @@ static class Engine
                 Log("Installed: "+f.Destination);
             }
             record.Status="installed"; Save();
-            Log("Install complete. Backup and uninstall manifest: "+manifest);
-            Log("OBS: GD Sounds is added to existing scenes. In GD Jukebox, use the Game and OBS checkboxes in Jukebox. Audio Monitoring stays off. Existing OBS collections and unrelated mods are preserved.");
+            Log(SuccessMessage(o));
+            Log("Backup and uninstall manifest: "+manifest);
+            Log(o.ModOnly ? "Game mod updated. OBS was left running. Run full setup after your stream for the OBS plugin update." : "OBS: GD Sounds is added to existing scenes. In GD Jukebox, use the Game and OBS checkboxes in Jukebox. Audio Monitoring stays off. Existing OBS collections and unrelated mods are preserved.");
             File.WriteAllText(Path.Combine(o.StateRoot,"latest-manifest.txt"),manifest);
 
         }
@@ -551,7 +590,7 @@ static class Engine
         if(!IsKnownProduct(record.Product)) throw new IOException("Not an OBS Jukebox installation manifest.");
         if(record.Status!="installed") throw new IOException("This transaction is not installed: "+record.Status);
         if(o.DryRun) { foreach(var f in record.Files) log("Would restore/remove if unchanged: "+f.Destination); return; }
-        o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped);
+        o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination));
         Restore(record,log); record.Status="uninstalled"; File.WriteAllText(path,JsonSerializer.Serialize(record,JsonOptions));
         log("Removed this install transaction. Later user changes were preserved. To restore an earlier installer update, repeat with that earlier manifest. Geode/Jukebox already present before this transaction were retained.");
     }
@@ -562,7 +601,8 @@ sealed class SetupForm : Form
     readonly Options options;
     readonly TextBox gd=new(),obs=new();
     readonly Label status=new(){Dock=DockStyle.Fill,MinimumSize=new Size(0,72),Font=new Font("Segoe UI",11,FontStyle.Bold)},dependency=new(){AutoSize=true};
-    readonly CheckBox close=new(){Text="Close GD and OBS for installation",AutoSize=true},restart=new(){Text="Reopen GD and OBS afterward",AutoSize=true},scene=new(){Text="Add GD Sounds to my existing OBS scenes",AutoSize=true,Checked=false};
+    readonly CheckBox close=new(){Text="Close apps only when their files need updating",AutoSize=true},restart=new(){Text="Reopen apps closed by setup",AutoSize=true},scene=new(){Text="Add GD Sounds to my existing OBS scenes",AutoSize=true,Checked=false};
+    readonly CheckBox modOnly=new(){Text="Update game mod only (keep OBS running)",AutoSize=true};
     readonly CheckBox jukebox=new(){Text="Download and install Jukebox 3.8.0",AutoSize=true};
     readonly Button install=new(){Text="Install",AutoSize=true},undo=new(){Text="Undo last install",AutoSize=true};
     readonly object logLock=new();
@@ -583,7 +623,8 @@ sealed class SetupForm : Form
         layout.Controls.Add(new Label{Text="Separate GD/Song output for OBS",AutoSize=true});
         gd.Text=DisplayPath(o.GD);obs.Text=DisplayPath(o.OBS);layout.Controls.Add(PathRow("Geometry Dash folder",gd));layout.Controls.Add(PathRow("OBS Studio folder",obs));
         var prerequisite=new FlowLayoutPanel{Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoSize=true,AutoSizeMode=AutoSizeMode.GrowAndShrink,Padding=new Padding(0,6,0,6)};prerequisite.Controls.Add(dependency);prerequisite.Controls.Add(jukebox);layout.Controls.Add(prerequisite);
-        var choices=new FlowLayoutPanel{Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoSize=true,AutoSizeMode=AutoSizeMode.GrowAndShrink,Padding=new Padding(0,0,0,18)};choices.Controls.Add(scene);choices.Controls.Add(close);choices.Controls.Add(restart);layout.Controls.Add(choices);
+        var choices=new FlowLayoutPanel{Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoSize=true,AutoSizeMode=AutoSizeMode.GrowAndShrink,Padding=new Padding(0,0,0,18)};choices.Controls.Add(modOnly);choices.Controls.Add(new Label{Text="Mod-only: restart GD now; run full setup after your stream for OBS fixes.",AutoSize=true});choices.Controls.Add(scene);choices.Controls.Add(close);choices.Controls.Add(restart);layout.Controls.Add(choices);
+        modOnly.Checked=o.ModOnly;modOnly.CheckedChanged+=(_,_)=>{scene.Enabled=!modOnly.Checked;};scene.Enabled=!modOnly.Checked;
         close.Checked=o.CloseApps||!o.Silent;restart.Checked=o.Restart||!o.Silent;scene.Checked=o.CreateScene;jukebox.Checked=o.InstallJukebox;
         status.Text="Finish any OBS recording, then click Install.";layout.Controls.Add(status);
         var buttons=new FlowLayoutPanel{Dock=DockStyle.Fill,AutoSize=true,AutoSizeMode=AutoSizeMode.GrowAndShrink};install.Click+=async(_,_)=>await Install();undo.Click+=async(_,_)=>await Install(true);buttons.Controls.Add(install);buttons.Controls.Add(undo);layout.Controls.Add(buttons);
@@ -622,7 +663,7 @@ sealed class SetupForm : Form
         }
         catch(Exception){dependency.Text="Choose your Geometry Dash folder.";jukebox.Visible=false;}
     }
-    void Collect(){options.GD=Options.NormalizeGD(gd.Text);options.OBS=Options.NormalizeOBS(obs.Text);options.CloseApps=close.Checked;options.Restart=restart.Checked;options.CreateScene=scene.Checked;options.InstallJukebox=jukebox.Visible&&jukebox.Checked;}
+    void Collect(){options.GD=Options.NormalizeGD(gd.Text);options.OBS=Options.NormalizeOBS(obs.Text);options.CloseApps=close.Checked;options.Restart=restart.Checked;options.ModOnly=modOnly.Checked;options.CreateScene=scene.Checked&&!modOnly.Checked;options.InstallJukebox=jukebox.Visible&&jukebox.Checked;}
     void SetStatus(string text,bool error=false)
     {
         if(InvokeRequired){BeginInvoke(()=>SetStatus(text,error));return;}
@@ -638,7 +679,7 @@ sealed class SetupForm : Form
     }
     async Task Install(bool restoring=false)
     {
-        Control[] inputs=[gd.Parent!,obs.Parent!,scene,close,restart,jukebox,install,undo];
+        Control[] inputs=[gd.Parent!,obs.Parent!,scene,modOnly,close,restart,jukebox,install,undo];
         foreach(var input in inputs)input.Enabled=false;
         bool success=false;
         try
@@ -646,7 +687,7 @@ sealed class SetupForm : Form
             Collect();options.Uninstall=restoring;
             if(restoring&&!Engine.CanUndo(options)){SetStatus("There is no previous installation to undo.");return;}
             string logs=Path.Combine(options.StateRoot,"SetupLogs");Directory.CreateDirectory(logs);attemptLog=Path.Combine(logs,DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..6]+".log");
-            SetStatus(restoring?"Restoring the previous installation...":options.Restart?"Installing. OBS will reopen when setup finishes.":"Installing. Restart OBS afterward to load GD Sounds.");
+            SetStatus(restoring?"Restoring the previous installation...":options.ModOnly?"Updating the game mod. OBS will stay running.":"Installing. Only apps with changed files need to close.");
             var stopped=new List<string>();
             await Task.Run(()=>Engine.Execute(options,Detail,stopped));
             if(options.Restart)Engine.RestartApps(stopped,Detail);
@@ -657,7 +698,7 @@ sealed class SetupForm : Form
             try{Detail(ex.ToString());}catch(IOException){}
             SetStatus(ex is UnauthorizedAccessException ? "Setup cannot write this folder. Choose a writable installation or grant your account access, then retry. User files are never edited by an elevated installer." : ex.Message,true);
         }
-        finally{foreach(var input in inputs)input.Enabled=true;options.Uninstall=false;undo.Enabled=Engine.CanUndo(options);}
-        if(success)SetStatus(restoring?"Undo complete. Later user changes were preserved. You may close setup.":"Installation complete. GD Sounds is ready. You may close setup.");
+        finally{foreach(var input in inputs)input.Enabled=true;scene.Enabled=!modOnly.Checked;options.Uninstall=false;undo.Enabled=Engine.CanUndo(options);}
+        if(success)SetStatus(restoring?"Undo complete. Later user changes were preserved. You may close setup.":Engine.SuccessMessage(options));
     }
 }

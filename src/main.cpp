@@ -257,6 +257,8 @@ static void sampleMusic(PlayLayer* play) {
         out.level = state.level; out.attempt = state.attempt;
         jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
         if (previousPath != out.path && !newVoice) out.epoch = ++nextEpoch;
+        if (id == 0 && (newVoice || previousPlaying != out.playing))
+            log::info("OBS restart trace: attempt={} playing={} pos={} gain={} fades={} paused={} fadeStart={} fadeDuration={} elapsed={} delay={}:{}", play->m_attempts, out.playing, out.position, out.triggerGain, out.fadeCount, play->m_isPaused, engine->m_musicFadeStart, engine->m_backgroundMusicFade, engine->m_audioState.m_elapsed, start, end);
         if (id == 0 || state.song.empty()) state.song = out.song;
         bridge().publish(out);
     }
@@ -389,9 +391,14 @@ class $modify(SeparateSongPlay, PlayLayer) {
         }
         return false;
     }
-    void startMusic() { PlayLayer::startMusic(); sampleMusic(this); }
+    void startMusic() { activateLink(); PlayLayer::startMusic(); sampleMusic(this); }
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
+        // A switcher can reuse the current layer without a scene-enter or
+        // resume callback. Reclaim only the live current layer, never one
+        // retained by an outgoing scene.
+        if (activePlayLayer != this && PlayLayer::get() == this && isRunning())
+            activateLink();
         if (m_fields->observedLevel != m_level) {
             m_fields->observedLevel = m_level;
             if (m_level) playingSongs = jukebox_link::snapshotSongs(m_level);
@@ -409,7 +416,10 @@ class $modify(SeparateSongPlay, PlayLayer) {
     }
     void resetLevel() {
         m_fields->suspendedContinuation.reset();
-        cancelVoice(0, false);
+        activateLink();
+        // A paused restart can reuse channel/sound pointers. Rebuild voice
+        // state for the new attempt, including its envelope and epoch.
+        stopVoices();
         PlayLayer::resetLevel(); sampleMusic(this);
     }
     void pauseGame(bool unfocused) { PlayLayer::pauseGame(unfocused); sampleMusic(this); }
