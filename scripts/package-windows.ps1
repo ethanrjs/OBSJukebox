@@ -9,10 +9,10 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $metadata = Get-Content -LiteralPath (Join-Path $projectRoot 'mod.json') -Raw | ConvertFrom-Json
 $releaseVersion = $metadata.version.TrimStart('v')
-if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'mod.json must contain a release version such as v1.1.0.' }
+if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'mod.json must contain a release version such as v1.2.0.' }
 if (!$ModPath) { $ModPath = Join-Path $projectRoot 'artifacts/windows/local.separate_song.geode' }
 if (!$PluginPath) { $PluginPath = Join-Path $projectRoot 'artifacts/windows/separate-song.dll' }
-if (!$GeodeRoot) { $GeodeRoot = Join-Path $projectRoot 'tools/geode-windows-5.10.1' }
+if (!$GeodeRoot) { $GeodeRoot = Join-Path $projectRoot ('tools/pinned/geode-windows-' + $metadata.geode.TrimStart('v')) }
 if (!$OutputDirectory) { $OutputDirectory = Join-Path $projectRoot 'artifacts/windows/release' }
 foreach ($file in @($ModPath, $PluginPath)) {
     if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Payload not found: $file" }
@@ -53,7 +53,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $OutputDirectory -Force
     $source = Join-Path $OutputDirectory 'Source'
     New-Item -ItemType Directory -Path $source -Force | Out-Null
-    foreach ($name in @('src','obs-plugin','resources','vendor','installer','scripts')) {
+    foreach ($name in @('src','obs-plugin','vendor','installer','scripts','tools/qa','.github')) {
         $dest = Join-Path $source $name
         New-Item -ItemType Directory -Path $dest -Force | Out-Null
         Get-ChildItem -LiteralPath (Join-Path $projectRoot $name) -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj|__pycache__)[\\/]' -and $_.Name -ne 'payload.zip' } | ForEach-Object {

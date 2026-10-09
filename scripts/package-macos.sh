@@ -3,8 +3,10 @@ set -euo pipefail
 song_root="${0:A:h:h}"
 cd "$song_root"
 : ${MAC_ARCH:=$(uname -m)}
-: ${GEODE_PAYLOAD:?Set GEODE_PAYLOAD to the official macOS loader files and resources directory}
-: ${JUKEBOX_PACKAGE:="$song_root/downloads/fleym.nongd.geode"}
+: ${DEPENDENCY_ROOT:="$song_root/tools/pinned"}
+python3 scripts/fetch-dependencies.py mac --destination "$DEPENDENCY_ROOT"
+: ${GEODE_PAYLOAD:="$DEPENDENCY_ROOT/geode-macos-5.10.1"}
+: ${JUKEBOX_PACKAGE:="$DEPENDENCY_ROOT/fleym.nongd.geode"}
 : ${MOD_PACKAGE:="$song_root/build-mac/local.separate_song.geode"}
 song_version=$(/usr/bin/plutil -extract version raw -o - mod.json)
 song_version="${song_version#v}"
@@ -29,13 +31,19 @@ cat > "$song_app/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 cp scripts/Install.command "$song_resources/Install.command"
+cp scripts/install-state.pl "$song_resources/install-state.pl"
 cp scripts/check-geode-version.pl "$song_resources/check-geode-version.pl"
 cp logo.png "$song_resources/logo.png"
 cp "$MOD_PACKAGE" "$song_resources/payload/local.separate_song.geode"
 cp "$JUKEBOX_PACKAGE" "$song_resources/payload/fleym.nongd.geode"
+cp vendor/jukebox-3.8.0/LICENSE "$song_resources/Jukebox-LICENSE"
+cp LICENSE "$song_resources/LICENSE"
 ditto dist/separate-song.plugin "$song_resources/payload/separate-song.plugin"
 ditto "$GEODE_PAYLOAD" "$song_resources/payload/geode"
-for song_path in src obs-plugin vendor scripts installer; do
+cp "$DEPENDENCY_ROOT/geode-sdk/loader/include/link/macos/libfmod.dylib" "$song_resources/payload/geode/libfmod.dylib"
+mkdir -p "$song_resources/payload/geode/resources/geode.loader"
+ditto "$DEPENDENCY_ROOT/geode-resources" "$song_resources/payload/geode/resources/geode.loader"
+for song_path in src obs-plugin vendor scripts installer tools/qa .github; do
     mkdir -p "$song_resources/Source/$song_path"
     tar -cf - --exclude=bin --exclude=obj --exclude=payload.zip "$song_path" | tar -xf - -C "$song_resources/Source"
 done

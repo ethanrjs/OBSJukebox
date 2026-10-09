@@ -1,0 +1,98 @@
+name: Native builds
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Fetch locked inputs
+        run: python scripts/fetch-dependencies.py windows --include-obs
+      - name: Build mod and OBS plugin
+        run: ./scripts/build-windows.ps1 -ObsDirectory "$PWD/tools/pinned/obs"
+      - name: Installer regression tests
+        run: dotnet run --project scripts/tests/installer/InstallerTests.csproj -c Release
+      - name: Package installer
+        run: ./scripts/package-windows.ps1
+      - name: Protocol and decoder compilation
+        run: |
+          cmake -S tools/qa -B build-windows/qa -A x64 -DOBS_SDK="$PWD/tools/pinned/obs-sdk" -DSIMDE_INCLUDE="$PWD/tools/pinned/simde" -DOBS_IMPORT_LIBRARY="$PWD/build-windows/obs.lib"
+          cmake --build build-windows/qa --config Release --parallel 2
+          ctest --test-dir build-windows/qa -C Release --output-on-failure
+          python tools/qa/test_link_protocol.py
+      - name: Audio regressions
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          $env:PATH += ';C:\ProgramData\chocolatey\bin'
+          ./scripts/tests/audio/run.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Windows-installer
+          path: artifacts/windows/release
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Windows-mod
+          path: artifacts/windows/local.separate_song.geode
+          if-no-files-found: error
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Fetch locked inputs
+        run: python3 scripts/fetch-dependencies.py mac --include-obs
+      - name: Mount OBS runtime
+        run: |
+          mkdir -p "$RUNNER_TEMP/obs-mount"
+          hdiutil attach tools/pinned/OBS.dmg -nobrowse -mountpoint "$RUNNER_TEMP/obs-mount"
+          ditto "$RUNNER_TEMP/obs-mount/OBS.app" "$RUNNER_TEMP/OBS.app"
+          hdiutil detach "$RUNNER_TEMP/obs-mount"
+      - name: Build mod and OBS plugin
+        env:
+          OBS_APP: ${{ runner.temp }}/OBS.app
+        run: zsh scripts/build-macos.sh
+      - name: Audio and protocol regressions
+        run: |
+          brew install ffmpeg
+          bash scripts/tests/audio/run.sh
+          python3 tools/qa/test_link_protocol.py
+          c++ -std=c++20 tools/qa/protocol-layout.cpp -o "$RUNNER_TEMP/protocol-layout"
+          python3 tools/qa/test_protocol_layout.py "$RUNNER_TEMP/protocol-layout"
+          python3 tools/qa/check-geode-version.py
+          python3 tools/qa/unix-install-state.py --perl
+      - name: Package installer
+        run: |
+          zsh scripts/package-macos.sh
+      - name: Installer transaction tests
+        env:
+          OBS_APP: ${{ runner.temp }}/OBS.app
+        run: zsh tools/qa/mac-installer-check.sh artifacts/macos/*.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macOS-installer
+          path: artifacts/macos
+          if-no-files-found: error
+  linux-package:
+    needs: windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Windows-mod
+          path: artifacts/windows
+      - run: sudo apt-get update && sudo apt-get install -y libobs-dev cmake pkg-config
+      - run: bash scripts/build-linux.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Linux-installer
+          path: artifacts/linux/OBS-Jukebox-Linux-x86_64.tar.gz
+          if-no-files-found: error

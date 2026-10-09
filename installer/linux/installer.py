@@ -87,7 +87,7 @@ class SetupWindow:
         selection = ttk.Combobox(obs_row, textvariable=self.obs, values=("Native OBS Studio", "Flatpak OBS Studio"), state="readonly")
         selection.grid(row=1, column=0, sticky="ew", pady=(3, 0))
         self.inputs.append(selection)
-        ttk.Label(outer, text="Jukebox 3.8.0 is required. Install it through Geode in GD.\nGeode 5.10.x or later 5.x must already be installed for Proton.", wraplength=680).grid(row=4, column=0, sticky="w", pady=(12, 8))
+        ttk.Label(outer, text="Jukebox 3.8.0 is required. Install it through Geode in GD.\nGeode >=5.10.1 and <6.0.0 must already be installed for Proton.", wraplength=680).grid(row=4, column=0, sticky="w", pady=(12, 8))
         choices = ttk.Frame(outer)
         choices.grid(row=5, column=0, sticky="ew")
         reopen = ttk.Checkbutton(choices, text="Reopen GD and OBS afterward", variable=self.reopen)
@@ -106,6 +106,9 @@ class SetupWindow:
         self.install_button = ttk.Button(buttons, text="Install", command=self.install)
         self.install_button.pack(side="left")
         self.inputs.append(self.install_button)
+        undo = ttk.Button(buttons, text="Undo last install", command=lambda: self.install(undo=True))
+        undo.pack(side="left", padx=(10, 0))
+        self.inputs.append(undo)
         logs = tk.Label(outer, text="Open backups and setup logs", font=("DejaVu Sans", 10), fg="#0066cc", bg="#f0f0f0", cursor="hand2", underline=0)
         logs.grid(row=9, column=0, sticky="w", pady=(12, 0))
         logs.bind("<Button-1>", lambda _: self.open_logs())
@@ -134,21 +137,22 @@ class SetupWindow:
         for control in self.inputs:
             control.configure(state="disabled" if value else "readonly" if isinstance(control, ttk.Combobox) else "normal")
 
-    def install(self):
+    def install(self, undo=False):
         if self.busy:
             return
         try:
-            command = install_command(self.package, self.game.get(), self.prefix.get(), self.obs.get() == "Flatpak OBS Studio")
+            command = ["bash", str(self.package / "Install.sh"), "--uninstall"] if undo else install_command(self.package, self.game.get(), self.prefix.get(), self.obs.get() == "Flatpak OBS Studio")
             logs = data_root() / "SetupLogs"
             logs.mkdir(parents=True, exist_ok=True)
             log = logs / (time.strftime("%Y%m%d-%H%M%S") + "-" + str(time.time_ns()) + ".log")
         except (ValueError, OSError) as error:
             self.status.set(str(error))
             return
-        self.reopen_after = self.reopen.get()
+        self.undo_after = undo
+        self.reopen_after = self.reopen.get() and not undo
         self.flatpak_after = self.obs.get() == "Flatpak OBS Studio"
         self.set_busy(True)
-        self.status.set("Installing OBS Jukebox...")
+        self.status.set("Undoing last install..." if undo else "Installing OBS Jukebox...")
         threading.Thread(target=self.run_backend, args=(command, log), daemon=True).start()
 
     def run_backend(self, command, log):
@@ -174,7 +178,7 @@ class SetupWindow:
         else:
             self.set_busy(False)
             if success:
-                self.status.set("Installed. In OBS, add GD Sounds once. Keep monitoring off and exclude GD audio from other recording sources.")
+                self.status.set(detail if self.undo_after else "Installed. In OBS, add GD Sounds once. Keep monitoring off and exclude GD audio from other recording sources.")
                 if self.reopen_after:
                     try:
                         obs_command = ["flatpak", "run", "com.obsproject.Studio"] if self.flatpak_after else ["obs"]

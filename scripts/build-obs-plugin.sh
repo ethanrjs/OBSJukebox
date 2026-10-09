@@ -8,7 +8,7 @@ cd "$song_root"
 : ${MAC_ARCH:=$(uname -m)}
 mkdir -p dist/separate-song.plugin/Contents/MacOS
 clang++ -std=c++20 -O2 -bundle -arch "$MAC_ARCH" -mmacosx-version-min=13.0 \
-  -I"$OBS_SDK/libobs" -I"$SIMDE_INCLUDE" -Iobs-plugin obs-plugin/separate-song.cpp \
+  -I"$OBS_SDK/libobs" -I"$SIMDE_INCLUDE" -Iobs-plugin obs-plugin/separate-song.cpp obs-plugin/Decoder.cpp \
   -F"$OBS_APP/Contents/Frameworks" -framework libobs -framework AudioToolbox -framework CoreFoundation \
   -Wl,-rpath,@executable_path/../Frameworks \
   -o dist/separate-song.plugin/Contents/MacOS/separate-song

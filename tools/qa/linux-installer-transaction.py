@@ -4,6 +4,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
+import json
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,7 +26,8 @@ class InstallerTransactionTests(unittest.TestCase):
         (self.game / "GeometryDash.exe").touch()
         (self.game / "Geode.dll").touch()
         shutil.copyfile(ROOT / "scripts/install-linux.sh", self.package / "Install.sh")
-        (self.package / "check-geode-version.pl").write_text('print "5.10.0\\n";')
+        shutil.copyfile(ROOT / "scripts/install-state.pl", self.package / "install-state.pl")
+        (self.package / "check-geode-version.pl").write_text('print "5.10.1\\n";')
         (self.package / "payload/separate-song.so").write_bytes(b"NEWPLUGIN")
         (self.package / "payload/local.separate_song.geode").write_bytes(b"NEWMOD")
         self.targets = [
@@ -38,6 +41,12 @@ class InstallerTransactionTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
             path.chmod(0o640)
+        for name, mod_id in (("local.separate_song", "local.separate_song"), ("fleym.nongd", "fleym.nongd")):
+            with zipfile.ZipFile(self.game / f"geode/mods/{name}.geode", "w") as mod:
+                mod.writestr("mod.json", json.dumps(dict(id=mod_id, version="3.8.0" if name == "fleym.nongd" else "1.1.0")))
+                mod.writestr(f"{mod_id}.dll", "fixture")
+            (self.game / f"geode/mods/{name}.geode").chmod(0o640)
+        self.originals[1] = self.targets[1].read_bytes()
         self.wrapper("uname", 'if [[ "$1" == -s ]]; then echo Linux; else echo x86_64; fi')
         self.wrapper("pgrep", "exit 1")
         self.wrapper("install", 'if [[ "$FAIL_AT" == stage-mod && "$*" == *payload/local.separate_song.geode* ]]; then exit 71; fi\nexec /usr/bin/install "$@"')
@@ -78,6 +87,28 @@ class InstallerTransactionTests(unittest.TestCase):
             else:
                 self.assertEqual(path.read_bytes(), data)
                 self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+
+    def undo(self):
+        result = subprocess.run(["bash", str(self.package / "Install.sh"), "--uninstall"], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def test_undo_restores_previous_install(self):
+        self.run_installer()
+        self.undo()
+        self.assert_originals()
+
+    def test_undo_preserves_user_modified_mod(self):
+        self.run_installer()
+        self.targets[1].write_bytes(b"USERMOD")
+        self.undo()
+        self.assertEqual(self.targets[1].read_bytes(), b"USERMOD")
+        self.assertEqual(self.targets[0].read_bytes(), self.originals[0])
+
+    def test_missing_jukebox_rejected(self):
+        (self.game / "geode/mods/fleym.nongd.geode").unlink()
+        self.run_installer("missing-jukebox")
+        self.assert_originals()
 
     def test_staging_failure_preserves_all_files(self):
         self.run_installer("stage-mod")

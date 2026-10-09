@@ -72,8 +72,17 @@ int main(int argc,char** argv){
     if(!obs_startup("en-US",nullptr,nullptr)){fprintf(stderr,"obs_startup failed\n");return 2;}
 
 #ifdef _WIN32
-    obs_add_data_path("C:/Program Files/obs-studio/data/libobs/");
-    const char* graphicsModule="C:/Program Files/obs-studio/bin/64bit/libobs-d3d11.dll";
+    const auto obsDirectory = std::getenv("OBS_QA_DIRECTORY");
+    if (!obsDirectory || !*obsDirectory) {
+        fprintf(stderr,"Set OBS_QA_DIRECTORY to the installed OBS directory (the PowerShell runner does this).\n");
+        obs_shutdown();
+        return 2;
+    }
+    auto obsRoot = std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(obsDirectory)));
+    auto dataPath = (obsRoot / "data/libobs").generic_string() + "/";
+    auto graphicsPath = (obsRoot / "bin/64bit/libobs-d3d11.dll").generic_string();
+    obs_add_data_path(dataPath.c_str());
+    const char* graphicsModule=graphicsPath.c_str();
 #elif defined(__APPLE__)
     obs_add_data_path(OBS_QA_DATA_PATH);
     const char* graphicsModule=OBS_QA_GRAPHICS_MODULE;
@@ -121,12 +130,13 @@ int main(int argc,char** argv){
             if(size==sizeof(reply)&&!memcmp(reply.magic,"GDCLK1\0",8)&&reply.kind==1){
                 reply.kind=2;reply.t2=os_gettime_ns();reply.t3=os_gettime_ns();
                 sendto(sock,reinterpret_cast<const char*>(&reply),sizeof(reply),0,reinterpret_cast<sockaddr*>(&from),length);
-            }else {fd_set readable;FD_ZERO(&readable);FD_SET(sock,&readable);timeval wait{};wait.tv_usec=1000;select(int(sock)+1,&readable,nullptr,nullptr,&wait);}
+            } else { waitSocketReadable(sock, 50); }
         }
     });
     SongLinkPacket packet;packet.version=3;std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));std::strcpy(packet.song,"Runtime synthetic tone");std::strcpy(packet.status,"playing");packet.flags=3;packet.epoch=1;
     std::ofstream json(output/"runtime-results.json");json<<"{\"host\":\"Installed OBS libobs\",\"plugin\":\""<<std::filesystem::path(argv[1]).filename().string()<<"\",\"cases\":[\n";bool first=true;int failures=0;
     auto phase=[&](const char* name,double seconds,double expected,double pos,uint32_t flags,double rate=1,double offset=0,bool transmit=true,int effects=0,bool expectedMuted=false,bool expectEffectMean=false,bool advanceEpoch=true,double settleSeconds=.55){
+        if(std::getenv("OBS_QA_RECOVERY_ONLY") && std::strcmp(name,"mp3_decode") && std::strcmp(name,"failed_seek_music_silence") && std::strcmp(name,"failed_seek_effects_continue") && std::strcmp(name,"failed_seek_restart_recovery"))return Metric{};
         packet.position=pos;packet.flags=flags;packet.rate=rate;packet.offset=offset;if(advanceEpoch)packet.epoch++;
         auto start=Clock::now(),end=start+std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));uint64_t cpu=cpuTicks();capture.reset();bool reset=false;
         uint64_t effectClock=os_gettime_ns(),effectFrames=0;uint32_t sequence=0;
@@ -226,6 +236,8 @@ int main(int argc,char** argv){
         phase("failed_seek_restart_recovery",1,-1,0,3);
     }
     std::memset(packet.path,0,sizeof(packet.path));std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));
+    // A different session can take ownership only after the prior sender is stale.
+    phase("session_handoff_quiet_window",2.2,0,0,0,1,0,false);
     packet.version=5;packet.sessionID=0x51414e4154495645ULL;
     phase("v5_clock_synchronized_playback",1,440,0,3);
     packet.triggerGain=0;phase("v5_trigger_volume_zero",1,0,0,3);

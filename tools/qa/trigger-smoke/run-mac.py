@@ -1,5 +1,6 @@
 import os, pathlib, subprocess, json, time
-base=pathlib.Path('/Users/home/projects/obsjukebox-validation-6zJJ9T/artifacts/trigger-smoke')
+from paths import BASE
+base=BASE
 app=base/'Geometry Dash.app'
 r=subprocess.run(['/usr/bin/pgrep','-x','Geometry Dash'],capture_output=True,text=True)
 if r.returncode==0: raise SystemExit('Geometry Dash already running; no launch')

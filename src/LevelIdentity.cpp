@@ -14,11 +14,20 @@ std::unordered_map<std::string, WeakRef<GJGameLevel>> owners;
 class $modify(OBSLevelIdentity, GJGameLevel) {
     struct Fields { std::string identity; };
     std::string identity() {
-        std::erase_if(owners, [](const auto& entry) { return !entry.second.lock(); });
+        // Only inspect the claimed key; sweeping every loaded level was quadratic.
+        // Periodic cleanup is amortized across additions, not every save.
+        static size_t nextSweep = 1024;
+        if (owners.size() >= nextSweep) {
+            std::erase_if(owners, [](const auto& entry) { return !entry.second.lock(); });
+            nextSweep = std::max(size_t(1024), owners.size() * 2);
+        }
         m_fields->identity = separate_song::claimLevelIdentity(m_fields->identity,
             [this](const std::string& value) {
                 auto found = owners.find(value);
-                if (found != owners.end() && found->second.lock().data() != this) return false;
+                if (found != owners.end()) {
+                    auto owner = found->second.lock();
+                    if (owner && owner.data() != this) return false;
+                }
                 owners.insert_or_assign(value, WeakRef<GJGameLevel>(this));
                 return true;
             }, [] { return geode::utils::random::generateUUID(); });

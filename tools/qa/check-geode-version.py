@@ -7,6 +7,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -49,10 +50,10 @@ with tempfile.TemporaryDirectory(prefix="obs-jukebox-geode-check-") as temporary
         return subprocess.run([args.perl, str(ROOT / "scripts/check-geode-version.pl"), str(fixture)], capture_output=True, text=True)
 
     for kind in ("pe", "mach"):
-        for version in ("5.10.0", "5.10.1", "5.11.0", "5.100.1"):
+        for version in ("5.10.1", "5.11.0", "5.100.1"):
             result = verify(binary(version, kind))
             check(result.returncode == 0 and result.stdout.strip() == version, f"{kind} accepts {version}")
-        for version in ("5.9.9", "4.99.9", "6.10.1", "invalid", "5.10.1-beta.1", "5.010.1", "5.10"):
+        for version in ("5.10.0", "5.9.9", "4.99.9", "6.10.1", "invalid", "5.10.1-beta.1", "5.010.1", "5.10"):
             check(verify(binary(version, kind)).returncode != 0, f"{kind} rejects {version}")
     check(verify(binary(geode="5.9.0")).returncode != 0, "rejects conflicting embedded version fields")
     check(verify(binary(id="other.dependency")).returncode != 0, "ignores dependency metadata")
@@ -74,7 +75,11 @@ with tempfile.TemporaryDirectory(prefix="obs-jukebox-geode-check-") as temporary
         for directory in (game / "geode/mods", prefix / "drive_c", home, commands):
             directory.mkdir(parents=True)
         (game / "GeometryDash.exe").write_bytes(b"fixture, never executed")
-        (game / "geode/mods/local.separate_song.geode").write_bytes(b"existing mod")
+        with zipfile.ZipFile(game / "geode/mods/local.separate_song.geode", "w") as mod:
+            mod.writestr("mod.json", json.dumps(dict(id="local.separate_song", version="1.1.0")))
+        with zipfile.ZipFile(game / "geode/mods/fleym.nongd.geode", "w") as mod:
+            mod.writestr("mod.json", json.dumps(dict(id="fleym.nongd", version="3.8.0")))
+            mod.writestr("fleym.nongd.dll", "fixture")
         (root / "plugin.so").write_bytes(b"fixture plugin, never executed")
         (root / "mod.geode").write_bytes(b"fixture mod")
         (commands / "pgrep").write_text("#!/bin/sh\nexit 1\n")
@@ -85,14 +90,14 @@ with tempfile.TemporaryDirectory(prefix="obs-jukebox-geode-check-") as temporary
         def snapshot():
             return {str(p.relative_to(root)): p.read_bytes() if p.is_file() else None for p in root.rglob("*")}
 
-        for version in ("5.9.9", "4.99.9", "6.10.1", "invalid", "5.10.1-beta.1"):
+        for version in ("5.10.0", "5.9.9", "4.99.9", "6.10.1", "invalid", "5.10.1-beta.1"):
             (game / "Geode.dll").write_bytes(binary(version))
             before = snapshot()
             result = subprocess.run(command, env=env, capture_output=True, text=True)
             check(result.returncode != 0 and "compatibility could not be verified" in result.stderr and snapshot() == before, f"Linux rejects {version} before any file mutations")
-        (game / "Geode.dll").write_bytes(binary("5.10.0"))
+        (game / "Geode.dll").write_bytes(binary("5.10.1"))
         result = subprocess.run(command, env=env, capture_output=True, text=True)
-        check(result.returncode == 0 and (game / "geode/mods/local.separate_song.geode").read_bytes() == b"fixture mod", "Linux installs with patch-compatible 5.10.0")
+        check(result.returncode == 0 and (game / "geode/mods/local.separate_song.geode").read_bytes() == b"fixture mod", "Linux installs with compatible 5.10.1")
     else:
         print("SKIP Linux installer integration: requires a non-root native Linux test process")
 print(f"{checks} checks passed")

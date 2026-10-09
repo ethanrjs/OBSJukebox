@@ -10,6 +10,7 @@ public:
     geode::SettingNodeV3* createNode(float width) override;
 };
 void initialize();
+void selectLevel(std::string name);
 double value();
 void setValue(double value);
 }

@@ -34,7 +34,7 @@ for my $string (split /\0/, $data) {
 }
 die "Could not verify a unique embedded Geode version\n" unless keys(%versions) == 1;
 my ($version) = keys %versions;
-my ($major, $minor) = split /\./, $version;
-die "Geode $version is incompatible; OBS Jukebox requires Geode 5.10.x or a later 5.x release\n"
-    unless $major == 5 && $minor >= 10;
+my ($major, $minor, $patch) = split /\./, $version;
+die "Geode $version is incompatible; OBS Jukebox requires Geode >=5.10.1 and <6.0.0\n"
+    unless $major == 5 && ($minor > 10 || ($minor == 10 && $patch >= 1));
 print "$version\n";

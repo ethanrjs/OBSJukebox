@@ -7,7 +7,9 @@
 using namespace geode::prelude;
 namespace separate_song::offset_setting {
 namespace {
+std::string selectedLevel;
 class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
+    CCLabelBMFont* m_levelLabel = nullptr;
     TextInput* m_input = nullptr;
     Slider* m_slider = nullptr;
     CCMenuItemSpriteExtra* m_left = nullptr;
@@ -34,7 +36,10 @@ class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
             if (parsed && std::isfinite(parsed.unwrap())) setValue(parsed.unwrap(), m_input);
         });
         menu->addChildAtPosition(m_input, Anchor::Center);
-        setContentHeight(45);
+        setContentHeight(62);
+        m_levelLabel = CCLabelBMFont::create("", "bigFont.fnt");
+        m_levelLabel->setScale(.25f);
+        addChildAtPosition(m_levelLabel, Anchor::Bottom, ccp(0, 7));
         menu->updateAnchoredPosition(Anchor::Right, ccp(-10, 7));
         m_slider = Slider::create(this, menu_selector(OffsetNode::onSlider));
         m_slider->setScale(.5f);
@@ -45,7 +50,9 @@ class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
     void updateState(CCNode* invoker) override {
         SettingValueNodeV3::updateState(invoker);
         if (!m_input || !m_slider) return;
-        auto enabled = getSetting()->shouldEnable();
+        auto enabled = getSetting()->shouldEnable() && !selectedLevel.empty();
+        m_levelLabel->setString(selectedLevel.empty() ? "Select a level to edit its offset" : selectedLevel.c_str());
+        m_levelLabel->limitLabelWidth(getContentWidth() - 20.f, .25f, .1f);
         m_input->setEnabled(enabled);
         m_left->setEnabled(enabled);
         m_right->setEnabled(enabled);
@@ -94,6 +101,7 @@ Result<> OffsetSetting::isValid(double value) const {
 SettingNodeV3* OffsetSetting::createNode(float width) {
     return OffsetNode::create(std::static_pointer_cast<OffsetSetting>(shared_from_this()), width);
 }
+void selectLevel(std::string name) { selectedLevel = std::move(name); }
 void initialize() {
     auto result = Mod::get()->registerCustomSettingType("obs-offset", OffsetSetting::parse);
     if (!result) log::error("Could not register OBS offset setting: {}", result.unwrapErr());

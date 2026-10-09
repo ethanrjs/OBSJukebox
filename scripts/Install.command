@@ -1,6 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
 song_root="${0:A:h}"
+song_uninstall=0
+if [[ "${1:-}" == --uninstall ]]; then song_uninstall=1; shift; fi
 song_app="${1:-$HOME/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app}"
 song_obs="${2:-/Applications/OBS.app}"
 if [[ $# -lt 2 && ! -d "$song_obs" ]]; then song_obs="$HOME/Applications/OBS.app"; fi
@@ -9,6 +11,12 @@ song_obs="${song_obs:A}"
 finish() { print -r -- "$1"; if [[ -t 0 ]]; then read 'song_reply?Press Return to close. '; fi; }
 fail() { finish "$1"; exit 1; }
 [[ "$(uname -s)" == Darwin ]] || fail 'Run this installer on macOS.'
+if (( song_uninstall )); then
+    if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x obs >/dev/null; then fail 'Close Geometry Dash and OBS before undoing installation.'; fi
+    /usr/bin/perl "$song_root/install-state.pl" undo-latest "$HOME/Library/Application Support/OBS Jukebox/Install Logs"
+    exit
+fi
+[[ -f "$song_root/install-state.pl" ]] || fail 'The installer is missing its undo helper.'
 [[ -f "$song_app/Contents/MacOS/Geometry Dash" ]] || fail 'Geometry Dash was not found. Choose its application in your Steam library.'
 [[ -f "$song_obs/Contents/Info.plist" ]] || fail 'OBS Studio was not found. Install OBS Studio first or choose its application.'
 song_obs_executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$song_obs/Contents/Info.plist")
@@ -39,7 +47,7 @@ if [[ ! -f "$song_frameworks/Geode.dylib" ]]; then
 else
     song_geode_library="$song_frameworks/Geode.dylib"
 fi
-song_geode_version=$(/usr/bin/perl "$song_root/check-geode-version.pl" "$song_geode_library") || fail 'Geode compatibility could not be verified. Update or repair Geode with the official installer from https://geode-sdk.org (Geode 5.10.x or later 5.x), then try again. No installation files have been changed.'
+song_geode_version=$(/usr/bin/perl "$song_root/check-geode-version.pl" "$song_geode_library") || fail 'Geode compatibility could not be verified. Update or repair Geode with the official installer from https://geode-sdk.org (Geode >=5.10.1 and <6.0.0), then try again. No installation files have been changed.'
 song_mods="$song_app/Contents/geode/mods"
 song_packages=$(/usr/bin/perl -MJSON::PP - "$song_mods" <<'PERL'
 use strict;
@@ -86,10 +94,10 @@ PERL
 ) || fail 'Installed mod compatibility could not be verified. No installation files have been changed.'
 song_jukebox=${song_packages%%$'\n'*}
 song_mod_destination=${song_packages#*$'\n'}
-song_audit="$HOME/Library/Application Support/OBS Jukebox/Install Logs/$(date +%Y%m%d-%H%M%S)-$(uuidgen)"
+song_audit="$HOME/Library/Application Support/OBS Jukebox/Install Logs/$(date +%Y%m%d-%H%M%S)-$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f",time')-$(uuidgen)"
 mkdir -p "$song_audit/Backups" "$song_audit/Failed"
 exec > >(tee "$song_audit/install.log") 2>&1
-print -r -- 'OBS Jukebox 1.1.0' "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
+print -r -- 'OBS Jukebox 1.2.0' "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
 typeset -a song_targets song_previous
 song_success=0
 rollback() {
@@ -120,7 +128,10 @@ copy_item() {
     song_targets+=("$song_destination")
     song_previous+=("$song_existed")
     /bin/mkdir -p "${song_destination:h}"
-    /usr/bin/ditto "$song_source" "$song_destination"
+    # Replace complete bundles rather than merging stale files into new payloads.
+    if [[ -e "$song_destination" ]]; then /bin/mv "$song_destination" "$song_audit/Failed/replaced-$song_index"; fi
+    /usr/bin/ditto --noextattr --noqtn "$song_source" "$song_destination"
+    /usr/bin/perl "$song_root/install-state.pl" record "$song_audit" "$song_destination" "$song_audit/Backups/$song_index"
     print -r -- "Installed: $song_destination"
     if [[ -f "$song_destination" ]]; then /usr/bin/shasum -a 256 "$song_destination"; fi
 }
@@ -142,5 +153,7 @@ fi
 copy_item "$song_root/payload/local.separate_song.geode" "$song_mod_destination"
 copy_item "$song_root/payload/separate-song.plugin" "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
 /usr/bin/shasum -a 256 "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin/Contents/MacOS/separate-song"
+touch "$song_audit/complete"
 song_success=1
+print -r -- 'Undo this installation with Install.command --uninstall.'
 finish $'Installed!\n\n1. Open Geometry Dash and OBS.\n2. In OBS, add Sources > GD Sounds once. Keep Audio Monitoring off.\n3. In Jukebox, use the Game and OBS checkboxes to choose each song.\n4. In the pause menu, switch Game / OBS to adjust their volumes.\n\nGD Sounds includes game sound effects. Disable any duplicate GD audio capture in OBS.'

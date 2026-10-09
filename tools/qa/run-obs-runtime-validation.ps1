@@ -3,19 +3,25 @@ param(
     [string]$PluginPath,
     [string]$OutputDirectory,
     [string]$Mp3Path,
-    [ValidateRange(1024,65535)][int]$Port = 39022
+    [ValidateRange(1024,65535)][int]$Port = 49178
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (!$PluginPath) { $PluginPath = Join-Path $root 'artifacts\windows\separate-song.dll' }
+if (!$PluginPath) {
+    $qaPluginBuild = Join-Path $root 'build-windows\obs-runtime-qa'
+    & cmake -S "$root\obs-plugin" -B $qaPluginBuild -G 'Visual Studio 17 2022' -A x64 "-DOBS_IMPORT_LIBRARY=$root/build-windows/obs.lib" '-DOBS_JUKEBOX_QA=ON'
+    if ($LASTEXITCODE) { throw 'QA plugin configuration failed. Build the Windows plugin once to generate its OBS import library.' }
+    & cmake --build $qaPluginBuild --config Release --parallel 2
+    if ($LASTEXITCODE) { throw 'QA plugin build failed.' }
+    $PluginPath = Join-Path $qaPluginBuild 'Release\separate-song.dll'
+}
 if (!$OutputDirectory) { $OutputDirectory = Join-Path $root 'artifacts\windows-validation' }
 $obsBin = Join-Path $ObsDirectory 'bin\64bit'
 $endpoint = Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue
-if ($endpoint) { throw 'UDP 39022 is in use. Stop OBS with OBS Jukebox loaded before running this isolated test.' }
+if ($endpoint) { throw "UDP $Port is in use. Choose an unused test port." }
 if ($Port -eq 39022 -and (Get-Process -Name GeometryDash -ErrorAction SilentlyContinue)) { throw 'Stop Geometry Dash before synthetic validation; its real link packets would interfere with these cases.' }
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
-if ($ObsDirectory.TrimEnd('\','/') -ne "$env:ProgramFiles\obs-studio") { throw 'This harness currently expects OBS in the normal Program Files installation.' }
 & cmake -S "$PSScriptRoot" -B "$root\build-windows\qa" -G 'Visual Studio 17 2022' -A x64
 if ($LASTEXITCODE) { throw 'QA configure failed.' }
 & cmake --build "$root\build-windows\qa" --config Release --parallel 2
@@ -32,14 +38,19 @@ if (!$Mp3Path) {
 }
 $savedPath = $env:PATH
 $savedTestPort = $env:OBS_JUKEBOX_TEST_PORT
+$savedObsDirectory = $env:OBS_QA_DIRECTORY
 try {
     $env:OBS_JUKEBOX_TEST_PORT = "$Port"
+    $env:OBS_QA_DIRECTORY = (Resolve-Path -LiteralPath $ObsDirectory).Path
     $env:PATH = "$obsBin;$savedPath"
     $arguments = @((Resolve-Path -LiteralPath $PluginPath).Path,(Resolve-Path -LiteralPath $OutputDirectory).Path)
     if ($Mp3Path) { $arguments += (Resolve-Path -LiteralPath $Mp3Path).Path }
     & "$root\build-windows\qa\Release\obs-runtime-validation.exe" @arguments *> (Join-Path $OutputDirectory 'runtime-log.txt')
     $harnessExit = $LASTEXITCODE
-} finally { $env:PATH = $savedPath; $env:OBS_JUKEBOX_TEST_PORT = $savedTestPort }
+} finally { $env:PATH = $savedPath; $env:OBS_JUKEBOX_TEST_PORT = $savedTestPort; $env:OBS_QA_DIRECTORY = $savedObsDirectory }
+if (!(Test-Path -LiteralPath (Join-Path $OutputDirectory 'runtime-results.json'))) {
+    throw "Runtime harness exited $harnessExit before producing results. Inspect $OutputDirectory\runtime-log.txt"
+}
 $results = Get-Content -LiteralPath (Join-Path $OutputDirectory 'runtime-results.json') -Raw | ConvertFrom-Json
 $results.cases | Format-Table name,frames,raw_rms,frequency_hz,pass -AutoSize
 $evidence = [ordered]@{

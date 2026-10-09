@@ -126,6 +126,7 @@ static void transitionTest() {
 static void effectsTransitionTest() {
     receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
     sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    sendState(sender,SongLinkPacket{},os_gettime_ns()-200000000);
     EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=os_gettime_ns();
     sendto(sender,reinterpret_cast<const char*>(&initial),36+initial.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -446,6 +447,10 @@ static void senderTest() {
         "sender preserves sampling time through publication delay");
     check(std::abs(double(int64_t(monotonicNowNs())-int64_t(os_gettime_ns())))<1000000,"native sender and OBS test clock use compatible sampling units");
 }
+#include "receiver-tests.inc"
+#include "deadline-tests.inc"
+#include "recovery-tests.inc"
+
 int main(){
 #ifdef _WIN32
     _putenv_s("OBS_JUKEBOX_TEST_PORT","49177");
@@ -454,9 +459,13 @@ int main(){
 #endif
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
+    if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();return failures?1:0;}
     pauseTest();delayedPositionTest();transitionTest();effectsTransitionTest();protocolTest();
     foreignClockTest(3600000000000LL);
     foreignClockTest(-int64_t(std::min<uint64_t>(os_gettime_ns()/2,3600000000000ULL)));
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();senderTest();
+    receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
+    sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();
+    musicDeadlineTest(false);musicDeadlineTest(true);
     return failures?1:0;
 }

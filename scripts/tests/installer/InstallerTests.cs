@@ -72,6 +72,42 @@ static class InstallerTests
         Check(wrongUuidItems.Count==2 && wrongUuidItems[0]!["source_uuid"]!.ToString()=="image-1" && wrongUuidItems[1]!["source_uuid"]!.ToString()=="audio-1","matching name with another UUID is preserved and audio is appended");
         var mismatchAgain=Engine.IntegrateCollection(mismatchResult,out bool mismatchChangedAgain);
         Check(!mismatchChangedAgain && mismatchAgain.SequenceEqual(mismatchResult),"renamed and legacy integration remains idempotent");
+        var rewritten=JsonNode.Parse(integrated)!;
+        rewritten["userLaterEdit"]=9001;
+        rewritten["sources"]![1]!["volume"]=0.23;
+        rewritten["sources"]!.AsArray().Last()!["obs_default"]=true;
+        var undone=JsonNode.Parse(Engine.UndoCollection(original,integrated,Encoding.UTF8.GetBytes(rewritten.ToJsonString())))!;
+        Check(undone["userLaterEdit"]!.GetValue<int>()==9001 && undone["sources"]![1]!["volume"]!.GetValue<double>()==0.23,"semantic undo preserves later user fields and source edits");
+        Check(!undone["sources"]!.AsArray().Any(s=>s!["id"]?.ToString()=="gd_alternate_song") && undone["sources"]![0]!["settings"]!["items"]!.AsArray().Count==0,"semantic undo removes added audio source and scene items after OBS rewrite");
+        var newScene=JsonNode.Parse(integrated)!;
+        string addedUuid=newScene["sources"]!.AsArray().Last()!["uuid"]!.ToString();
+        newScene["sources"]!.AsArray().Add(new JsonObject { ["id"]="scene",["name"]="Later user scene",["settings"]=new JsonObject { ["items"]=new JsonArray(new JsonObject { ["id"]=1,["source_uuid"]=addedUuid,["name"]="GD Sounds" }) } });
+        var retained=JsonNode.Parse(Engine.UndoCollection(original,integrated,Encoding.UTF8.GetBytes(newScene.ToJsonString())))!;
+        Check(retained["sources"]!.AsArray().Any(s=>s?["uuid"]?.ToString()==addedUuid) && retained["sources"]!.AsArray().Last()!["name"]!.ToString()=="Later user scene","semantic undo retains a source referenced by a later user-added scene");
+        var migrated=JsonNode.Parse(mismatchResult)!;migrated["userLaterEdit"]=true;
+        var migrationUndone=JsonNode.Parse(Engine.UndoCollection(mismatchedNames,mismatchResult,Encoding.UTF8.GetBytes(migrated.ToJsonString())))!;
+        Check(JsonNode.DeepEquals(migrationUndone["sources"],JsonNode.Parse(mismatchedNames)!["sources"]),"semantic undo restores legacy UUID and name migrations without deleting existing items");
+        Check(Engine.SceneNumber(JsonNode.Parse("2147483648"))==2147483648 && Engine.SceneNumber(JsonNode.Parse("5.0"))==5 && Engine.SceneNumber(JsonNode.Parse("\"invalid\""))==0,"scene counters tolerate large integers integral doubles and malformed types");
+        var large=Encoding.UTF8.GetBytes("""{"sources":[{"id":"scene","name":"日本語 + <scene>","settings":{"items":[{"id":2147483648,"name":"existing"}],"id_counter":2147483648}}]}""");
+        var largeResult=Engine.IntegrateCollection(large,out _);
+        Check(JsonNode.Parse(largeResult)!["sources"]![0]!["settings"]!["id_counter"]!.GetValue<long>()==2147483649,"scene item IDs support values above int32");
+        Check(Encoding.UTF8.GetString(largeResult).Contains("日本語 + <scene>"),"scene JSON preserves readable Unicode and punctuation");
+        var unnamed=Engine.IntegrateCollection(Encoding.UTF8.GetBytes("""{"sources":[{"id":"gd_alternate_song"},{"id":"scene","name":"Game","settings":{"items":[]}}]}"""),out _);
+        Check(JsonNode.Parse(unnamed)!["sources"]![0]!["name"]!.ToString()=="GD Sounds","unnamed existing audio source receives a safe name");
+        string fixture=Path.Combine(Path.GetTempPath(),"obs-jukebox-test-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(fixture);
+        try
+        {
+            string scenePath=Path.Combine(fixture,"scene.json"),backup=Path.Combine(fixture,"scene.bak"),plugin=Path.Combine(fixture,"plugin.dll");
+            File.WriteAllBytes(backup,original);File.WriteAllText(scenePath,rewritten.ToJsonString());File.WriteAllText(plugin,"user replacement");
+            var record=new InstallRecord { Files=[
+                new ChangedFile { Destination=scenePath,Backup=backup,OriginalHash=Engine.Hash(original),InstalledHash=Engine.Hash(integrated),InstalledScene=integrated,Applied=true },
+                new ChangedFile { Destination=plugin,InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("installed plugin")),Applied=true }] };
+            Engine.Restore(record,_=>{});
+            Check(JsonNode.DeepEquals(JsonNode.Parse(File.ReadAllBytes(scenePath)),undone) && File.ReadAllText(plugin)=="user replacement","transaction restore semantically undoes scenes and preserves replaced plugin bytes");
+        }
+        finally { Directory.Delete(fixture,true); }
+        Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");
         bool oldOptionRejected=false;
         try { Options.Parse(["--keep-desktop-audio"]); } catch(ArgumentException) { oldOptionRejected=true; }
         Check(oldOptionRejected,"removed audio-prevention CLI switch is rejected");
@@ -102,6 +138,7 @@ static class InstallerTests
         options.Restart=true; bool retried=false; List<string>? restartedApps=null;
         await Engine.ExecuteWithRetry(options,stopped=>{stopped.Add("OBS.exe");return Task.CompletedTask;},()=>{retried=true;return Task.CompletedTask;},stopped=>restartedApps=stopped);
         Check(!retried && restartedApps!.SequenceEqual(new[]{"OBS.exe"}),"ordinary successful install restarts only apps it closed");
+        Check(!options.Arguments().Contains("--restart"),"elevated arguments never forward restart");
         Check(!options.Arguments().Contains("GD.exe") && !options.Arguments().Contains("OBS.exe"),"closed-app executable list is not sent to elevated child");
     }
 }

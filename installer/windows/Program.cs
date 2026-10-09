@@ -3,6 +3,9 @@ using System.IO.Compression;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -12,7 +15,7 @@ namespace SeparateSongSetup;
 
 static class Program
 {
-    internal const string ReleaseVersion = "1.1.0";
+    internal const string ReleaseVersion = "1.2.0";
     internal const string ProductName = "OBS Jukebox " + ReleaseVersion;
     [STAThread]
     static int Main(string[] args)
@@ -20,6 +23,7 @@ static class Program
         ApplicationConfiguration.Initialize();
         try
         {
+            if(args.Length>0 && args[0]=="--plugin-helper")return Engine.PluginHelper(args);
             var options = Options.Parse(args);
             if (options.Silent)
             {
@@ -45,7 +49,7 @@ sealed class Options
     public string PluginRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "obs-studio", "plugins");
     public string StateRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OBS Jukebox", "Installations");
     public string SceneRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "obs-studio", "basic", "scenes");
-    public bool Silent, DryRun, CloseApps, Restart, Uninstall, InstallJukebox, CreateScene = true;
+    public bool Silent, DryRun, CloseApps, Restart, Uninstall, InstallJukebox, CreateScene;
     internal byte[]? DownloadedJukebox;
     public string? Manifest;
     public static Options Parse(string[] args)
@@ -67,6 +71,7 @@ sealed class Options
                 case "--close-apps": o.CloseApps = true; break;
                 case "--restart": o.Restart = true; break;
                 case "--install-jukebox": o.InstallJukebox = true; break;
+                case "--integrate": o.CreateScene = true; break;
                 case "--no-scene": case "--no-integrate": o.CreateScene = false; break;
                 case "--uninstall": o.Uninstall = true; break;
                 default: throw new ArgumentException("Unknown option: " + args[i]);
@@ -87,7 +92,7 @@ sealed class Options
     static string DetectGD()
     {
         foreach (var p in Process.GetProcessesByName("GeometryDash"))
-            try { if (p.MainModule?.FileName is string file) return Path.GetDirectoryName(file)!; } catch { }
+            using(p) try { if (Engine.ProcessPath(p) is string file) return Path.GetDirectoryName(file)!; } catch { }
         var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string steam = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", "")?.ToString() ?? "";
         if (steam.Length != 0) roots.Add(steam);
@@ -107,7 +112,7 @@ sealed class Options
     static string DetectOBS()
     {
         foreach (var p in Process.GetProcessesByName("obs64"))
-            try { if (p.MainModule?.FileName is string file) return NormalizeOBS(file); } catch { }
+            using(p) try { if (Engine.ProcessPath(p) is string file) return NormalizeOBS(file); } catch { }
         var registry = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OBS Studio", "InstallLocation", "")?.ToString();
         return !string.IsNullOrWhiteSpace(registry) ? registry : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "obs-studio");
     }
@@ -115,9 +120,9 @@ sealed class Options
     {
         foreach (var s in new[]{"--silent", "--gd", GD, "--obs", OBS, "--plugin-root", PluginRoot, "--state-root", StateRoot, "--scene-root", SceneRoot}) yield return s;
         if (CloseApps) yield return "--close-apps";
-        if (Restart) yield return "--restart";
+        // Restart belongs exclusively to the unelevated parent.
         if (InstallJukebox) yield return "--install-jukebox";
-        if (!CreateScene) yield return "--no-integrate";
+        if (CreateScene) yield return "--integrate";
         if (Uninstall) yield return "--uninstall";
         if (Manifest != null) { yield return "--manifest"; yield return Manifest; }
     }
@@ -131,6 +136,7 @@ sealed class ChangedFile
     public string? Backup { get; set; }
     public string? OriginalHash { get; set; }
     public string Reason { get; set; } = "";
+    public byte[]? InstalledScene { get; set; }
     public bool Applied { get; set; }
 }
 sealed class InstallRecord
@@ -145,7 +151,7 @@ sealed class InstallRecord
 static class Engine
 {
     static bool IsKnownProduct(string product) => product == Program.ProductName || product is "OBS Jukebox 1.0.0" or "Separate Song 1.0.0";
-    static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     public static string Hash(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
     static string HashFile(string path) { using var s = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(s)); }
     static Dictionary<string, byte[]> Payload()
@@ -248,12 +254,13 @@ static class Engine
             o.DownloadedJukebox??=DownloadJukebox(log);
             Add(Path.Combine(o.GD,"geode","mods","fleym.nongd.geode"),o.DownloadedJukebox,"Jukebox 3.8.0 (requested download)");
         }
-        byte[] mod=payload["mods/local.separate_song.geode"];
+        byte[] Required(string key) => payload.TryGetValue(key,out var data) ? data : throw new IOException("This setup is incomplete: missing " + key + ". Download a complete release installer and retry.");
+        byte[] mod=Required("mods/local.separate_song.geode");
         if(PackageVersion(mod,"local.separate_song")!=Program.ReleaseVersion) throw new IOException("Unexpected OBS Jukebox payload version.");
         Add(Path.Combine(o.GD,"geode","mods","local.separate_song.geode"),mod,"OBS Jukebox mod " + Program.ReleaseVersion);
         bool portable = File.Exists(Path.Combine(o.OBS,"portable_mode.txt")) || File.Exists(Path.Combine(o.OBS,"portable_mode"));
         string plugin = portable ? Path.Combine(o.OBS,"obs-plugins","64bit","separate-song.dll") : Path.Combine(o.PluginRoot,"separate-song","bin","64bit","separate-song.dll");
-        Add(plugin,payload["obs/separate-song.dll"],"Native OBS source GD Sounds");
+        Add(plugin,Required("obs/separate-song.dll"),"Native OBS source GD Sounds");
         if (o.CreateScene)
         {
             string sceneRoot = portable ? Path.Combine(o.OBS,"config","obs-studio","basic","scenes") : o.SceneRoot;
@@ -290,7 +297,8 @@ static class Engine
                 existing=new JsonObject { ["name"]=name,["uuid"]=Guid.NewGuid().ToString(),["id"]=type,["versioned_id"]=type,["settings"]=new JsonObject(),["mixers"]=255,["sync"]=0,["flags"]=0,["volume"]=1.0,["balance"]=0.5,["enabled"]=true,["muted"]=false,["monitoring_type"]=0,["hotkeys"]=new JsonObject(),["private_settings"]=new JsonObject() };
                 sources.Add(existing); modified=true;
             }
-            string oldName=existing["name"]!.ToString();
+            string oldName=existing["name"]?.ToString()??defaultName;
+            if(string.IsNullOrWhiteSpace(existing["name"]?.ToString())) Set(existing,"name",JsonValue.Create(oldName));
             if(type=="gd_alternate_song" && (oldName=="GD Alternate Song" || oldName=="Custom Song" || oldName=="OBS Custom Song") && !sources.OfType<JsonObject>().Any(s=>s!=existing && s["name"]?.ToString()=="GD Sounds")) Set(existing,"name",JsonValue.Create("GD Sounds"));
             Set(existing,"monitoring_type",JsonValue.Create(0));
             string sourceName=existing["name"]!.ToString(); string uuid=existing["uuid"]?.ToString()??Guid.NewGuid().ToString(); Set(existing,"uuid",JsonValue.Create(uuid));
@@ -301,24 +309,144 @@ static class Engine
                 var item=items.OfType<JsonObject>().FirstOrDefault(i=>i["source_uuid"]?.ToString()==uuid)
                     ??items.OfType<JsonObject>().FirstOrDefault(i=>string.IsNullOrEmpty(i["source_uuid"]?.ToString()) && i["name"]?.ToString()==oldName);
                 if(item!=null){Set(item,"name",JsonValue.Create(sourceName));Set(item,"source_uuid",JsonValue.Create(uuid));continue;}
-                int next=items.OfType<JsonObject>().Select(i=>i["id"]?.GetValue<int>()??0).DefaultIfEmpty(0).Max()+1;
+                long maximum=items.OfType<JsonObject>().Select(i=>SceneNumber(i["id"])).Append(SceneNumber(settings["id_counter"])).Max();
+                if(maximum==long.MaxValue) throw new IOException("OBS scene item IDs are exhausted. Recreate this collection in OBS before installing.");
+                long next=maximum+1;
                 items.Add(new JsonObject { ["name"]=sourceName,["source_uuid"]=uuid,["id"]=next,["visible"]=true,["locked"]=true,["rot"]=0.0,["pos"]=new JsonObject{["x"]=0.0,["y"]=0.0},["scale"]=new JsonObject{["x"]=1.0,["y"]=1.0},["align"]=5,["bounds_type"]=0,["bounds_align"]=0,["bounds"]=new JsonObject{["x"]=0.0,["y"]=0.0},["crop_left"]=0,["crop_top"]=0,["crop_right"]=0,["crop_bottom"]=0,["private_settings"]=new JsonObject() });
-                settings["id_counter"]=Math.Max(settings["id_counter"]?.GetValue<int>()??0,next); modified=true;
+                settings["id_counter"]=Math.Max(SceneNumber(settings["id_counter"]),next); modified=true;
             }
         }
         changed=modified; return modified?JsonSerializer.SerializeToUtf8Bytes(collection,JsonOptions):original;
+    }
+    static string MachinePlugin => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"obs-studio","plugins","separate-song","bin","64bit","separate-song.dll");
+    static bool IsMachinePlugin(string path)=>string.Equals(Path.GetFullPath(path),MachinePlugin,StringComparison.OrdinalIgnoreCase);
+    // The privileged process has one fixed write target. It never parses user
+    // manifests, edits scenes, closes apps, restarts apps, or writes user backups.
+    internal static int PluginHelper(string[] args)
+    {
+        if(args.Length<3 || args[1] is not ("write" or "remove"))throw new IOException("Invalid plugin helper request.");
+        string destination=MachinePlugin;
+        for(string? path=destination;path!=null;path=Path.GetDirectoryName(path))
+            if((File.Exists(path)||Directory.Exists(path)) && (File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new IOException("Plugin installation path contains a link or junction: "+path);
+        if(args[1]=="remove")
+        {
+            if(args.Length!=3)throw new IOException("Invalid plugin removal request.");
+            if(File.Exists(destination)) { if(HashFile(destination)!=args[2])throw new IOException("Plugin changed since uninstall began; it was preserved."); File.Delete(destination); }
+        }
+        else
+        {
+            if(args.Length!=4)throw new IOException("Invalid plugin copy request.");
+            using var input=new FileStream(args[2],FileMode.Open,FileAccess.Read,FileShare.Read);
+            if(input.Length>128*1024*1024)throw new IOException("Plugin is too large.");
+            using var buffer=new MemoryStream();input.CopyTo(buffer);byte[] bytes=buffer.ToArray();
+            if(Hash(bytes)!=args[3])throw new IOException("Plugin copy verification failed.");
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            string temporary=destination+"."+Guid.NewGuid().ToString("N")+".tmp";
+            try { File.WriteAllBytes(temporary,bytes);File.Move(temporary,destination,true); }
+            finally { if(File.Exists(temporary))File.Delete(temporary); }
+        }
+        return 0;
+    }
+    static void RunPluginHelper(params string[] arguments)
+    {
+        var start=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=true,Verb="runas"};
+        start.ArgumentList.Add("--plugin-helper");foreach(var argument in arguments)start.ArgumentList.Add(argument);
+        using var child=Process.Start(start)??throw new IOException("Could not start the OBS plugin copy helper.");child.WaitForExit();
+        if(child.ExitCode!=0)throw new IOException("OBS plugin copy was not completed. Check folder permissions and retry.");
+    }
+    static void PrivilegedPluginWrite(byte[] data)
+    {
+        string source=Path.Combine(Path.GetTempPath(),"obs-jukebox-"+Guid.NewGuid().ToString("N")+".dll");
+        try { File.WriteAllBytes(source,data);RunPluginHelper("write",source,Hash(data)); }
+        finally { if(File.Exists(source))File.Delete(source); }
+    }
+    internal static long SceneNumber(JsonNode? node)
+    {
+        if(node is not JsonValue value)return 0;
+        if(value.TryGetValue<long>(out var integer))return Math.Max(0,integer);
+        if(value.TryGetValue<double>(out var number) && double.IsFinite(number) && number>=0 && number<long.MaxValue && Math.Truncate(number)==number)return (long)number;
+        return 0;
+    }
+    // Reverse only fields and objects changed by this transaction. Matching by
+    // stable IDs tolerates OBS formatting changes and reordered source arrays.
+    internal static byte[] UndoCollection(byte[] original,byte[] installed,byte[] current)
+    {
+        var originalTree=JsonNode.Parse(original)!;var installedTree=JsonNode.Parse(installed)!;var currentTree=JsonNode.Parse(current)!;
+        var retainedSources=new HashSet<string>(StringComparer.Ordinal);
+        var installedSources=installedTree["sources"]!.AsArray();
+        foreach(var scene in currentTree["sources"]!.AsArray().OfType<JsonObject>().Where(s=>s["id"]?.ToString()=="scene"))
+        {
+            var oldScene=installedSources.OfType<JsonObject>().FirstOrDefault(s=>s["id"]?.ToString()=="scene" && (scene["uuid"]!=null ? s["uuid"]?.ToString()==scene["uuid"]?.ToString() : s["name"]?.ToString()==scene["name"]?.ToString()));
+            var oldItems=oldScene?["settings"]?["items"] as JsonArray;
+            foreach(var item in (scene["settings"]?["items"] as JsonArray??new JsonArray()).OfType<JsonObject>())
+                if(item["source_uuid"]?.ToString() is string uuid && (oldItems==null || !oldItems.OfType<JsonObject>().Any(old=>old["source_uuid"]?.ToString()==uuid && old["id"]?.ToString()==item["id"]?.ToString())))retainedSources.Add(uuid);
+        }
+        JsonNode? Undo(JsonNode? before,JsonNode? ours,JsonNode? now)
+        {
+            if(JsonNode.DeepEquals(before,ours))return now?.DeepClone();
+            if(JsonNode.DeepEquals(ours,now))return before?.DeepClone();
+            if(before is JsonObject beforeObject && ours is JsonObject afterObject && now is JsonObject currentObject)
+            {
+                var result=(JsonObject)currentObject.DeepClone();
+                foreach(var key in beforeObject.Select(x=>x.Key).Union(afterObject.Select(x=>x.Key)))
+                {
+                    if(JsonNode.DeepEquals(beforeObject[key],afterObject[key]))continue;
+                    var value=Undo(beforeObject[key],afterObject[key],currentObject[key]);
+                    if(value==null && !beforeObject.ContainsKey(key))result.Remove(key);else result[key]=value;
+                }
+                return result;
+            }
+            if(before is JsonArray ba && ours is JsonArray aa && now is JsonArray ca)
+            {
+                string Key(JsonNode? n)
+                {
+                    if(n is not JsonObject o)return n?.ToJsonString()??"null";
+                    string? id=o["id"]?.ToString();
+                    if(o["id"] is JsonValue value && value.TryGetValue<long>(out var number))return "item:"+number;
+                    if(id!=null && ba.Count(x=>x?["id"]?.ToString()==id)==1 && aa.Count(x=>x?["id"]?.ToString()==id)==1 && ba.Any(x=>x?["id"]?.ToString()==id && x?["uuid"]==null))return "type:"+id;
+                    return o["uuid"]?.ToString() is string u ? "uuid:"+u : "name:"+o["name"];
+                }
+                var result=new JsonArray();
+                foreach(var item in ca)
+                {
+                    string key=Key(item);var a=aa.FirstOrDefault(x=>Key(x)==key);var b=ba.FirstOrDefault(x=>Key(x)==key);
+                    if(a!=null && b==null)
+                    {
+                        if(item?["uuid"]?.ToString() is string uuid && retainedSources.Contains(uuid))result.Add(item.DeepClone());
+                        continue;
+                    }
+                    result.Add(a==null?item?.DeepClone():Undo(b,a,item));
+                }
+                foreach(var b in ba.Where(x=>!aa.Any(a=>Key(a)==Key(x)) && !ca.Any(c=>Key(c)==Key(x))))result.Add(b?.DeepClone());
+                return result;
+            }
+            return now?.DeepClone();
+        }
+        return JsonSerializer.SerializeToUtf8Bytes(Undo(originalTree,installedTree,currentTree),JsonOptions);
+    }
+    [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int id);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder path,ref int length);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    internal static string? ProcessPath(Process process)
+    {
+        var handle=OpenProcess(0x1000,false,process.Id);
+        if(handle==IntPtr.Zero)return null;
+        try { var path=new StringBuilder(32768);int length=path.Capacity;return QueryFullProcessImageName(handle,0,path,ref length)?path.ToString():null; }
+        finally { CloseHandle(handle); }
     }
     static void CloseMatchingApps(Options o,Action<string> log,List<string> stopped)
     {
         foreach (var (name, exe) in new[]{("GeometryDash",Path.Combine(o.GD,"GeometryDash.exe")),("obs64",Path.Combine(o.OBS,"bin","64bit","obs64.exe"))})
         foreach (var p in Process.GetProcessesByName(name))
         {
-            string? actual;
-            try { actual=p.MainModule?.FileName; } catch { throw new IOException("Cannot inspect running " + name + ". Close it yourself before installing."); }
+            using var process=p;
+            string? actual=ProcessPath(p);
+            if(actual==null)throw new IOException("Cannot inspect running " + name + ". Close it manually before installing.");
             if (!string.Equals(actual,exe,StringComparison.OrdinalIgnoreCase)) continue;
             if (!o.CloseApps) throw new IOException(name + " is running. Close it first or choose Ask apps to close. OBS can ask you to stop recording/replay; this setup never force-kills it.");
             log("Requesting normal close: " + actual);
-            if (!p.CloseMainWindow() || !p.WaitForExit(20000)) throw new IOException(name + " is still running. Resolve its confirmation or close it manually, then retry. No process was force-killed.");
+            if (!p.CloseMainWindow()) throw new IOException(name + " has no visible main window. If OBS is minimized to the system tray, open its tray menu and choose Exit, then retry. No process was force-killed.");
+            if (!p.WaitForExit(20000)) throw new IOException(name + " is still running. Resolve its confirmation or close it manually, then retry. No process was force-killed.");
             stopped.Add(exe);
         }
     }
@@ -343,16 +471,18 @@ static class Engine
         {
             foreach(var f in plan)
             {
-                var change=new ChangedFile{Destination=f.Destination,InstalledHash=Hash(f.Data),Reason=f.Reason};
+                var change=new ChangedFile{Destination=f.Destination,InstalledHash=Hash(f.Data),Reason=f.Reason,InstalledScene=f.Reason=="Add shared GD Sounds to existing scenes"?f.Data:null};
                 if(File.Exists(f.Destination))
                 {
                     change.Backup=Path.Combine(session,"backups",record.Files.Count.ToString("D4")+".bak"); change.OriginalHash=HashFile(f.Destination);
                     Directory.CreateDirectory(Path.GetDirectoryName(change.Backup)!); File.Copy(f.Destination,change.Backup); Log("Backed up: "+f.Destination+" -> "+change.Backup);
                 }
                 record.Files.Add(change); Save();
-                Directory.CreateDirectory(Path.GetDirectoryName(f.Destination)!);
                 string temporary=f.Destination+".separate-song-"+Guid.NewGuid().ToString("N")+".tmp";
-                try { File.WriteAllBytes(temporary,f.Data); File.Move(temporary,f.Destination,true); change.Applied=true; Save(); }
+                try {
+                    try { Directory.CreateDirectory(Path.GetDirectoryName(f.Destination)!); File.WriteAllBytes(temporary,f.Data); File.Move(temporary,f.Destination,true); }
+                    catch(UnauthorizedAccessException) when(IsMachinePlugin(f.Destination)) { PrivilegedPluginWrite(f.Data); }
+                    change.Applied=true; Save(); }
                 finally { if(File.Exists(temporary)) File.Delete(temporary); }
                 Log("Installed: "+f.Destination);
             }
@@ -385,18 +515,32 @@ static class Engine
             log("Restarted: "+exe);
         }
     }
-    static void Restore(InstallRecord record,Action<string> log)
+    internal static void Restore(InstallRecord record,Action<string> log)
     {
         foreach(var f in record.Files.AsEnumerable().Reverse())
         {
             if(!f.Applied) continue;
-            if(File.Exists(f.Destination) && HashFile(f.Destination)!=f.InstalledHash) { log("Preserve changed file; manual restore available: "+f.Destination); continue; }
+            if(File.Exists(f.Destination) && HashFile(f.Destination)!=f.InstalledHash)
+            {
+                if(f.InstalledScene!=null && f.Backup!=null && File.Exists(f.Backup) && HashFile(f.Backup)==f.OriginalHash)
+                {
+                    var restored=UndoCollection(File.ReadAllBytes(f.Backup),f.InstalledScene,File.ReadAllBytes(f.Destination));
+                    File.WriteAllBytes(f.Destination,restored); log("Removed installer scene changes while preserving later edits: "+f.Destination);
+                }
+                else log("Preserve changed file; manual restore available: "+f.Destination);
+                continue;
+            }
             if(f.Backup!=null)
             {
                 if(!File.Exists(f.Backup) || HashFile(f.Backup)!=f.OriginalHash) throw new IOException("Missing or altered backup: "+f.Backup);
-                Directory.CreateDirectory(Path.GetDirectoryName(f.Destination)!); File.Copy(f.Backup,f.Destination,true); log("Restored: "+f.Destination);
+                try { Directory.CreateDirectory(Path.GetDirectoryName(f.Destination)!); File.Copy(f.Backup,f.Destination,true); }
+                catch(UnauthorizedAccessException) when(IsMachinePlugin(f.Destination)) { PrivilegedPluginWrite(File.ReadAllBytes(f.Backup)); }
+                log("Restored: "+f.Destination);
             }
-            else if(File.Exists(f.Destination)) { File.Delete(f.Destination); log("Removed: "+f.Destination); }
+            else if(File.Exists(f.Destination)) {
+                try { File.Delete(f.Destination); }
+                catch(UnauthorizedAccessException) when(IsMachinePlugin(f.Destination)) { RunPluginHelper("remove",f.InstalledHash); }
+                log("Removed: "+f.Destination); }
         }
     }
     static void Uninstall(Options o,Action<string> log,List<string> stopped)
@@ -418,7 +562,7 @@ sealed class SetupForm : Form
     readonly Options options;
     readonly TextBox gd=new(),obs=new();
     readonly Label status=new(){Dock=DockStyle.Fill,MinimumSize=new Size(0,72),Font=new Font("Segoe UI",11,FontStyle.Bold)},dependency=new(){AutoSize=true};
-    readonly CheckBox close=new(){Text="Close GD and OBS for installation",AutoSize=true},restart=new(){Text="Reopen GD and OBS afterward",AutoSize=true},scene=new(){Text="Add GD Sounds to my existing OBS scenes",AutoSize=true,Checked=true};
+    readonly CheckBox close=new(){Text="Close GD and OBS for installation",AutoSize=true},restart=new(){Text="Reopen GD and OBS afterward",AutoSize=true},scene=new(){Text="Add GD Sounds to my existing OBS scenes",AutoSize=true,Checked=false};
     readonly CheckBox jukebox=new(){Text="Download and install Jukebox 3.8.0",AutoSize=true};
     readonly Button install=new(){Text="Install",AutoSize=true},undo=new(){Text="Undo last install",AutoSize=true};
     readonly object logLock=new();
@@ -503,23 +647,17 @@ sealed class SetupForm : Form
             if(restoring&&!Engine.CanUndo(options)){SetStatus("There is no previous installation to undo.");return;}
             string logs=Path.Combine(options.StateRoot,"SetupLogs");Directory.CreateDirectory(logs);attemptLog=Path.Combine(logs,DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..6]+".log");
             SetStatus(restoring?"Restoring the previous installation...":options.Restart?"Installing. OBS will reopen when setup finishes.":"Installing. Restart OBS afterward to load GD Sounds.");
-            await Engine.ExecuteWithRetry(options,
-                stopped=>Task.Run(()=>Engine.Execute(options,Detail,stopped)),
-                async()=>
-                {
-                    SetStatus("Approve Windows administrator permission to continue.");
-                    var psi=new ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=true,Verb="runas"};foreach(var arg in options.Arguments())psi.ArgumentList.Add(arg);
-                    using var process=Process.Start(psi)??throw new IOException("Could not start the installer with administrator permission.");await process.WaitForExitAsync();
-                    if(process.ExitCode!=0)throw new IOException("Installation did not finish. Open setup logs for details, then retry.");
-                },stopped=>Engine.RestartApps(stopped,Detail));
+            var stopped=new List<string>();
+            await Task.Run(()=>Engine.Execute(options,Detail,stopped));
+            if(options.Restart)Engine.RestartApps(stopped,Detail);
             success=true;
         }
         catch(Exception ex)
         {
             try{Detail(ex.ToString());}catch(IOException){}
-            SetStatus(ex.Message,true);
+            SetStatus(ex is UnauthorizedAccessException ? "Setup cannot write this folder. Choose a writable installation or grant your account access, then retry. User files are never edited by an elevated installer." : ex.Message,true);
         }
         finally{foreach(var input in inputs)input.Enabled=true;options.Uninstall=false;undo.Enabled=Engine.CanUndo(options);}
-        if(success)Close();
+        if(success)SetStatus(restoring?"Undo complete. Later user changes were preserved. You may close setup.":"Installation complete. GD Sounds is ready. You may close setup.");
     }
 }

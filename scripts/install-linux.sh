@@ -4,6 +4,7 @@ song_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 song_game=''
 song_prefix=''
 song_flatpak=0
+song_uninstall=0
 song_plugin="$song_root/payload/separate-song.so"
 song_mod="$song_root/payload/local.separate_song.geode"
 while (($#)); do
@@ -12,17 +13,23 @@ while (($#)); do
         --wine-prefix) song_prefix="${2:?Missing Wine prefix}"; shift 2 ;;
         --plugin) song_plugin="${2:?Missing plugin path}"; shift 2 ;;
         --mod) song_mod="${2:?Missing mod path}"; shift 2 ;;
+        --uninstall) song_uninstall=1; shift ;;
         --flatpak) song_flatpak=1; shift ;;
-        *) printf 'Usage: %s [--game-dir directory] [--wine-prefix prefix] [--flatpak] [--plugin file.so] [--mod file.geode]\n' "$0" >&2; exit 1 ;;
+        *) printf 'Usage: %s [--uninstall] [--game-dir directory] [--wine-prefix prefix] [--flatpak] [--plugin file.so] [--mod file.geode]\n' "$0" >&2; exit 1 ;;
     esac
 done
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || fail 'This package requires x86_64 Linux with Geometry Dash running through Proton.'
 ((EUID != 0)) || fail 'Run this installer as your normal desktop user, without sudo.'
-[[ -f "$song_plugin" && -f "$song_mod" ]] || fail 'The plugin or Windows Geode mod is missing from the package.'
-if pgrep -x obs >/dev/null || pgrep -fi '(^|[/ ])GeometryDash\.exe([ ]|$)' >/dev/null; then
+if pgrep -x obs >/dev/null || pgrep -fi '(^|[/\\ ])GeometryDash\.exe([ ]|$)' >/dev/null; then
     fail 'Close OBS and Geometry Dash, then run the installer again.'
 fi
+[[ -f "$song_root/install-state.pl" ]] || fail 'The installer is missing its undo helper.'
+if ((song_uninstall)); then
+    perl "$song_root/install-state.pl" undo-latest "${XDG_DATA_HOME:-$HOME/.local/share}/obs-jukebox/backups"
+    exit
+fi
+[[ -f "$song_plugin" && -f "$song_mod" ]] || fail 'The plugin or Windows Geode mod is missing from the package.'
 if [[ -z "$song_game" ]]; then
     for song_steam in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"; do
         if [[ -f "$song_steam/steamapps/common/Geometry Dash/GeometryDash.exe" ]]; then
@@ -36,7 +43,54 @@ song_game="$(cd -- "$song_game" && pwd -P)"
 [[ -f "$song_game/Geode.dll" && -d "$song_game/geode" ]] || fail 'Install Geode for Windows into Geometry Dash first, then run the game once through Proton.'
 [[ -f "$song_root/check-geode-version.pl" ]] || fail 'The installer is missing its Geode compatibility check. Download the complete package again.'
 command -v perl >/dev/null && perl -MJSON::PP -e 1 >/dev/null 2>&1 || fail 'Install Perl (including its core JSON::PP module) with your Linux package manager, then run this installer again.'
-song_geode_version=$(perl "$song_root/check-geode-version.pl" "$song_game/Geode.dll") || fail 'Geode compatibility could not be verified. Update or repair Geode for Windows with the official installer from https://geode-sdk.org (Geode 5.10.x or later 5.x), then try again. No installation files have been changed.'
+song_geode_version=$(perl "$song_root/check-geode-version.pl" "$song_game/Geode.dll") || fail 'Geode compatibility could not be verified. Update or repair Geode for Windows with the official installer from https://geode-sdk.org (Geode >=5.10.1 and <6.0.0), then try again. No installation files have been changed.'
+song_mods="$song_game/geode/mods"
+song_packages=$(perl -MJSON::PP - "$song_mods" <<'PERL'
+use strict;
+use warnings;
+my ($directory) = @ARGV;
+my %installed;
+if (-d $directory) {
+    opendir my $mods, $directory or die "Cannot read installed mods: $!\n";
+    for my $name (sort grep { /\.geode\z/i } readdir $mods) {
+        my $path = "$directory/$name";
+        my $canonical = lc($name) eq 'fleym.nongd.geode' || lc($name) eq 'local.separate_song.geode';
+        my (@entries, $mod);
+        my $valid = eval {
+        die "Repair the installed package before continuing: $path\n" if !-f $path || $path =~ /[\r\n]/;
+        open my $listing, '-|', 'unzip', '-Z1', $path or die "Cannot inspect $path\n";
+        @entries = <$listing>;
+        close $listing or die "Cannot inspect $path\n";
+        chomp @entries;
+        die "Invalid or ambiguous mod.json in $path\n" unless (grep { $_ eq 'mod.json' } @entries) == 1;
+        open my $metadata, '-|', 'unzip', '-p', $path, 'mod.json' or die "Cannot read $path\n";
+        my $json = do { local $/; <$metadata> };
+        close $metadata or die "Cannot read $path\n";
+        $mod = JSON::PP->new->relaxed->decode($json);
+        die "Invalid mod.json in $path\n" unless ref($mod) eq 'HASH' && defined($mod->{id}) && !ref($mod->{id}) && $mod->{id} =~ /\A[a-z0-9_-]+\.[a-z0-9_.-]+\z/i;
+        1;
+        };
+        if (!$valid) { die $@ if $canonical; next; }
+        my $id = $mod->{id};
+        die "Unexpected mod ID in $path\n" if $canonical && "$id.geode" ne lc($name);
+        next unless $id eq 'fleym.nongd' || $id eq 'local.separate_song';
+        die "Refusing to replace or duplicate a symbolic link: $path\n" if -l $path;
+        die "Multiple installed packages have ID $id. Remove the duplicate before continuing.\n" if exists $installed{$id};
+        die "Invalid mod version in $path\n" unless defined($mod->{version}) && !ref($mod->{version}) && $mod->{version} =~ /\Av?\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.+-]+)?\z/;
+        if ($id eq 'fleym.nongd') {
+            die "Install Jukebox 3.8.0 from Geode before continuing.\n" unless $mod->{version} =~ /\Av?3\.8\.0\z/;
+            die "Installed Jukebox has no Windows support: $path\n" unless grep { $_ eq 'fleym.nongd.dll' } @entries;
+        }
+        $installed{$id} = $path;
+    }
+    closedir $mods;
+}
+print(($installed{'fleym.nongd'} // '-'), "\n", ($installed{'local.separate_song'} // "$directory/local.separate_song.geode"));
+PERL
+) || fail 'Installed mod compatibility could not be verified. No installation files have been changed.'
+song_jukebox=${song_packages%%$'\n'*}
+song_mod_destination=${song_packages#*$'\n'}
+[[ "$song_jukebox" != - ]] || fail 'Install Jukebox 3.8.0 through Geode in Geometry Dash before installing OBS Jukebox.'
 if [[ -z "$song_prefix" ]]; then
     song_prefix="$(dirname -- "$(dirname -- "$song_game")")/compatdata/322170/pfx"
 fi
@@ -51,7 +105,7 @@ if ((song_flatpak)); then
 fi
 song_destination="$song_config/obs-studio/plugins/separate-song/bin/64bit"
 song_backup="${XDG_DATA_HOME:-$HOME/.local/share}/obs-jukebox/backups/$(date +%Y%m%d-%H%M%S)-$$"
-song_targets=("$song_destination/separate-song.so" "$song_game/geode/mods/local.separate_song.geode" "$song_config/obs-jukebox/paths")
+song_targets=("$song_destination/separate-song.so" "$song_mod_destination" "$song_config/obs-jukebox/paths")
 song_sources=("$song_plugin" "$song_mod")
 song_modes=(755 644 644)
 song_staged=()
@@ -124,5 +178,9 @@ if ((song_flatpak)); then
     song_changed[3]=1
     flatpak override --user --filesystem="$song_prefix:ro" --filesystem="$song_game:ro" com.obsproject.Studio
 fi
+for song_i in "${!song_targets[@]}"; do
+    perl "$song_root/install-state.pl" record "$song_backup" "${song_targets[song_i]}" "$song_backup/$(basename -- "${song_targets[song_i]}")"
+done
+touch "$song_backup/complete"
 song_committed=1
-printf 'Installed OBS Jukebox with Geode %s. Backups: %s\nOpen GD and install Jukebox through Geode if needed.\nIn OBS, add the GD Sounds source once. Keep monitoring off and exclude GD audio from your other recording sources.\n' "$song_geode_version" "$song_backup"
+printf 'Installed OBS Jukebox with Geode %s. Backups: %s\nUndo this installation with Install.sh --uninstall.\nIn OBS, add the GD Sounds source once. Keep monitoring off and exclude GD audio from your other recording sources.\n' "$song_geode_version" "$song_backup"

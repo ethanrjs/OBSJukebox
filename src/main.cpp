@@ -16,6 +16,7 @@
 #include "LevelIdentity.hpp"
 #include "PlaybackIdentity.hpp"
 #include "MusicSampling.hpp"
+#include "GamePolicies.hpp"
 #include "MonotonicClock.hpp"
 #include <map>
 #include <set>
@@ -32,6 +33,7 @@ static std::optional<jukebox_link::LevelSongs> playingSongs;
 static PlayLayer* activePlayLayer = nullptr;
 static std::string offsetLevel;
 static bool loadingOffset = false;
+static bool enabled = true;
 struct MusicVoice {
     Snapshot snapshot;
     jukebox_link::MusicSource source;
@@ -101,7 +103,9 @@ static void sampleEnvelope(MusicVoice& voice, FMOD::Channel* channel, unsigned s
         std::vector<float> gains(count);
         if (channel->getFadePoints(&count, clocks.data(), gains.data()) == FMOD_OK) {
             voice.fadePoints.clear();
+            count = std::min(count, static_cast<unsigned>(clocks.size()));
             for (unsigned i = 0; i < count; ++i) voice.fadePoints.push_back({clocks[i], gains[i]});
+            normalizeMusicFades(voice.fadePoints);
         }
     }
     if (!voice.fadePoints.empty()) voice.lastFade = musicFadeAt(voice.fadePoints, clock);
@@ -123,7 +127,7 @@ static void sampleEnvelope(MusicVoice& voice, FMOD::Channel* channel, unsigned s
         if (offset > 1) out.fades[out.fadeCount++] = {offset - 1, beforeEnd};
         out.fades[out.fadeCount++] = {offset, 0.f};
     }
-
+    out.fadeCount = normalizePacketFades(std::span(out.fades), out.fadeCount);
 }
 
 static std::string levelOffsetKey(GJGameLevel* level) {
@@ -137,6 +141,7 @@ static void selectOffsetLevel(GJGameLevel* level) {
     auto key = levelOffsetKey(level);
     if (key == offsetLevel && level) return;
     offsetLevel = std::move(key);
+    offset_setting::selectLevel(level ? (std::string(level->m_levelName).empty() ? "Unnamed level" : std::string(level->m_levelName)) : "");
     auto values = Mod::get()->getSavedValue<matjson::Value>("obs-level-offsets", matjson::Value::object());
     double value = offsetLevel.empty() ? 0.0 : values[offsetLevel].asDouble().unwrapOr(0.0);
     loadingOffset = true;
@@ -145,7 +150,7 @@ static void selectOffsetLevel(GJGameLevel* level) {
 }
 
 static void settings(Snapshot& snapshot) {
-    snapshot.enabled = Mod::get()->getSettingValue<bool>("enabled");
+    snapshot.enabled = enabled;
     audio_tap::enable(snapshot.enabled);
     snapshot.musicVolume = obs_volume::music();
     snapshot.effectsVolume = obs_volume::effects();
@@ -172,7 +177,6 @@ static void stopVoices() {
 static void sampleMusic(PlayLayer* play) {
     if (!play || play != activePlayLayer) return;
     if (play->m_level) {
-        playingSongs = jukebox_link::snapshotSongs(play->m_level);
         state.level = play->m_level->m_levelName;
     }
     state.attempt = play->m_attempts;
@@ -193,7 +197,11 @@ static void sampleMusic(PlayLayer* play) {
         seen.insert(id);
         auto& voice = voices[id];
         auto& out = voice.snapshot;
-        auto previous = out;
+        const auto previousTimestamp = out.timestamp;
+        const auto previousPosition = out.position;
+        const auto previousRate = out.rate;
+        const auto previousPlaying = out.playing;
+        const auto previousPath = out.path;
         bool newVoice = voice.channel != channel || voice.sound != sound ||
             voice.source.path != std::string(music.m_filePath) || voice.engineChannelID != music.m_channelID || voice.continuing;
         if (newVoice) {
@@ -211,18 +219,22 @@ static void sampleMusic(PlayLayer* play) {
         out.position = position / 1000.0;
         out.playing = !channelPaused(channel);
         out.rate = channelRate(channel, sound);
-        double elapsed = previous.timestamp && sampleTime >= previous.timestamp ? (sampleTime - previous.timestamp) / 1e9 : 0.;
-        if (newVoice || !previous.timestamp || musicPositionJump(previous.position, out.position,
-                previous.playing ? elapsed : 0., previous.rate)) out.epoch = ++nextEpoch;
+        double elapsed = previousTimestamp && sampleTime >= previousTimestamp ? (sampleTime - previousTimestamp) / 1e9 : 0.;
+        if (newVoice || !previousTimestamp || musicPositionJump(previousPosition, out.position,
+                previousPlaying ? elapsed : 0., previousRate)) out.epoch = ++nextEpoch;
         unsigned duration = 0;
         sound->getLength(&duration, FMOD_TIMEUNIT_MS);
         voice.duration = duration / 1000.0;
         int loops = 0;
-        channel->getLoopCount(&loops); voice.loop = loops != 0;
+        FMOD_MODE mode = FMOD_DEFAULT;
+        const bool loopMode = channel->getMode(&mode) == FMOD_OK &&
+            (mode & (FMOD_LOOP_NORMAL | FMOD_LOOP_BIDI));
+        channel->getLoopCount(&loops);
+        voice.loop = loopMode && loops != 0;
         out.looping = false; out.loopStart = 0; out.loopEnd = 0;
         unsigned loopStart = 0, loopEnd = 0;
         float baseFrequency = 0.f;
-        if (loops == -1 && sound->getDefaults(&baseFrequency, nullptr) == FMOD_OK && baseFrequency > 0 &&
+        if (loopMode && (mode & FMOD_LOOP_NORMAL) && loops == -1 && sound->getDefaults(&baseFrequency, nullptr) == FMOD_OK && baseFrequency > 0 &&
             channel->getLoopPoints(&loopStart, FMOD_TIMEUNIT_PCM, &loopEnd, FMOD_TIMEUNIT_PCM) == FMOD_OK &&
             loopEnd >= loopStart) {
             out.looping = true;
@@ -244,7 +256,7 @@ static void sampleMusic(PlayLayer* play) {
         out.status = out.playing ? "Playing" : "Paused";
         out.level = state.level; out.attempt = state.attempt;
         jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
-        if (previous.path != out.path && !newVoice) out.epoch = ++nextEpoch;
+        if (previousPath != out.path && !newVoice) out.epoch = ++nextEpoch;
         if (id == 0 || state.song.empty()) state.song = out.song;
         bridge().publish(out);
     }
@@ -295,6 +307,8 @@ static void sampleMusic(PlayLayer* play) {
 
 $on_mod(Loaded) {
     offset_setting::initialize();
+    enabled = Mod::get()->getSettingValue<bool>("enabled");
+    listenForSettingChanges<bool>("enabled", [](bool value) { enabled = value; });
     SettingChangedEventV3(Mod::get(), "offset").listen([](std::shared_ptr<SettingV3> setting) {
         auto offset = std::dynamic_pointer_cast<offset_setting::OffsetSetting>(setting);
         if (!offset || loadingOffset || offsetLevel.empty()) return;
@@ -362,6 +376,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
     }
     bool init(GJGameLevel* level, bool replay, bool dontCreateObjects) {
         stopVoices();
+        jukebox_link::prepare(level);
         selectOffsetLevel(level);
         activePlayLayer = this;
         m_fields->observedLevel = level;
@@ -378,7 +393,10 @@ class $modify(SeparateSongPlay, PlayLayer) {
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
         if (m_fields->observedLevel != m_level) {
-            m_fields->observedLevel = m_level; selectOffsetLevel(m_level);
+            m_fields->observedLevel = m_level;
+            if (m_level) playingSongs = jukebox_link::snapshotSongs(m_level);
+            else playingSongs.reset();
+            selectOffsetLevel(m_level);
         }
         auto now = monotonicNowNs();
         if (now - m_fields->lastSample >= 10000000) {
@@ -410,42 +428,11 @@ class $modify(SeparateSongPlay, PlayLayer) {
     }
 };
 
-class SongDownloadWait : public CCNode {
-    Ref<GJGameLevel> level;
-    Ref<Notification> notice;
-    geode::Function<void()> ready;
-    std::chrono::steady_clock::time_point start;
-    std::chrono::steady_clock::time_point lastPoll{};
-public:
-    static void begin(CCNode* parent, GJGameLevel* level, geode::Function<void()> ready) {
-        if (parent->getChildByID("download-wait"_spr)) return;
-        auto wait = new SongDownloadWait();
-        wait->init(); wait->autorelease();
-        wait->setID("download-wait"_spr);
-        wait->level = level; wait->ready = std::move(ready);
-        wait->start = std::chrono::steady_clock::now();
-        wait->notice = Notification::create("Downloading game and OBS songs...", NotificationIcon::Loading, 0);
-        wait->notice->show(); parent->addChild(wait); wait->scheduleUpdate();
-    }
-    void update(float) override {
-        auto now = std::chrono::steady_clock::now();
-        if (now-lastPoll < std::chrono::milliseconds(250)) return;
-        lastPoll = now;
-        auto result = jukebox_link::prepare(level.data());
-        if (!result.ready && result.error.empty() &&
-            std::chrono::steady_clock::now()-start < std::chrono::seconds(120)) return;
-        Ref<SongDownloadWait> keep(this);
-        auto callback = std::move(ready);
-        notice->hide(); unscheduleUpdate(); removeFromParent();
-        if (result.ready) callback();
-        else FLAlertLayer::create("OBS Song", result.error.empty() ?
-            "The download took too long. Retry from Jukebox, or choose a cached song." : result.error, "OK")->show();
-    }
-    void onExit() override {
-        if (notice) notice->hide();
-        CCNode::onExit();
-    }
-};
+static void prepareOBS(GJGameLevel* level) {
+    auto result = jukebox_link::prepare(level, true);
+    if (!result.ready && !result.error.empty())
+        Notification::create("OBS song unavailable; following game audio", NotificationIcon::Info)->show();
+}
 
 class $modify(SeparateSongInfo, LevelInfoLayer) {
     bool init(GJGameLevel* level, bool challenge) {
@@ -455,11 +442,8 @@ class $modify(SeparateSongInfo, LevelInfoLayer) {
     }
     void onPlay(CCObject* sender) {
         selectOffsetLevel(m_level);
-        if (getChildByID("download-wait"_spr)) return;
-        auto result = jukebox_link::prepare(m_level, true);
-        if (result.ready) LevelInfoLayer::onPlay(sender);
-        else if (!result.error.empty()) FLAlertLayer::create("OBS Song", result.error, "OK")->show();
-        else SongDownloadWait::begin(this, m_level, [this] { LevelInfoLayer::onPlay(nullptr); });
+        prepareOBS(m_level);
+        LevelInfoLayer::onPlay(sender);
     }
 };
 class $modify(SeparateSongPage, LevelPage) {
@@ -470,11 +454,8 @@ class $modify(SeparateSongPage, LevelPage) {
     }
     void onPlay(CCObject* sender) {
         selectOffsetLevel(m_level);
-        if (getChildByID("download-wait"_spr)) return;
-        auto result = jukebox_link::prepare(m_level, true);
-        if (result.ready) LevelPage::onPlay(sender);
-        else if (!result.error.empty()) FLAlertLayer::create("OBS Song", result.error, "OK")->show();
-        else SongDownloadWait::begin(this, m_level, [this] { LevelPage::onPlay(nullptr); });
+        prepareOBS(m_level);
+        LevelPage::onPlay(sender);
     }
 };
 class $modify(SeparateSongEdit, EditLevelLayer) {
@@ -515,8 +496,13 @@ class $modify(SeparateSongDirector, CCDirector) {
 };
 
 class $modify(SeparateSongMenu, MenuLayer) {
+    void onEnter() {
+        MenuLayer::onEnter();
+        selectOffsetLevel(nullptr);
+    }
     bool init() {
         if (!MenuLayer::init()) return false;
+        selectOffsetLevel(nullptr);
         publish("Ready", false);
         return true;
     }

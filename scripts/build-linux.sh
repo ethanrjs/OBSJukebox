@@ -19,7 +19,7 @@ done
 pkg-config --exists libobs || { printf 'Install the OBS development package (libobs-dev on Ubuntu).\n' >&2; exit 1; }
 mkdir -p "$song_output"
 song_output="$(cd -- "$song_output" && pwd)"
-cmake -S "$song_root/obs-plugin" -B "$song_output/build" -DCMAKE_BUILD_TYPE=Release
+cmake -S "$song_root/obs-plugin" -B "$song_output/build" -DCMAKE_BUILD_TYPE=Release -DOBS_JUKEBOX_QA=OFF
 cmake --build "$song_output/build" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 song_package="$song_output/OBS-Jukebox-Linux"
 mkdir -p "$song_package/payload"
@@ -29,6 +29,7 @@ install -m 755 "$song_root/scripts/install-linux.sh" "$song_package/Install.sh"
 install -m 755 "$song_root/installer/linux/OBS-Jukebox-Setup" "$song_package/OBS-Jukebox-Setup"
 install -m 644 "$song_root/installer/linux/installer.py" "$song_package/installer.py"
 install -m 644 "$song_root/installer/windows/logo.png" "$song_package/logo.png"
+install -m 644 "$song_root/scripts/install-state.pl" "$song_package/install-state.pl"
 install -m 644 "$song_root/scripts/check-geode-version.pl" "$song_package/check-geode-version.pl"
 install -m 644 "$song_root/LICENSE" "$song_package/LICENSE"
 tar -C "$song_output" -czf "$song_output/OBS-Jukebox-Linux-x86_64.tar.gz" OBS-Jukebox-Linux

@@ -1,6 +1,7 @@
 import os,pathlib,shutil,subprocess,time,json,hashlib
-root=pathlib.Path('/Users/home/projects/obsjukebox-validation-6zJJ9T')
-base=root/'artifacts/trigger-smoke'
+from paths import ROOT, BASE
+root=ROOT
+base=BASE
 mods=base/'Geometry Dash.app/Contents/geode/mods'
 shutil.copy2(root/'build-mac/local.separate_song.geode',mods)
 shutil.copy2(root/'artifacts/native-mac/preview/OBS Jukebox Setup.app/Contents/Resources/payload/fleym.nongd.geode',mods)

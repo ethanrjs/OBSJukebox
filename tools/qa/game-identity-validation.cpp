@@ -1,5 +1,8 @@
 #include "../../src/PlaybackIdentity.hpp"
 #include "../../src/MusicSampling.hpp"
+#include "../../src/GamePolicies.hpp"
+#include "../../src/LinkPacket.hpp"
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <unordered_map>
@@ -70,5 +73,18 @@ int main() {
     check(backgroundMusicGain(-1, .1f, 3) == 0, "checkpoint background fade starts silent independently of slider");
     check(std::abs(backgroundMusicGain(3, .1f, 3.05f) - .5f) < .001f, "checkpoint group fade reconstructs middle gain");
     check(backgroundMusicGain(0, .1f, 3) == 1, "completed background fade restores unit factor");
+    std::vector<MusicFade> unordered{{300, .3f}, {100, .1f}, {100, .8f}, {200, std::nanf("")}};
+    normalizeMusicFades(unordered);
+    check(unordered.size() == 3 && unordered[0].clock == 100 && unordered[0].gain == .8f,
+        "duplicate DSP clocks use the last gain after stable sorting");
+    check(unordered[1].gain == 0 && musicFadeAt(unordered, 150) == .4f,
+        "invalid DSP gain is sanitized before interpolation");
+    std::array<SongFadePoint, 8> packet{{{20, .8f}, {10, .5f}, {20, 0.f}, {0, 1.f},
+        {86400000000001ULL, 1.f}, {30, std::nanf("")}}};
+    auto count = normalizePacketFades(std::span(packet), 6);
+    check(count == 3 && packet[0].offsetNs == 10 && packet[1].offsetNs == 20 && packet[2].offsetNs == 30,
+        "packet fade offsets are strictly increasing and inside protocol limits");
+    check(packet[1].gain == 0 && packet[2].gain == 0,
+        "scheduled stop wins duplicate timestamp and nonfinite gains are silent");
     std::cout << checks << " game identity checks passed\n";
 }

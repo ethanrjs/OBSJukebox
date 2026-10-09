@@ -58,6 +58,7 @@ struct SetupView: View {
             Spacer(minLength: 0)
             Button(busy ? "Installing…" : "Install") { Task { await install() } }
                 .disabled(busy)
+            Button("Undo last install") { Task { await install(undo: true) } }.disabled(busy)
             Button("Open backups and setup logs") { openLogs() }
                 .buttonStyle(.link)
         }.padding(22).frame(width: 730, height: 650, alignment: .topLeading)
@@ -119,7 +120,7 @@ struct SetupView: View {
         }
     }
 
-    @MainActor private func install() async {
+    @MainActor private func install(undo: Bool = false) async {
         busy = true
         failed = false
         output = ""
@@ -127,8 +128,8 @@ struct SetupView: View {
         let gdPath = gd, obsPath = obs, shouldReopen = reopen
         let script = root.appendingPathComponent("Install.command")
         do {
-            guard FileManager.default.fileExists(atPath: gdPath + "/Contents/MacOS/Geometry Dash"),
-                  Bundle(path: obsPath)?.executableURL != nil else {
+            guard undo || (FileManager.default.fileExists(atPath: gdPath + "/Contents/MacOS/Geometry Dash") &&
+                  Bundle(path: obsPath)?.executableURL != nil) else {
                 throw NSError(domain: "OBSJukeboxSetup", code: 2, userInfo: [NSLocalizedDescriptionKey:
                     "Choose the Geometry Dash and OBS Studio applications before installing."])
             }
@@ -137,7 +138,7 @@ struct SetupView: View {
                 DispatchQueue.global(qos: .userInitiated).async {
                     let process = Process()
                     process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-                    process.arguments = [script.path, gdPath, obsPath]
+                    process.arguments = undo ? [script.path, "--uninstall"] : [script.path, gdPath, obsPath]
                     let pipe = Pipe()
                     process.standardOutput = pipe
                     process.standardError = pipe
@@ -154,8 +155,8 @@ struct SetupView: View {
             }
             output = result.0
             failed = !result.1
-            status = result.1 ? "Installed. In OBS, add Sources > GD Sounds once." : "Installation did not finish. See the details below and setup logs."
-            if result.1 && shouldReopen {
+            status = result.1 ? (undo ? "Undo finished. Review preserved files in the log below." : "Installed. In OBS, add Sources > GD Sounds once.") : "Installation did not finish. See the details below and setup logs."
+            if result.1 && shouldReopen && !undo {
                 NSWorkspace.shared.open(URL(fileURLWithPath: gdPath))
                 NSWorkspace.shared.open(URL(fileURLWithPath: obsPath))
             }

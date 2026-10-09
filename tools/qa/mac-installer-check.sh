@@ -30,7 +30,7 @@ reject_mods() {
     [[ "$before" == "$after" && ! -e "$qa_logs" && ! -e "$qa_plugin" ]]
     print -r -- "$name: pass"
 }
-for qa_version in 5.9.9 4.10.1 6.10.1 invalid 5.10.1-beta.1; do
+for qa_version in 5.10.0 5.9.9 4.10.1 6.10.1 invalid 5.10.1-beta.1; do
     /usr/bin/env QA_VERSION="$qa_version" /usr/bin/perl -0pe 's/"5\.10\.1"/"$ENV{QA_VERSION}"/g' "$qa_payload/payload/geode/Geode.dylib" > "$qa_gd/Contents/Frameworks/Geode.dylib"
     qa_before=$(shasum -a 256 "$qa_gd/Contents/Frameworks/Geode.dylib" "$qa_gd/Contents/Frameworks/libfmod.dylib")
     if run_install > "$qa_root/reject-$qa_version.log" 2>&1; then print "Incompatible Geode $qa_version incorrectly accepted"; exit 1; fi
@@ -119,3 +119,19 @@ cmp "$qa_mods/fleym.nongd.geode" "$qa_payload/payload/fleym.nongd.geode"
 cmp "$qa_payload/payload/geode/Geode.dylib" "$qa_gd/Contents/Frameworks/Geode.dylib"
 print 'failed-install-rolls-back: pass'
 print -r -- "Evidence: $qa_root"
+
+# A new install must remove old bundle members and quarantine from the payload.
+rm "$qa_plugin"
+mv "$qa_root/held-plugin" "$qa_plugin"
+print stale > "$qa_plugin/stale.txt"
+/usr/bin/xattr -w com.apple.quarantine '0081;00000000;Fixture;' "$qa_payload/payload/separate-song.plugin"
+run_install > "$qa_root/replace.log" 2>&1
+[[ ! -e "$qa_plugin/stale.txt" ]]
+if /usr/bin/xattr -p com.apple.quarantine "$qa_plugin" >/dev/null 2>&1; then print 'Quarantine was copied'; exit 1; fi
+print 'bundle-replaced-without-quarantine: pass'
+# Undo restores the previous full bundle but preserves a subsequently edited mod.
+print user-edited > "$qa_mods/local.separate_song.geode"
+/usr/bin/env HOME="$qa_home" /bin/zsh "$qa_script" --uninstall > "$qa_root/undo.log" 2>&1
+[[ "$(cat "$qa_mods/local.separate_song.geode")" == user-edited ]]
+[[ "$(cat "$qa_plugin/stale.txt")" == stale ]]
+print 'undo-restores-bundle-preserves-user-mod: pass'
