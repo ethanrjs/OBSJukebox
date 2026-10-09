@@ -443,7 +443,10 @@ void select(jukebox::NongCell* cell) {
         c.path = string::pathToString(base()/"nongs"/fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid));
     }
     c = resolved(c); store(c);
-    auto error = download(c, true);
+    // Only rows with a Game button can be picked, and Jukebox lists those because it stores the
+    // song. Asking it to download one fails with "already downloaded" whenever the async file
+    // cache has not caught up. GD's original song is the only one that may still be missing.
+    auto error = c.original ? download(c, true) : std::string();
     Notification::create(error.empty() ? "OBS song selected" : "OBS download failed", error.empty()?NotificationIcon::Success:NotificationIcon::Error)->show();
     if (!error.empty()) FLAlertLayer::create("OBS Song", error, "OK")->show();
     refreshUI();
