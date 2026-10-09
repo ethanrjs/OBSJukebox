@@ -294,10 +294,14 @@ CachedPlayback& forPlayback(int id) {
     return playback.insert_or_assign(id, std::move(value)).first->second;
 }
 
-WeakRef<CCNode> visibleList;
+// The open Jukebox list. Not a WeakRef: assigning a WeakRef that already holds an object
+// repoints its controller without retaining the new one, which left this dangling once the
+// second list opened was closed. Heap-held so no release runs during static teardown.
+Ref<CCNode>& visibleList() { static auto list = new Ref<CCNode>(); return *list; }
 CCNode* findList(CCNode* scene) {
-    auto list = visibleList.lock();
-    if (!list || !list->isRunning()) return nullptr;
+    auto list = visibleList();
+    if (!list) return nullptr;
+    if (!list->isRunning()) { visibleList() = nullptr; return nullptr; }
     for (auto node = list.data(); node; node = node->getParent()) {
         if (!node->isVisible()) return nullptr;
         if (node == scene) return list.data();
@@ -439,7 +443,10 @@ void select(jukebox::NongCell* cell) {
         c.path = string::pathToString(base()/"nongs"/fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid));
     }
     c = resolved(c); store(c);
-    auto error = download(c, true);
+    // Only rows with a Game button can be picked, and Jukebox lists those because it stores the
+    // song. Asking it to download one fails with "already downloaded" whenever the async file
+    // cache has not caught up. GD's original song is the only one that may still be missing.
+    auto error = c.original ? download(c, true) : std::string();
     Notification::create(error.empty() ? "OBS song selected" : "OBS download failed", error.empty()?NotificationIcon::Success:NotificationIcon::Error)->show();
     if (!error.empty()) FLAlertLayer::create("OBS Song", error, "OK")->show();
     refreshUI();
@@ -466,8 +473,18 @@ void refreshUI() {
     auto list = findList(scene); if (!list) return;
     for (auto cell : cells(list)) paint(cell);
 }
+// Rows get their OBS checkbox as they enter, so a new list or a search rebuild never draws a
+// frame of Jukebox's plain layout while waiting for refreshUI().
 void observeList(CCNode* node) {
-    if (cellLayoutMatches() && node->getID() == "NongList") visibleList = node;
+    if (!cellLayoutMatches()) return;
+    if (node->getID() == "NongList") {
+        visibleList() = node;
+        for (auto cell : cells(node)) paint(cell);
+        return;
+    }
+    auto& list = visibleList();
+    if (!list || !list->isRunning()) return;
+    if (auto cell = typeinfo_cast<jukebox::NongCell*>(node)) paint(cell);
 }
 Readiness prepare(GJGameLevel* level, bool retry) {
     if (!Mod::get()->getSettingValue<bool>("enabled") || !level || !cellLayoutMatches()) return {};
