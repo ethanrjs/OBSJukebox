@@ -14,7 +14,7 @@ touch "$qa_gd/Contents/MacOS/Geometry Dash"
 qa_mods="$qa_gd/Contents/geode/mods"
 qa_plugin="$qa_home/Library/Application Support/obs-studio/plugins/separate-song.plugin"
 qa_logs="$qa_home/Library/Application Support/OBS Jukebox/Install Logs"
-run_install() { /usr/bin/env HOME="$qa_home" /bin/zsh "$qa_script" "$qa_gd" /Applications/OBS.app </dev/null; }
+run_install() { /usr/bin/env HOME="$qa_home" /bin/zsh "$qa_script" "$qa_gd" "${OBS_APP:-/Applications/OBS.app}" </dev/null; }
 make_mod() {
     local destination="$1" id="$2" version="$3" platform="${4:-mac}"
     local staging=$(mktemp -d "$qa_root/mod.XXXXXX")

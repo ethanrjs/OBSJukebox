@@ -66,7 +66,7 @@ jobs:
           c++ -std=c++20 tools/qa/protocol-layout.cpp -o "$RUNNER_TEMP/protocol-layout"
           python3 tools/qa/test_protocol_layout.py "$RUNNER_TEMP/protocol-layout"
           python3 tools/qa/check-geode-version.py
-          python3 tools/qa/unix-install-state.py --perl
+          python3 tools/qa/unix-install-state.py --perl /usr/bin/perl
       - name: Package installer
         run: |
           zsh scripts/package-macos.sh

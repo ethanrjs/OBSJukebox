@@ -20,7 +20,7 @@ jobs:
       - name: Check installer Geode compatibility
         run: |
           python3 tools/qa/check-geode-version.py
-          python3 tools/qa/unix-install-state.py --perl
+          python3 tools/qa/unix-install-state.py --perl /usr/bin/perl
       - name: Check graphical installer
         run: xvfb-run -a python3 tools/qa/linux-installer-ui.py
       - name: Check installer rollback
