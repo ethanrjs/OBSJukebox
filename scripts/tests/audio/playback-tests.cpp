@@ -391,6 +391,55 @@ struct SyncedSender {
     }
 };
 
+// GD's main thread can stall for most of a second (tearing down a level) while FMOD's mixer thread
+// keeps playing the song and sending effects. Music then plays on past 400 ms. With the effects
+// stream gone too (GD closed or crashed), or with the main thread still sending other packets
+// (this voice's stop was lost), the voice still goes stale.
+enum class Silence { MainThreadStall, Crash, VoiceOnly };
+static void mainThreadStallTest(Silence silence) {
+    receiver=std::make_unique<Receiver>();resetOutput();
+    {
+        SyncedSender sender(3600000000000LL);
+        check(sender.synchronize(),"stall test synchronizes its sender");
+        SongLinkPacket music;music.flags=7;music.position=1;music.loopStart=0;music.loopEnd=4;
+        std::strcpy(music.path,"artifacts/audio-tests/ramp.wav");
+        auto base=os_gettime_ns();sender.send(music,base);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        auto mappedBase=receiver->get().packet.timestamp;
+        auto effectsSocket=socket(AF_INET,SOCK_DGRAM,0);
+        sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        {
+            SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
+            for(unsigned sequence=0;os_gettime_ns()<base+800000000;++sequence){
+                auto now=os_gettime_ns();
+                if(silence!=Silence::Crash){
+                    EffectsPacketV2 p;p.sessionID=sender.session;p.frames=480;p.sampleRate=48000;p.sequence=sequence;
+                    p.timestamp=sender.stamp(now);std::fill_n(p.samples,960,0.f);
+                    sendto(effectsSocket,reinterpret_cast<const char*>(&p),44+p.frames*8,0,
+                        reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+                }
+                if(silence==Silence::VoiceOnly){
+                    SongLinkPacket status;status.channelID=-1;status.flags=1;sender.send(status,now);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+            unsigned audible=0,frames=0;
+            for(const auto& b:output())for(unsigned i=0;i<480;++i){
+                auto delta=int64_t(b.timestamp+i*1000000000ULL/48000)-int64_t(mappedBase);
+                if(delta<500000000 || delta>750000000)continue;
+                ++frames;audible+=b.samples[i*2]>.1f;
+            }
+            bool plays=silence==Silence::MainThreadStall;
+            check(frames>10000 && (plays?audible==frames:audible==0),
+                silence==Silence::MainThreadStall?"music plays through a main-thread stall while GD still mixes":
+                silence==Silence::Crash?"music goes stale once GD stops mixing":
+                "a voice the main thread stops refreshing still goes stale");
+        }
+        closeSocket(effectsSocket);
+    }
+    receiver.reset();
+}
 static void v5ClockCorrectedPauseTest() {
     receiver=std::make_unique<Receiver>();resetOutput();
     auto sender=socket(AF_INET,SOCK_DGRAM,0);nonblocking(sender);
@@ -817,6 +866,7 @@ int main(){
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();return failures?1:0;}
     pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();
+    mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);
     foreignClockTest(-int64_t(std::min<uint64_t>(os_gettime_ns()/2,3600000000000ULL)));
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();

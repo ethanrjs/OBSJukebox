@@ -376,6 +376,15 @@ class Receiver {
             closeSocket(sock);
     }
     bool available() const { return sock != BAD_SOCKET; }
+    // GD's main thread sends song packets and FMOD's mixer thread sends effects. Effects that keep
+    // arriving after song packets stop mean the main thread is stalled (as while GD tears down a
+    // level), and the game is still playing its music.
+    bool mainThreadStalled() {
+        std::lock_guard lock(mutex);
+        auto now = os_gettime_ns();
+        return lastSongReceived && lastEffectsReceived[0] && now - lastEffectsReceived[0] < 100000000 &&
+               now - lastSongReceived > 200000000;
+    }
     LinkState get() {
         std::lock_guard lock(mutex);
         return state;
@@ -546,6 +555,7 @@ struct SongSource {
             auto link = linkReceiver->get();
             auto latest = link.packet;
             bool connected = link.connected && Clock::now() - link.received < std::chrono::milliseconds(400);
+            bool stalled = linkReceiver->mainThreadStalled();
             auto channels = linkReceiver->getChannels();
             auto frameAt = [&](uint64_t at) {
                 return at <= timestamp ? size_t(0)
@@ -555,7 +565,8 @@ struct SongSource {
             auto frameTime = [&](size_t frame) { return timestamp + frame * 1000000000 / 48000; };
             // Calls render(packet, first, end, time, live) for each run of frames one packet describes.
             // A packet goes stale 400 ms after its timestamp; that stretch is still passed, with
-            // live=false, so a playing voice fades out instead of cutting off.
+            // live=false, so a playing voice fades out instead of cutting off. Nothing goes stale
+            // while GD's main thread is stalled but its mixer still plays.
             auto segments = [&](int channel, auto render) {
                 auto window = linkReceiver->playbackWindow(timestamp, timestamp + 10000000, channel);
                 for (size_t i = 0; i < window.size(); ++i) {
@@ -564,7 +575,7 @@ struct SongSource {
                         continue;
                     size_t first = i ? frameAt(p.timestamp) : 0;
                     size_t end = i + 1 < window.size() ? frameAt(window[i + 1].timestamp) : 480;
-                    size_t stale = std::clamp(frameAt(p.timestamp + 400000000), first, end);
+                    size_t stale = stalled ? end : std::clamp(frameAt(p.timestamp + 400000000), first, end);
                     if (stale > first)
                         render(p, first, stale, frameTime(first), true);
                     if (end > stale)
@@ -677,7 +688,7 @@ struct SongSource {
                 });
             }
             for (auto &voice : voices)
-                if (voice && timestamp > voice->lastUsed + staleNs)
+                if (voice && !stalled && timestamp > voice->lastUsed + staleNs)
                     voice.reset();
             {
                 std::lock_guard lock(mutex);
