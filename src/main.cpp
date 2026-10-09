@@ -199,6 +199,98 @@ static void stopVoices() {
     }
     voices.clear();
 }
+// Samples one live GD music channel into its voice and publishes it. In a level the song can be
+// replaced by the OBS choice; elsewhere (menus, shop, editor) OBS plays GD's own file.
+static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, PlayLayer* play) {
+    if (id < 0 || id >= 64) return false;
+    auto channel = engine->getActiveMusicChannel(id);
+    bool live = false;
+    FMOD::Sound* sound = nullptr;
+    if (!channel || channel->isPlaying(&live) != FMOD_OK || !live ||
+        channel->getCurrentSound(&sound) != FMOD_OK || sound != music.m_sound) return false;
+    auto sampled = playbackPosition(channel, sound, engine->m_globalChannel);
+    if (!sampled) return false;
+    auto [position, sampleTime] = *sampled;
+    auto& voice = voices[id];
+    auto& out = voice.snapshot;
+    const auto previousTimestamp = out.timestamp;
+    const auto previousPosition = out.position;
+    const auto previousRate = out.rate;
+    const auto previousPlaying = out.playing;
+    const auto previousPath = out.path;
+    bool newVoice = voice.channel != channel || voice.sound != sound ||
+        voice.source.path != std::string(music.m_filePath) || voice.engineChannelID != music.m_channelID || voice.continuing;
+    if (newVoice) {
+        voice.fadePoints.clear(); voice.lastFade = 1.f; voice.explicitlyStopped = false;
+    }
+    voice.engineChannelID = music.m_channelID; voice.dontReset = music.m_dontReset;
+    voice.channel = channel; voice.sound = sound; voice.continuing = false;
+    voice.source = {true, std::string(music.m_filePath)};
+    if (play) {
+        if (auto entry = play->m_gameState.m_songChannelStates.find(id);
+            entry != play->m_gameState.m_songChannelStates.end()) {
+            for (auto trigger : {entry->second.m_songTriggerGameObject1, entry->second.m_songTriggerGameObject2})
+                if (trigger && trigger->m_soundID > 0) voice.source.extraIDs.push_back(trigger->m_soundID);
+        }
+    }
+    out.channelID = id; out.timestamp = sampleTime; out.musicPosition = true;
+    out.position = position;
+    out.playing = !channelPaused(channel);
+    out.rate = channelRate(channel, sound);
+    double elapsed = previousTimestamp && sampleTime >= previousTimestamp ? (sampleTime - previousTimestamp) / 1e9 : 0.;
+    if (newVoice || !previousTimestamp || musicPositionJump(previousPosition, out.position,
+            previousPlaying ? elapsed : 0., previousRate)) out.epoch = ++nextEpoch;
+    unsigned duration = 0;
+    sound->getLength(&duration, FMOD_TIMEUNIT_MS);
+    voice.duration = duration / 1000.0;
+    int loops = 0;
+    FMOD_MODE mode = FMOD_DEFAULT;
+    const bool loopMode = channel->getMode(&mode) == FMOD_OK &&
+        (mode & (FMOD_LOOP_NORMAL | FMOD_LOOP_BIDI));
+    channel->getLoopCount(&loops);
+    voice.loop = loopMode && loops != 0;
+    out.looping = false; out.loopStart = 0; out.loopEnd = 0;
+    unsigned loopStart = 0, loopEnd = 0;
+    float baseFrequency = 0.f;
+    if (loopMode && (mode & FMOD_LOOP_NORMAL) && loops == -1 && sound->getDefaults(&baseFrequency, nullptr) == FMOD_OK && baseFrequency > 0 &&
+        channel->getLoopPoints(&loopStart, FMOD_TIMEUNIT_PCM, &loopEnd, FMOD_TIMEUNIT_PCM) == FMOD_OK &&
+        loopEnd >= loopStart) {
+        out.looping = true;
+        out.loopStart = loopStart / double(baseFrequency);
+        out.loopEnd = (double(loopEnd) + 1.) / double(baseFrequency);
+    }
+    unsigned long long start = 0, end = 0, parentClock = 0;
+    bool stops = false;
+    channel->getDelay(&start, &end, &stops);
+    channel->getDSPClock(nullptr, &parentClock);
+    if ((start && parentClock < start) || (end && parentClock >= end)) out.playing = false;
+    voice.scheduledStop = stops && end != 0;
+    sampleEnvelope(voice, channel, engine->m_sampleRate);
+    auto groupGain = backgroundMusicGain(engine->m_musicFadeStart,
+        engine->m_backgroundMusicFade, engine->m_audioState.m_elapsed);
+    out.triggerGain *= groupGain;
+    for (unsigned i = 0; i < out.fadeCount; ++i) out.fades[i].gain *= groupGain;
+    settings(out);
+    out.status = out.playing ? "Playing" : "Paused";
+    out.level = state.level; out.attempt = state.attempt;
+    if (play) jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
+    else {
+        if (newVoice || out.path.empty())
+            out.path = CCFileUtils::get()->fullPathForFilename(music.m_filePath.c_str(), false);
+        out.song = "GD music";
+    }
+    if (previousPath != out.path && !newVoice) out.epoch = ++nextEpoch;
+    if (id == 0 || state.song.empty()) state.song = out.song;
+    bridge().publish(out);
+    return true;
+}
+// Publishes a stop for a voice whose channel is gone and forgets it.
+static std::map<int, MusicVoice>::iterator endVoice(std::map<int, MusicVoice>::iterator it, uint64_t now) {
+    auto& out = it->second.snapshot;
+    out.timestamp = std::max(now, out.timestamp); out.playing = false; out.path.clear(); out.epoch = ++nextEpoch;
+    bridge().publish(out);
+    return voices.erase(it);
+}
 static void sampleMusic(PlayLayer* play) {
     if (!play || play != activePlayLayer) return;
     if (play->m_level) {
@@ -209,82 +301,8 @@ static void sampleMusic(PlayLayer* play) {
     state.song.clear();
     auto engine = FMODAudioEngine::get();
     std::set<int> seen;
-    for (auto& [id, music] : engine->m_fmodMusic) {
-        if (id < 0 || id >= 64) continue;
-        auto channel = engine->getActiveMusicChannel(id);
-        bool live = false;
-        FMOD::Sound* sound = nullptr;
-        if (!channel || channel->isPlaying(&live) != FMOD_OK || !live ||
-            channel->getCurrentSound(&sound) != FMOD_OK || sound != music.m_sound) continue;
-        auto sampled = playbackPosition(channel, sound, engine->m_globalChannel);
-        if (!sampled) continue;
-        auto [position, sampleTime] = *sampled;
-        seen.insert(id);
-        auto& voice = voices[id];
-        auto& out = voice.snapshot;
-        const auto previousTimestamp = out.timestamp;
-        const auto previousPosition = out.position;
-        const auto previousRate = out.rate;
-        const auto previousPlaying = out.playing;
-        const auto previousPath = out.path;
-        bool newVoice = voice.channel != channel || voice.sound != sound ||
-            voice.source.path != std::string(music.m_filePath) || voice.engineChannelID != music.m_channelID || voice.continuing;
-        if (newVoice) {
-            voice.fadePoints.clear(); voice.lastFade = 1.f; voice.explicitlyStopped = false;
-        }
-        voice.engineChannelID = music.m_channelID; voice.dontReset = music.m_dontReset;
-        voice.channel = channel; voice.sound = sound; voice.continuing = false;
-        voice.source = {true, std::string(music.m_filePath)};
-        if (auto entry = play->m_gameState.m_songChannelStates.find(id);
-            entry != play->m_gameState.m_songChannelStates.end()) {
-            for (auto trigger : {entry->second.m_songTriggerGameObject1, entry->second.m_songTriggerGameObject2})
-                if (trigger && trigger->m_soundID > 0) voice.source.extraIDs.push_back(trigger->m_soundID);
-        }
-        out.channelID = id; out.timestamp = sampleTime; out.musicPosition = true;
-        out.position = position;
-        out.playing = !channelPaused(channel);
-        out.rate = channelRate(channel, sound);
-        double elapsed = previousTimestamp && sampleTime >= previousTimestamp ? (sampleTime - previousTimestamp) / 1e9 : 0.;
-        if (newVoice || !previousTimestamp || musicPositionJump(previousPosition, out.position,
-                previousPlaying ? elapsed : 0., previousRate)) out.epoch = ++nextEpoch;
-        unsigned duration = 0;
-        sound->getLength(&duration, FMOD_TIMEUNIT_MS);
-        voice.duration = duration / 1000.0;
-        int loops = 0;
-        FMOD_MODE mode = FMOD_DEFAULT;
-        const bool loopMode = channel->getMode(&mode) == FMOD_OK &&
-            (mode & (FMOD_LOOP_NORMAL | FMOD_LOOP_BIDI));
-        channel->getLoopCount(&loops);
-        voice.loop = loopMode && loops != 0;
-        out.looping = false; out.loopStart = 0; out.loopEnd = 0;
-        unsigned loopStart = 0, loopEnd = 0;
-        float baseFrequency = 0.f;
-        if (loopMode && (mode & FMOD_LOOP_NORMAL) && loops == -1 && sound->getDefaults(&baseFrequency, nullptr) == FMOD_OK && baseFrequency > 0 &&
-            channel->getLoopPoints(&loopStart, FMOD_TIMEUNIT_PCM, &loopEnd, FMOD_TIMEUNIT_PCM) == FMOD_OK &&
-            loopEnd >= loopStart) {
-            out.looping = true;
-            out.loopStart = loopStart / double(baseFrequency);
-            out.loopEnd = (double(loopEnd) + 1.) / double(baseFrequency);
-        }
-        unsigned long long start = 0, end = 0, parentClock = 0;
-        bool stops = false;
-        channel->getDelay(&start, &end, &stops);
-        channel->getDSPClock(nullptr, &parentClock);
-        if ((start && parentClock < start) || (end && parentClock >= end)) out.playing = false;
-        voice.scheduledStop = stops && end != 0;
-        sampleEnvelope(voice, channel, engine->m_sampleRate);
-        auto groupGain = backgroundMusicGain(engine->m_musicFadeStart,
-            engine->m_backgroundMusicFade, engine->m_audioState.m_elapsed);
-        out.triggerGain *= groupGain;
-        for (unsigned i = 0; i < out.fadeCount; ++i) out.fades[i].gain *= groupGain;
-        settings(out);
-        out.status = out.playing ? "Playing" : "Paused";
-        out.level = state.level; out.attempt = state.attempt;
-        jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
-        if (previousPath != out.path && !newVoice) out.epoch = ++nextEpoch;
-        if (id == 0 || state.song.empty()) state.song = out.song;
-        bridge().publish(out);
-    }
+    for (auto& [id, music] : engine->m_fmodMusic)
+        if (sampleChannel(engine, id, music, play)) seen.insert(id);
     for (auto it = voices.begin(); it != voices.end();) {
         auto& [id, voice] = *it;
         if (seen.contains(id)) { ++it; continue; }
@@ -320,14 +338,24 @@ static void sampleMusic(PlayLayer* play) {
             jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
             if (id == 0 || state.song.empty()) state.song = out.song;
             bridge().publish(out); ++it;
-        } else {
-            out.timestamp = std::max(now, out.timestamp); out.playing = false; out.path.clear(); out.epoch = ++nextEpoch;
-            bridge().publish(out); it = voices.erase(it);
-        }
+        } else it = endVoice(it, now);
     }
     bool dead = play->m_player1 && play->m_player1->m_isDead;
     publish(play->m_hasCompletedLevel ? "Complete" : play->m_isPaused ? "Paused" : dead ? "Death" : "Playing",
         !play->m_isPaused);
+}
+// Outside a level OBS mirrors whatever GD plays: the menu song, shop music, editor playtests.
+static void sampleOtherMusic() {
+    const auto now = monotonicNowNs();
+    state.song.clear();
+    auto engine = FMODAudioEngine::get();
+    std::set<int> seen;
+    if (engine)
+        for (auto& [id, music] : engine->m_fmodMusic)
+            if (sampleChannel(engine, id, music, nullptr)) seen.insert(id);
+    for (auto it = voices.begin(); it != voices.end();)
+        it = seen.contains(it->first) ? std::next(it) : endVoice(it, now);
+    publish("Ready", false);
 }
 
 $on_mod(Loaded) {
@@ -508,13 +536,18 @@ class $modify(SeparateSongLevelSelect, LevelSelectLayer) {
 };
 class $modify(SeparateSongDirector, CCDirector) {
     void drawScene() {
-        static auto last = std::chrono::steady_clock::time_point{};
+        static auto last = std::chrono::steady_clock::time_point{}, lastMusic = last;
         auto now = std::chrono::steady_clock::now();
+        auto play = PlayLayer::get();
         if (now-last > std::chrono::milliseconds(100)) {
             last = now; audio_tap::install(); jukebox_link::refreshUI();
-            auto play = PlayLayer::get();
             if (play && play == activePlayLayer) sampleMusic(play);
-            else publish("Ready", false);
+            else if (play) publish("Ready", false);
+        }
+        // A level samples its own music from postUpdate. While a PlayLayer still exists outside
+        // that (leaving a level), its song must not be mirrored as GD music.
+        if (!play && now-lastMusic >= std::chrono::milliseconds(10)) {
+            lastMusic = now; sampleOtherMusic();
         }
         CCDirector::drawScene();
     }
