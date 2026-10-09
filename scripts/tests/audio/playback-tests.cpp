@@ -457,11 +457,14 @@ static void senderTest() {
 int main(){
 #ifdef __APPLE__
     int relativePriority=0;
-    auto qos=pthread_get_qos_class_np(pthread_self(),&relativePriority);
+    qos_class_t qos=QOS_CLASS_UNSPECIFIED;
+    check(pthread_get_qos_class_np(pthread_self(),&qos,&relativePriority)==0,
+        "macOS test sender reports initial scheduling");
     std::cout<<"macOS test thread initial QoS: "<<unsigned(qos)<<", relative priority: "<<relativePriority<<'\n';
     check(pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0)==0,
         "macOS test sender uses foreground audio scheduling");
-    qos=pthread_get_qos_class_np(pthread_self(),&relativePriority);
+    check(pthread_get_qos_class_np(pthread_self(),&qos,&relativePriority)==0,
+        "macOS test sender reports effective scheduling");
     auto timingStart=os_gettime_ns();
     for(unsigned i=0;i<20;++i)std::this_thread::sleep_for(std::chrono::milliseconds(10));
     std::cout<<"macOS test thread effective QoS: "<<unsigned(qos)<<", relative priority: "<<relativePriority
