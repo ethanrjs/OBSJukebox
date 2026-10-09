@@ -470,8 +470,18 @@ void refreshUI() {
     auto list = findList(scene); if (!list) return;
     for (auto cell : cells(list)) paint(cell);
 }
+// Rows get their OBS checkbox as they enter, so a new list or a search rebuild never draws a
+// frame of Jukebox's plain layout while waiting for refreshUI().
 void observeList(CCNode* node) {
-    if (cellLayoutMatches() && node->getID() == "NongList") visibleList() = node;
+    if (!cellLayoutMatches()) return;
+    if (node->getID() == "NongList") {
+        visibleList() = node;
+        for (auto cell : cells(node)) paint(cell);
+        return;
+    }
+    auto& list = visibleList();
+    if (!list || !list->isRunning()) return;
+    if (auto cell = typeinfo_cast<jukebox::NongCell*>(node)) paint(cell);
 }
 Readiness prepare(GJGameLevel* level, bool retry) {
     if (!Mod::get()->getSettingValue<bool>("enabled") || !level || !cellLayoutMatches()) return {};
