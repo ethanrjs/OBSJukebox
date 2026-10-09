@@ -199,8 +199,8 @@ static void stopVoices() {
     }
     voices.clear();
 }
-// Samples one live GD music channel into its voice and publishes it. In a level the song can be
-// replaced by the OBS choice; elsewhere (menus, shop, editor) OBS plays GD's own file.
+// Samples one live GD music channel into its voice and publishes it. With a PlayLayer, the level's
+// OBS choice can replace the song. With null (menus, shop, editor), OBS plays GD's own file.
 static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, PlayLayer* play) {
     if (id < 0 || id >= 64) return false;
     auto channel = engine->getActiveMusicChannel(id);
@@ -344,15 +344,20 @@ static void sampleMusic(PlayLayer* play) {
     publish(play->m_hasCompletedLevel ? "Complete" : play->m_isPaused ? "Paused" : dead ? "Death" : "Playing",
         !play->m_isPaused);
 }
+// Stops the level's songs in OBS and drops its name and attempt count from the status.
+static void leaveLevel() {
+    activePlayLayer = nullptr; playingSongs.reset(); stopVoices();
+    state.level.clear(); state.song.clear(); state.attempt = 0;
+    publish("Ready", false);
+}
 // Outside a level OBS mirrors whatever GD plays: the menu song, shop music, editor playtests.
-static void sampleOtherMusic() {
+static void sampleMusicOutsideLevels() {
     const auto now = monotonicNowNs();
     state.song.clear();
     auto engine = FMODAudioEngine::get();
     std::set<int> seen;
-    if (engine)
-        for (auto& [id, music] : engine->m_fmodMusic)
-            if (sampleChannel(engine, id, music, nullptr)) seen.insert(id);
+    for (auto& [id, music] : engine->m_fmodMusic)
+        if (sampleChannel(engine, id, music, nullptr)) seen.insert(id);
     for (auto it = voices.begin(); it != voices.end();)
         it = seen.contains(it->first) ? std::next(it) : endVoice(it, now);
     publish("Ready", false);
@@ -412,8 +417,10 @@ class $modify(SeparateSongPlay, PlayLayer) {
         GJGameLevel* observedLevel = nullptr;
         uint64_t lastSample = 0;
         std::optional<MusicVoice> suspendedContinuation;
+        bool quit = false;
     };
     void activateLink() {
+        if (m_fields->quit) return; // a level that has quit never takes the link back from GD music
         activePlayLayer = this;
         if (m_level) playingSongs = jukebox_link::snapshotSongs(m_level);
         else playingSongs.reset();
@@ -437,9 +444,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         else playingSongs.reset();
         publish("Preparing", false);
         if (PlayLayer::init(level, replay, dontCreateObjects)) return true;
-        if (activePlayLayer == this) {
-            activePlayLayer = nullptr; playingSongs.reset(); stopVoices(); publish("Ready", false);
-        }
+        if (activePlayLayer == this) leaveLevel();
         return false;
     }
     void startMusic() { PlayLayer::startMusic(); sampleMusic(this); }
@@ -471,11 +476,18 @@ class $modify(SeparateSongPlay, PlayLayer) {
         PlayLayer::onEnterTransitionDidFinish(); activateLink(); sampleMusic(this);
     }
     void levelComplete() { PlayLayer::levelComplete(); sampleMusic(this); }
+    // Quitting stops the level's songs and starts the menu song, but this PlayLayer lives on until
+    // GD has torn the level down. GD's music is mirrored from here instead of after that.
+    void onQuit() {
+        PlayLayer::onQuit();
+        m_fields->quit = true;
+        if (activePlayLayer == this) leaveLevel();
+    }
     void onExit() {
         if (activePlayLayer == this) {
             if (auto found = voices.find(0); found != voices.end() && found->second.continuing)
                 m_fields->suspendedContinuation = found->second;
-            activePlayLayer = nullptr; playingSongs.reset(); stopVoices(); publish("Ready", false);
+            leaveLevel();
         }
         PlayLayer::onExit();
     }
@@ -539,15 +551,17 @@ class $modify(SeparateSongDirector, CCDirector) {
         static auto last = std::chrono::steady_clock::time_point{}, lastMusic = last;
         auto now = std::chrono::steady_clock::now();
         auto play = PlayLayer::get();
+        // A level samples its own music from postUpdate. Any other PlayLayer that still exists is
+        // only mirrored once it has quit, so a played level's song never reaches OBS as GD music
+        // in place of its OBS choice.
+        bool outsideLevel = !play || static_cast<SeparateSongPlay*>(play)->m_fields->quit;
         if (now-last > std::chrono::milliseconds(100)) {
             last = now; audio_tap::install(); jukebox_link::refreshUI();
             if (play && play == activePlayLayer) sampleMusic(play);
-            else if (play) publish("Ready", false);
+            else if (!outsideLevel) publish("Ready", false);
         }
-        // A level samples its own music from postUpdate. While a PlayLayer still exists outside
-        // that (leaving a level), its song must not be mirrored as GD music.
-        if (!play && now-lastMusic >= std::chrono::milliseconds(10)) {
-            lastMusic = now; sampleOtherMusic();
+        if (outsideLevel && now-lastMusic >= std::chrono::milliseconds(10)) {
+            lastMusic = now; sampleMusicOutsideLevels();
         }
         CCDirector::drawScene();
     }

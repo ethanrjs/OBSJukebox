@@ -687,7 +687,9 @@ struct SongSource {
                          : !connected            ? "Waiting for Geometry Dash"
                          : !latest.song[0]       ? "Select the OBS checkbox beside a Jukebox song."
                                                  : std::string(latest.song) + " | " + latest.status +
-                                                       " | Attempt " + std::to_string(latest.attempt);
+                                                       (latest.attempt > 0
+                                                            ? " | Attempt " + std::to_string(latest.attempt)
+                                                            : "");
             }
             {
                 std::lock_guard lock(musicMutex);
