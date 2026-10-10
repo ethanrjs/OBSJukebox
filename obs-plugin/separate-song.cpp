@@ -472,6 +472,28 @@ class Receiver {
 };
 static std::shared_ptr<Receiver> receiver;
 
+// OBS takes audio in 10 ms blocks of 480 stereo frames at 48 kHz.
+constexpr size_t blockFrames = 480;
+constexpr uint32_t blockRate = 48000;
+using AudioBlock = std::array<float, blockFrames * 2>;
+// The first frame of the block starting at `start` that is at or after `at`.
+static size_t frameAt(uint64_t start, uint64_t at) {
+    return at <= start ? size_t(0)
+                       : size_t(std::min<uint64_t>(blockFrames, ((at - start) * blockRate + 999999999) / 1000000000));
+}
+static uint64_t frameTime(uint64_t start, size_t frame) { return start + frame * 1000000000 / blockRate; }
+// Calls run(packet, first, end) for each run of frames in the block starting at `start` that one
+// packet of a playbackWindow describes.
+template <class Run> static void forEachRun(const std::vector<SongLinkPacket> &window, uint64_t start, Run run) {
+    for (size_t i = 0; i < window.size(); ++i) {
+        const auto &p = window[i];
+        size_t first = i ? frameAt(start, p.timestamp) : 0;
+        size_t end = i + 1 < window.size() ? frameAt(start, window[i + 1].timestamp) : blockFrames;
+        if (p.timestamp && end > first)
+            run(p, first, end);
+    }
+}
+
 // Length of the crossfade at every music discontinuity (pause, resume, restart, seek, song
 // change): 5 ms at 48 kHz. FMOD ramps these in game; without it OBS hears a click.
 constexpr size_t declickFrames = 240;
@@ -489,7 +511,7 @@ struct SongSource {
     // carries timestamped music blocks; missed deadlines produce silence while SFX continues.
     struct MusicBlock {
         uint64_t timestamp;
-        std::array<float, 960> samples{};
+        AudioBlock samples{};
     };
     std::mutex musicMutex;
     std::condition_variable musicReady;
@@ -549,13 +571,180 @@ struct SongSource {
                     output[j * 2 + ch] += tail[tailRead * 2 + ch];
         }
     };
+    // Only the decoder thread touches these.
+    std::array<std::unique_ptr<Voice>, SONG_LINK_MAX_CHANNELS> voices;
+    AudioBlock voiceAudio{};
+#if defined(__linux__)
+    LinuxPaths paths;
+#endif
+
+    // Opens the packet's song in the voice when its path changes. At most once a second it also
+    // reopens the file if it changed on disk, and retries a failed open every 30 s.
+    void followFile(Voice &v, const SongLinkPacket &p) {
+        std::string newPath = p.path;
+        bool pathChanged = newPath != v.loadedPath;
+        if (!pathChanged && (newPath.empty() || Clock::now() < v.retryAt))
+            return;
+        auto &decoder = v.decoder;
+        std::string resolved = newPath;
+#if defined(__linux__)
+        resolved = paths.resolve(newPath);
+#endif
+        std::error_code error;
+        auto file = std::filesystem::path(std::u8string(resolved.begin(), resolved.end()));
+        auto size = resolved.empty() ? 0 : std::filesystem::file_size(file, error);
+        auto modified = resolved.empty() || error ? std::filesystem::file_time_type{}
+                                                  : std::filesystem::last_write_time(file, error);
+        bool available = !resolved.empty() && !error;
+        bool fileChanged = resolved != v.resolvedPath || available != v.fileAvailable ||
+                           (available && (size != v.loadedSize || modified != v.loadedWriteTime));
+        if (pathChanged || fileChanged || (!decoder.ready() && Clock::now() >= v.reopenAt)) {
+            v.captureTail();
+            decoder.open(resolved);
+            v.reopenAt = Clock::now() + std::chrono::seconds(30);
+            v.loadedPath = newPath;
+            v.lastEpoch = ~0u;
+            if (!newPath.empty() && (pathChanged || fileChanged || decoder.ready())) {
+                if (decoder.ready())
+                    blog(LOG_INFO, "[OBS Jukebox] Decoder ready: %s", p.song);
+                else
+                    blog(LOG_WARNING, "[OBS Jukebox] Decoder unavailable: %s (%s)", p.song, decoder.error.c_str());
+            }
+        }
+        v.resolvedPath = resolved;
+        v.fileAvailable = available;
+        v.loadedSize = size;
+        v.loadedWriteTime = modified;
+        v.retryAt = Clock::now() + std::chrono::seconds(1);
+    }
+    // Adds `frames` frames of one voice, as packet p describes them from `time`, to `output`. A
+    // packet that is no longer live only fades out what was playing.
+    void renderVoice(Voice &v, int channel, const SongLinkPacket &p, float *output, size_t frames, uint64_t time,
+                     bool live, std::string &decoderError) {
+        v.lastUsed = p.timestamp;
+        if (!live && !v.wasPlaying && v.tailRead >= declickFrames)
+            return;
+        followFile(v, p);
+        auto &decoder = v.decoder;
+        double age = double(int64_t(time) - int64_t(p.timestamp)) / 1e9;
+        double sourcePosition = p.position + ((p.flags & 2) ? age * p.rate : 0);
+        bool looping = (p.flags & 4) != 0;
+        if (looping && sourcePosition >= p.loopEnd)
+            sourcePosition = p.loopStart + std::fmod(sourcePosition - p.loopStart, p.loopEnd - p.loopStart);
+        double target = sourcePosition + p.offset;
+        bool playing = live && (p.flags & 3) == 3 && active && std::isfinite(target) && target >= 0 &&
+                       target <= 31536000.0 && decoder.ready();
+        const bool expectedAudio = playing && decoder.hasAudioAt(target);
+        bool starved = false;
+        bool seek = playing && (v.lastEpoch != p.epoch || !v.wasPlaying || std::abs(decoder.position - target) > .04);
+        if (!playing || seek)
+            v.captureTail();
+        voiceAudio.fill(0);
+        if (seek) {
+            playing = decoder.seek(target);
+            v.fadeIn = 0;
+        }
+        // Errors under the 40 ms seek threshold (FMOD's output clock drifting against
+        // OBS's) are steered out by playing up to 0.5% fast or slow, under 9 cents.
+        double rate = p.rate * (1 + std::clamp((target - decoder.position) * .5, -.005, .005));
+        bool audible = playing;
+        if (playing) {
+            size_t rendered = 0;
+            while (rendered < frames) {
+                size_t count = frames - rendered;
+                if (looping) {
+                    double untilEnd = (p.loopEnd - sourcePosition) * blockRate / rate;
+                    count = std::min(count, size_t(std::max(1.0, std::ceil(untilEnd))));
+                }
+                decoder.render(voiceAudio.data() + rendered * 2, count, rate);
+                starved |= decoder.starvedBeforeEnd();
+                rendered += count;
+                sourcePosition += double(count) * rate / blockRate;
+                if (looping && sourcePosition >= p.loopEnd) {
+                    sourcePosition =
+                        p.loopStart + std::fmod(sourcePosition - p.loopStart, p.loopEnd - p.loopStart);
+                    if (!decoder.seek(sourcePosition + p.offset)) {
+                        playing = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (expectedAudio && (!playing || starved)) {
+            if (!v.starvedSince)
+                v.starvedSince = time;
+            if (time >= v.starvedSince + 100000000 && Clock::now() >= v.recoverAt) {
+                // Recreate a backend that accepted a seek but stopped
+                // delivering PCM. The next block seeks from its fresh
+                // timestamp, including rate and user offset; it never
+                // resumes from the position before the stall.
+                v.recoverAt = Clock::now() + std::chrono::seconds(1);
+                decoder.open(v.resolvedPath);
+                v.lastEpoch = ~0u;
+                playing = false;
+                v.starvedSince = 0;
+                blog(LOG_WARNING, "[OBS Jukebox] Recovering stalled music decoder on channel %d", channel);
+            }
+        } else {
+            v.starvedSince = 0;
+        }
+        if (audible)
+            for (size_t j = 0; j < frames; ++j) {
+                float gain = p.musicVolume * songGainAt(p, frameTime(time, j)) * v.nextFadeIn();
+                for (size_t ch = 0; ch < 2; ++ch)
+                    output[j * 2 + ch] += voiceAudio[j * 2 + ch] * gain;
+                v.lastGain = gain;
+            }
+        v.mixTail(output, frames);
+        if (p.path[0] && !decoder.error.empty())
+            decoderError = decoder.error;
+        v.wasPlaying = playing;
+        v.lastEpoch = p.epoch;
+        v.lastRate = rate;
+    }
+    // Mixes every voice's music for the block starting at `timestamp` and updates the status
+    // OBS shows in the source's properties.
+    void renderMusic(uint64_t timestamp, AudioBlock &audio) {
+        std::string decoderError;
+        auto link = linkReceiver->get();
+        auto latest = link.packet;
+        bool connected = link.connected && Clock::now() - link.received < std::chrono::milliseconds(400);
+        bool stalled = linkReceiver->mainThreadStalled();
+        for (int channel : linkReceiver->getChannels()) {
+            if (channel < 0)
+                continue;
+            if (!voices[channel])
+                voices[channel] = std::make_unique<Voice>();
+            auto &v = *voices[channel];
+            // A packet goes stale 400 ms after its timestamp; that stretch is still rendered, with
+            // live=false, so a playing voice fades out instead of cutting off. Nothing goes stale
+            // while GD's main thread is stalled but its mixer still plays.
+            auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, channel);
+            forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
+                size_t stale = stalled ? end : std::clamp(frameAt(timestamp, p.timestamp + staleNs), first, end);
+                if (stale > first)
+                    renderVoice(v, channel, p, audio.data() + first * 2, stale - first, frameTime(timestamp, first),
+                                true, decoderError);
+                if (end > stale)
+                    renderVoice(v, channel, p, audio.data() + stale * 2, end - stale, frameTime(timestamp, stale),
+                                false, decoderError);
+            });
+        }
+        for (auto &voice : voices)
+            if (voice && !stalled && timestamp > voice->lastUsed + staleNs)
+                voice.reset();
+        std::lock_guard lock(mutex);
+        detail = !linkReceiver->available()
+                     ? "Game link unavailable: local UDP port is already in use."
+                 : !decoderError.empty() ? decoderError
+                 : !connected            ? "Waiting for Geometry Dash"
+                 : !latest.song[0]       ? noSongDetail
+                                         : std::string(latest.song) + " | " + latest.status +
+                                               (latest.attempt > 0 ? " | Attempt " + std::to_string(latest.attempt)
+                                                                   : "");
+    }
     void decodeMusic() {
         configureAudioThread();
-        std::array<std::unique_ptr<Voice>, SONG_LINK_MAX_CHANNELS> voices;
-#if defined(__linux__)
-        LinuxPaths paths;
-#endif
-        std::array<float, 960> audio{}, voiceAudio{};
         uint64_t timestamp = wantedTimestamp.load();
         while (!stop) {
             auto wanted = wantedTimestamp.load();
@@ -571,183 +760,8 @@ struct SongSource {
                 });
                 continue;
             }
-            audio.fill(0);
-            std::string decoderError;
-            auto link = linkReceiver->get();
-            auto latest = link.packet;
-            bool connected = link.connected && Clock::now() - link.received < std::chrono::milliseconds(400);
-            bool stalled = linkReceiver->mainThreadStalled();
-            auto channels = linkReceiver->getChannels();
-            auto frameAt = [&](uint64_t at) {
-                return at <= timestamp ? size_t(0)
-                                       : size_t(std::min<uint64_t>(
-                                             480, ((at - timestamp) * 48000 + 999999999) / 1000000000));
-            };
-            auto frameTime = [&](size_t frame) { return timestamp + frame * 1000000000 / 48000; };
-            // Calls render(packet, first, end, time, live) for each run of frames one packet describes.
-            // A packet goes stale 400 ms after its timestamp; that stretch is still passed, with
-            // live=false, so a playing voice fades out instead of cutting off. Nothing goes stale
-            // while GD's main thread is stalled but its mixer still plays.
-            auto segments = [&](int channel, auto render) {
-                auto window = linkReceiver->playbackWindow(timestamp, timestamp + 10000000, channel);
-                for (size_t i = 0; i < window.size(); ++i) {
-                    auto &p = window[i];
-                    if (!p.timestamp)
-                        continue;
-                    size_t first = i ? frameAt(p.timestamp) : 0;
-                    size_t end = i + 1 < window.size() ? frameAt(window[i + 1].timestamp) : 480;
-                    size_t stale = stalled ? end : std::clamp(frameAt(p.timestamp + 400000000), first, end);
-                    if (stale > first)
-                        render(p, first, stale, frameTime(first), true);
-                    if (end > stale)
-                        render(p, stale, end, frameTime(stale), false);
-                }
-            };
-            for (int channel : channels) {
-                if (channel < 0)
-                    continue;
-                if (!voices[channel])
-                    voices[channel] = std::make_unique<Voice>();
-                auto &v = *voices[channel];
-                auto &decoder = v.decoder;
-                segments(channel, [&](const SongLinkPacket &p, size_t first, size_t end,
-                                      uint64_t segmentTime, bool live) {
-                    v.lastUsed = p.timestamp;
-                    // A stale packet only fades out what was playing.
-                    if (!live && !v.wasPlaying && v.tailRead >= declickFrames)
-                        return;
-                    std::string newPath = p.path;
-                    bool pathChanged = newPath != v.loadedPath;
-                    if (pathChanged || (!newPath.empty() && Clock::now() >= v.retryAt)) {
-                        std::string resolved = newPath;
-#if defined(__linux__)
-                        resolved = paths.resolve(newPath);
-#endif
-                        std::error_code error;
-                        auto file = std::filesystem::path(std::u8string(resolved.begin(), resolved.end()));
-                        auto size = resolved.empty() ? 0 : std::filesystem::file_size(file, error);
-                        auto modified = resolved.empty() || error
-                                            ? std::filesystem::file_time_type{}
-                                            : std::filesystem::last_write_time(file, error);
-                        bool available = !resolved.empty() && !error;
-                        bool fileChanged =
-                            resolved != v.resolvedPath || available != v.fileAvailable ||
-                            (available && (size != v.loadedSize || modified != v.loadedWriteTime));
-                        if (pathChanged || fileChanged || (!decoder.ready() && Clock::now() >= v.reopenAt)) {
-                            v.captureTail();
-                            decoder.open(resolved);
-                            v.reopenAt = Clock::now() + std::chrono::seconds(30);
-                            v.loadedPath = newPath;
-                            v.lastEpoch = ~0u;
-                            if (!newPath.empty() && (pathChanged || fileChanged || decoder.ready())) {
-                                if (decoder.ready())
-                                    blog(LOG_INFO, "[OBS Jukebox] Decoder ready: %s", p.song);
-                                else
-                                    blog(LOG_WARNING, "[OBS Jukebox] Decoder unavailable: %s (%s)", p.song,
-                                         decoder.error.c_str());
-                            }
-                        }
-                        v.resolvedPath = resolved;
-                        v.fileAvailable = available;
-                        v.loadedSize = size;
-                        v.loadedWriteTime = modified;
-                        v.retryAt = Clock::now() + std::chrono::seconds(1);
-                    }
-                    double age = double(int64_t(segmentTime) - int64_t(p.timestamp)) / 1e9;
-                    double sourcePosition = p.position + ((p.flags & 2) ? age * p.rate : 0);
-                    bool looping = (p.flags & 4) != 0;
-                    if (looping && sourcePosition >= p.loopEnd)
-                        sourcePosition =
-                            p.loopStart + std::fmod(sourcePosition - p.loopStart, p.loopEnd - p.loopStart);
-                    double target = sourcePosition + p.offset;
-                    bool playing = live && (p.flags & 3) == 3 && active && std::isfinite(target) && target >= 0 &&
-                                   target <= 31536000.0 && decoder.ready();
-                    const bool expectedAudio = playing && decoder.hasAudioAt(target);
-                    bool starved = false;
-                    bool seek = playing && (v.lastEpoch != p.epoch || !v.wasPlaying ||
-                                            std::abs(decoder.position - target) > .04);
-                    if (!playing || seek)
-                        v.captureTail();
-                    voiceAudio.fill(0);
-                    if (seek) {
-                        playing = decoder.seek(target);
-                        v.fadeIn = 0;
-                    }
-                    // Errors under the 40 ms seek threshold (FMOD's output clock drifting against
-                    // OBS's) are steered out by playing up to 0.5% fast or slow, under 9 cents.
-                    double rate = p.rate * (1 + std::clamp((target - decoder.position) * .5, -.005, .005));
-                    bool audible = playing;
-                    if (playing) {
-                        size_t rendered = 0;
-                        while (rendered < end - first) {
-                            size_t count = end - first - rendered;
-                            if (looping) {
-                                double untilEnd = (p.loopEnd - sourcePosition) * 48000 / rate;
-                                count = std::min(count, size_t(std::max(1.0, std::ceil(untilEnd))));
-                            }
-                            decoder.render(voiceAudio.data() + rendered * 2, count, rate);
-                            starved |= decoder.starvedBeforeEnd();
-                            rendered += count;
-                            sourcePosition += double(count) * rate / 48000;
-                            if (looping && sourcePosition >= p.loopEnd) {
-                                sourcePosition = p.loopStart + std::fmod(sourcePosition - p.loopStart,
-                                                                         p.loopEnd - p.loopStart);
-                                if (!decoder.seek(sourcePosition + p.offset)) {
-                                    playing = false;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if (expectedAudio && (!playing || starved)) {
-                        if (!v.starvedSince)
-                            v.starvedSince = segmentTime;
-                        if (segmentTime >= v.starvedSince + 100000000 && Clock::now() >= v.recoverAt) {
-                            // Recreate a backend that accepted a seek but stopped
-                            // delivering PCM. The next block seeks from its fresh
-                            // timestamp, including rate and user offset; it never
-                            // resumes from the position before the stall.
-                            v.recoverAt = Clock::now() + std::chrono::seconds(1);
-                            decoder.open(v.resolvedPath);
-                            v.lastEpoch = ~0u;
-                            playing = false;
-                            v.starvedSince = 0;
-                            blog(LOG_WARNING, "[OBS Jukebox] Recovering stalled music decoder on channel %d", channel);
-                        }
-                    } else {
-                        v.starvedSince = 0;
-                    }
-                    if (audible)
-                        for (size_t j = 0; j < end - first; ++j) {
-                            float gain = p.musicVolume * songGainAt(p, segmentTime + j * 1000000000 / 48000) *
-                                         v.nextFadeIn();
-                            for (size_t ch = 0; ch < 2; ++ch)
-                                audio[(first + j) * 2 + ch] += voiceAudio[j * 2 + ch] * gain;
-                            v.lastGain = gain;
-                        }
-                    v.mixTail(audio.data() + first * 2, end - first);
-                    if (!newPath.empty() && !decoder.error.empty())
-                        decoderError = decoder.error;
-                    v.wasPlaying = playing;
-                    v.lastEpoch = p.epoch;
-                    v.lastRate = rate;
-                });
-            }
-            for (auto &voice : voices)
-                if (voice && !stalled && timestamp > voice->lastUsed + staleNs)
-                    voice.reset();
-            {
-                std::lock_guard lock(mutex);
-                detail = !linkReceiver->available()
-                             ? "Game link unavailable: local UDP port is already in use."
-                         : !decoderError.empty() ? decoderError
-                         : !connected            ? "Waiting for Geometry Dash"
-                         : !latest.song[0]       ? noSongDetail
-                                                 : std::string(latest.song) + " | " + latest.status +
-                                                       (latest.attempt > 0
-                                                            ? " | Attempt " + std::to_string(latest.attempt)
-                                                            : "");
-            }
+            AudioBlock audio{};
+            renderMusic(timestamp, audio);
             {
                 std::lock_guard lock(musicMutex);
                 while (!musicQueue.empty() && musicQueue.front().timestamp < wantedTimestamp.load())
@@ -757,6 +771,41 @@ struct SongSource {
             }
             timestamp += blockNs;
         }
+        // Each decoder started COM on this thread when it opened, so it has to close here too.
+        for (auto &voice : voices)
+            voice.reset();
+    }
+    // The output block starting at `timestamp`: the decoder thread's music for it, if that is
+    // ready in time, plus effects.
+    AudioBlock mixBlock(uint64_t timestamp) {
+        AudioBlock audio{};
+        {
+            // Only fixed-size PCM copies and at most four queue removals occur
+            // under this lock. Decoder/file operations never hold it. A try-lock
+            // here would turn harmless microsecond contention into a silent block.
+            std::lock_guard lock(musicMutex);
+            while (!musicQueue.empty() && musicQueue.front().timestamp < timestamp)
+                musicQueue.pop_front();
+            if (!musicQueue.empty() && musicQueue.front().timestamp == timestamp) {
+                if (active)
+                    audio = musicQueue.front().samples;
+                musicQueue.pop_front();
+            }
+        }
+        // SFX never waits for music decoding, opening, seeking or path resolution. Effects
+        // ignore staleness: they arrive from FMOD's mixer thread even while GD's main thread
+        // (which sends status packets) stalls, and stop on their own when GD does.
+        if (active) {
+            auto channels = linkReceiver->getChannels();
+            int global = std::find(channels.begin(), channels.end(), -1) != channels.end() ? -1 : 0;
+            auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, global);
+            forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
+                if (p.flags & 1)
+                    linkReceiver->mixEffects(audio.data() + first * 2, end - first, frameTime(timestamp, first),
+                                             p.effectsVolume);
+            });
+        }
+        return audio;
     }
     void run() {
         configureAudioThread();
@@ -770,47 +819,13 @@ struct SongSource {
 #ifdef OBS_JUKEBOX_QA
             std::this_thread::sleep_for(std::chrono::milliseconds(testOutputDelayMs.exchange(0)));
 #endif
-            std::array<float, 960> audio{};
-            {
-                // Only fixed-size PCM copies and at most four queue removals occur
-                // under this lock. Decoder/file operations never hold it. A try-lock
-                // here would turn harmless microsecond contention into a silent block.
-                std::lock_guard lock(musicMutex);
-                while (!musicQueue.empty() && musicQueue.front().timestamp < timestamp)
-                    musicQueue.pop_front();
-                if (!musicQueue.empty() && musicQueue.front().timestamp == timestamp) {
-                    if (active)
-                        audio = musicQueue.front().samples;
-                    musicQueue.pop_front();
-                }
-            }
-            // SFX never waits for music decoding, opening, seeking or path resolution.
-            auto channels = linkReceiver->getChannels();
-            int global = std::find(channels.begin(), channels.end(), -1) != channels.end() ? -1 : 0;
-            auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, global);
-            auto frameAt = [&](uint64_t at) {
-                return at <= timestamp ? size_t(0)
-                                       : size_t(std::min<uint64_t>(
-                                             480, ((at - timestamp) * 48000 + 999999999) / 1000000000));
-            };
-            // Effects ignore staleness: they arrive from FMOD's mixer thread even while GD's main
-            // thread (which sends status packets) stalls, and stop on their own when GD does.
-            if (active)
-                for (size_t i = 0; i < window.size(); ++i) {
-                    const auto &packet = window[i];
-                    size_t first = i ? frameAt(packet.timestamp) : 0;
-                    size_t end = i + 1 < window.size() ? frameAt(window[i + 1].timestamp) : 480;
-                    if (packet.timestamp && end > first && (packet.flags & 1))
-                        linkReceiver->mixEffects(audio.data() + first * 2, end - first,
-                                                 timestamp + first * 1000000000 / 48000,
-                                                 packet.effectsVolume);
-                }
+            auto audio = mixBlock(timestamp);
             obs_source_audio block{};
             block.data[0] = reinterpret_cast<const uint8_t *>(audio.data());
-            block.frames = 480;
+            block.frames = blockFrames;
             block.speakers = SPEAKERS_STEREO;
             block.format = AUDIO_FORMAT_FLOAT;
-            block.samples_per_sec = 48000;
+            block.samples_per_sec = blockRate;
             block.timestamp = timestamp;
             obs_source_output_audio(source, &block);
             timestamp += blockNs;
