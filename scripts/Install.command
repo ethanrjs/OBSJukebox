@@ -26,8 +26,8 @@ for song_file in "$song_root/payload/local.separate_song.geode" "$song_root/payl
     [[ -s "$song_file" ]] || fail "The installer is incomplete: $song_file"
 done
 song_arch=$(uname -m)
-/usr/bin/lipo -verify_arch "$song_arch" "$song_plugin" >/dev/null 2>&1 || fail "This installer does not include a plugin for $song_arch."
-/usr/bin/lipo -verify_arch "$song_arch" "$song_obs/Contents/MacOS/$song_obs_executable" >/dev/null 2>&1 || fail 'Install the native OBS Studio build for this Mac before continuing.'
+/usr/bin/lipo "$song_plugin" -verify_arch "$song_arch" >/dev/null 2>&1 || fail "This installer does not include a plugin for $song_arch."
+/usr/bin/lipo "$song_obs/Contents/MacOS/$song_obs_executable" -verify_arch "$song_arch" >/dev/null 2>&1 || fail 'Install the native OBS Studio build for this Mac before continuing.'
 if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x "$song_obs_executable" >/dev/null; then
     fail 'Finish any OBS recording, close Geometry Dash and OBS, then click Install again.'
 fi
