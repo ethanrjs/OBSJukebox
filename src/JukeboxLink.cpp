@@ -33,8 +33,6 @@ struct Choice {
 struct Request { bool pending = false; std::string error; Clock::time_point started{}; };
 std::unordered_map<std::string, Request> requests;
 std::unordered_map<std::string, Choice> addedSongs;
-struct CachedManifest { matjson::Value json; Clock::time_point read{}; };
-std::unordered_map<int, CachedManifest> manifests;
 struct CachedPlayback {
     std::optional<Choice> obs;
     Choice game;
@@ -43,7 +41,7 @@ struct CachedPlayback {
     Clock::time_point read{};
 };
 std::unordered_map<int, CachedPlayback> playback;
-void invalidate(int id) { playback.erase(id); if (auto it = manifests.find(id); it != manifests.end()) it->second.read = {}; }
+void invalidate(int id) { playback.erase(id); }
 
 struct CellAccess : jukebox::NongCell {
     static int id(jukebox::NongCell* c) { return c->*(&CellAccess::m_songID); }
@@ -178,13 +176,11 @@ void clear(int id) {
     Mod::get()->setSavedValue("obs-selections", data);
     invalidate(id);
 }
-matjson::Value manifest(int id, bool = false) {
+std::string manifestPath(int id) { return string::pathToString(base()/"manifest"/fmt::format("{}.json", id)); }
+// FileCache keeps the last manifest that parsed, so a read that fails mid-write changes nothing.
+matjson::Value manifest(int id) {
     if (!cellLayoutMatches()) return {};
-    auto& cache = manifests[id];
-    auto result = files().get(string::pathToString(base()/"manifest"/fmt::format("{}.json", id)), true).second;
-    if (result.isObject()) cache.json = std::move(result);
-    cache.read = Clock::now();
-    return cache.json;
+    return files().get(manifestPath(id), true).second;
 }
 matjson::Value find(const matjson::Value& data, const std::string& uid, bool original = false) {
     if (original || data["default"]["unique_id"].asString().unwrapOr("") == uid) return data["default"];
@@ -246,8 +242,7 @@ std::string download(Choice c, bool retry) {
     c = resolved(c);
     if (exists(c.path)) { requests.erase(key(c.id, c.uid)); return ""; }
     auto k = key(c.id, c.uid);
-    auto manifestPath = string::pathToString(base()/"manifest"/fmt::format("{}.json", c.id));
-    if ((!c.path.empty() && !files().known(c.path)) || !files().known(manifestPath)) {
+    if ((!c.path.empty() && !files().known(c.path)) || !files().known(manifestPath(c.id))) {
         deferredDownloads[k] = {c, retry};
         return "";
     }
@@ -437,7 +432,6 @@ void select(jukebox::NongCell* cell) {
     if (auto old = choice(c.id); old && (old->uid == c.uid || (old->original && c.original))) {
         clear(c.id); return;
     }
-    manifest(c.id, true);
     if (auto index = CellAccess::index(cell)) {
         c.offset = (*index)->startOffset;
         c.path = string::pathToString(base()/"nongs"/fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid));
@@ -532,12 +526,12 @@ void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
 void initialize() {
     if (!cellLayoutMatches()) return;
     jukebox::event::IndexesLoaded().listen([] {
-        playback.clear(); manifests.clear();
+        playback.clear();
         for (auto& [key, request] : requests)
             if (!request.pending) request.error.clear();
     }).leak();
     jukebox::event::SongStateChanged().listen([](const jukebox::event::SongStateChangedData&) {
-        playback.clear(); manifests.clear();
+        playback.clear();
     }).leak();
     jukebox::event::ManualSongAdded().listen([](const jukebox::event::ManualSongAddedData& event) {
         auto song = event.song(); auto meta = song->metadata();
