@@ -339,6 +339,13 @@ class Receiver {
     }
 
   public:
+#ifdef OBS_JUKEBOX_QA
+    // The audio tests run a receiver without its socket or thread and feed it packets on
+    // simulated time.
+    friend struct Simulation;
+    struct Offline {};
+    explicit Receiver(Offline) {}
+#endif
     Receiver() {
         if (!socketsReady())
             return;
@@ -397,9 +404,8 @@ class Receiver {
     // GD's main thread sends song packets and FMOD's mixer thread sends effects. Effects that keep
     // arriving after song packets stop mean the main thread is stalled (as while GD tears down a
     // level), and the game is still playing its music.
-    bool mainThreadStalled() {
+    bool mainThreadStalled(uint64_t now) {
         std::lock_guard lock(mutex);
-        auto now = os_gettime_ns();
         return lastSongReceived && lastEffectsReceived[0] && now - lastEffectsReceived[0] < 100000000 &&
                now - lastSongReceived > 200000000;
     }
@@ -703,13 +709,13 @@ struct SongSource {
         v.lastRate = rate;
     }
     // Mixes every voice's music for the block starting at `timestamp` and updates the status
-    // OBS shows in the source's properties.
-    void renderMusic(uint64_t timestamp, AudioBlock &audio) {
+    // OBS shows in the source's properties. `now` is os_gettime_ns().
+    void renderMusic(uint64_t timestamp, AudioBlock &audio, uint64_t now) {
         std::string decoderError;
         auto link = linkReceiver->get();
         auto latest = link.packet;
         bool connected = link.connected && Clock::now() - link.received < std::chrono::milliseconds(400);
-        bool stalled = linkReceiver->mainThreadStalled();
+        bool stalled = linkReceiver->mainThreadStalled(now);
         for (int channel : linkReceiver->getChannels()) {
             if (channel < 0)
                 continue;
@@ -761,7 +767,7 @@ struct SongSource {
                 continue;
             }
             AudioBlock audio{};
-            renderMusic(timestamp, audio);
+            renderMusic(timestamp, audio, os_gettime_ns());
             {
                 std::lock_guard lock(musicMutex);
                 while (!musicQueue.empty() && musicQueue.front().timestamp < wantedTimestamp.load())
