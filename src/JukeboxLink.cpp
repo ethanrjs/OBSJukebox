@@ -39,7 +39,7 @@ struct CachedPlayback {
     std::optional<Choice> obs;
     Choice game;
     std::string normalizedGamePath;
-    bool obsReady = false, gameReady = false;
+    bool obsReady = false;
     Clock::time_point read{};
 };
 std::unordered_map<int, CachedPlayback> playback;
@@ -285,7 +285,6 @@ CachedPlayback& forPlayback(int id) {
     CachedPlayback value;
     value.read = now;
     value.game = active(id);
-    value.gameReady = exists(value.game.path);
     value.normalizedGamePath = normalizedMusicPath(value.game.path);
     if (auto picked = choice(id)) {
         value.obs = resolved(*picked);
@@ -507,48 +506,28 @@ Readiness prepare(GJGameLevel* level, bool retry) {
 }
 LevelSongs snapshotSongs(GJGameLevel* level) {
     int id = songID(level);
-    return {id, levelSongIDs(id, std::string(level->m_songIDs))};
+    return {levelSongIDs(id, std::string(level->m_songIDs))};
 }
 void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
     state.path.clear(); state.song.clear();
     if (!songs) return;
-    if (!cellLayoutMatches()) {
-        state.path = source.path;
+    // GD's own file, by full path: GD keeps built-in songs as names relative to its resources.
+    auto gameSong = [&] {
         state.song = "In-game song";
-        return;
-    }
-    int id = songs->initialID;
-    if (source.channel) {
-        if (source.path.empty()) return;
-        const auto sampledPath = normalizedMusicPath(source.path);
-        std::optional<int> matched;
-        bool ambiguous = false;
-        auto consider = [&](int candidate) {
-            if (forPlayback(candidate).normalizedGamePath != sampledPath) return;
-            if (matched && *matched != candidate) ambiguous = true;
-            else matched = candidate;
-        };
-        for (int candidate : songs->ids) consider(candidate);
-        for (int candidate : source.extraIDs) consider(candidate);
-        if (ambiguous) matched.reset();
-        if (!matched) {
-            state.song = "In-game song";
-            auto full = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
-            state.path = full;
-            return;
-        }
-        id = *matched;
-    }
-    const auto& cached = forPlayback(id);
-    if ((!cached.obs || !cached.obsReady) && source.channel) {
-        state.path = source.path;
-        state.song = "In-game song";
-        return;
-    }
-    const auto& obs = cached.obs ? *cached.obs : cached.game;
-    state.song = obs.name;
-    if (cached.obs ? cached.obsReady : cached.gameReady) state.path = obs.path;
-    state.offset += (obs.offset-(state.musicPosition?cached.game.offset:0))/1000.0;
+        state.path = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
+    };
+    if (!cellLayoutMatches()) return gameSong();
+    if (source.path.empty()) return;
+    std::vector<MusicCandidate> candidates;
+    for (int id : songs->ids) candidates.push_back({id, forPlayback(id).normalizedGamePath});
+    for (int id : source.extraIDs) candidates.push_back({id, forPlayback(id).normalizedGamePath});
+    auto matched = songForPath(normalizedMusicPath(source.path), candidates);
+    if (!matched) return gameSong();
+    const auto& cached = forPlayback(*matched);
+    if (!cached.obs || !cached.obsReady) return gameSong();
+    state.song = cached.obs->name;
+    state.path = cached.obs->path;
+    state.offset += (cached.obs->offset - cached.game.offset) / 1000.0;
 }
 void initialize() {
     if (!cellLayoutMatches()) return;

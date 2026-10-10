@@ -7,7 +7,6 @@
 #include "Socket.hpp"
 namespace separate_song {
 struct Snapshot {
-    bool musicPosition = false;
     bool playing = false, enabled = true;
     double position = 0, rate = 1, offset = 0;
     float musicVolume = 1.f, effectsVolume = 1.f;

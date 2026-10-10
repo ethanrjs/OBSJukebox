@@ -225,7 +225,7 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, Pla
     }
     voice.engineChannelID = music.m_channelID; voice.dontReset = music.m_dontReset;
     voice.channel = channel; voice.sound = sound; voice.continuing = false;
-    voice.source = {true, std::string(music.m_filePath)};
+    voice.source = {std::string(music.m_filePath)};
     if (play) {
         if (auto entry = play->m_gameState.m_songChannelStates.find(id);
             entry != play->m_gameState.m_songChannelStates.end()) {
@@ -233,7 +233,7 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, Pla
                 if (trigger && trigger->m_soundID > 0) voice.source.extraIDs.push_back(trigger->m_soundID);
         }
     }
-    out.channelID = id; out.timestamp = sampleTime; out.musicPosition = true;
+    out.channelID = id; out.timestamp = sampleTime;
     out.position = position;
     out.playing = !channelPaused(channel);
     out.rate = channelRate(channel, sound);
