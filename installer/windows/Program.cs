@@ -153,7 +153,8 @@ sealed class InstallRecord
 
 static class Engine
 {
-    static bool IsKnownProduct(string product) => product == Program.ProductName || product is "OBS Jukebox 1.0.0" or "Separate Song 1.0.0";
+    // Manifests name the release that wrote them, and any earlier release's install can be undone.
+    static bool IsKnownProduct(string product) => product.StartsWith("OBS Jukebox ") || product == "Separate Song 1.0.0";
     static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     public static string Hash(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
     static string HashFile(string path) { using var s = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(s)); }

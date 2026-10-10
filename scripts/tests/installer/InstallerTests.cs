@@ -107,6 +107,20 @@ static class InstallerTests
             Check(JsonNode.DeepEquals(JsonNode.Parse(File.ReadAllBytes(scenePath)),undone) && File.ReadAllText(plugin)=="user replacement","transaction restore semantically undoes scenes and preserves replaced plugin bytes");
         }
         finally { Directory.Delete(fixture,true); }
+        string manifests=Path.Combine(Path.GetTempPath(),"obs-jukebox-manifests-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(manifests);
+        try
+        {
+            bool undoable(string product)
+            {
+                string path=Path.Combine(manifests,Guid.NewGuid().ToString("N")+".json");
+                File.WriteAllText(path,$$"""{"Product":"{{product}}","Status":"installed","Files":[]}""");
+                return Engine.CanUndo(new Options { Manifest=path });
+            }
+            Check(undoable("OBS Jukebox 1.2.1") && undoable("OBS Jukebox 1.1.0") && undoable("Separate Song 1.0.0"),"installs from earlier releases can be undone");
+            Check(!undoable("Something Else 1.0.0"),"other products' manifests are not undone");
+        }
+        finally { Directory.Delete(manifests,true); }
         Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");
         var liveOptions=Options.Parse(["--mod-only"]);
         Check(liveOptions.ModOnly,"mod-only update is available from the command line");
