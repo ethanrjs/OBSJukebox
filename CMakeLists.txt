@@ -27,5 +27,5 @@ if(NOT DEFINED ENV{GEODE_SDK})
   message(FATAL_ERROR "Set GEODE_SDK to the Geode SDK directory")
 endif()
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_BINARY_DIR}/geode)
-list(APPEND GEODE_MODS_BEING_BUILT fleym.nongd)
-setup_geode_mod(${PROJECT_NAME} DONT_INSTALL)
+# Jukebox comes from the vendored 3.8.0 headers rather than the Geode index.
+setup_geode_mod(${PROJECT_NAME} DONT_INSTALL EXTERNALS fleym.nongd:v3.8.0)
