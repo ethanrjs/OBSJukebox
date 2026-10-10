@@ -15,8 +15,9 @@ namespace SeparateSongSetup;
 
 static class Program
 {
-    internal const string ReleaseVersion = "1.2.2";
-    internal const string ProductName = "OBS Jukebox " + ReleaseVersion;
+    // package-windows.ps1 builds with the version in mod.json.
+    internal static readonly string ReleaseVersion = typeof(Program).Assembly.GetName().Version!.ToString(3);
+    internal static readonly string ProductName = "OBS Jukebox " + ReleaseVersion;
     [STAThread]
     static int Main(string[] args)
     {

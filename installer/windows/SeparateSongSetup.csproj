@@ -6,7 +6,6 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>OBSJukeboxSetup</AssemblyName>
-    <Version>1.2.2</Version>
     <Authors>babbur</Authors>
     <Company>babbur</Company>
     <Product>OBS Jukebox</Product>

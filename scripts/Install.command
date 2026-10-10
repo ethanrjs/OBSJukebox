@@ -97,7 +97,8 @@ song_mod_destination=${song_packages#*$'\n'}
 song_audit="$HOME/Library/Application Support/OBS Jukebox/Install Logs/$(date +%Y%m%d-%H%M%S)-$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f",time')-$(uuidgen)"
 mkdir -p "$song_audit/Backups" "$song_audit/Failed"
 exec > >(tee "$song_audit/install.log") 2>&1
-print -r -- 'OBS Jukebox 1.2.0' "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
+song_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$song_root/../Info.plist")
+print -r -- "OBS Jukebox $song_version" "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
 typeset -a song_targets song_previous
 song_success=0
 rollback() {
