@@ -171,7 +171,6 @@ static void selectOffsetLevel(GJGameLevel* level) {
 
 static void settings(Snapshot& snapshot) {
     snapshot.enabled = enabled;
-    audio_tap::enable(snapshot.enabled);
     snapshot.musicVolume = obs_volume::music();
     snapshot.effectsVolume = obs_volume::effects();
     snapshot.offset = playingSongs ? offset_setting::value() : 0.0;
@@ -368,7 +367,8 @@ static void sampleMusicOutsideLevels() {
 $on_mod(Loaded) {
     offset_setting::initialize();
     enabled = Mod::get()->getSettingValue<bool>("enabled");
-    listenForSettingChanges<bool>("enabled", [](bool value) { enabled = value; });
+    audio_tap::enable(enabled);
+    listenForSettingChanges<bool>("enabled", [](bool value) { enabled = value; audio_tap::enable(value); });
     SettingChangedEventV3(Mod::get(), "offset").listen([](std::shared_ptr<SettingV3> setting) {
         auto offset = std::dynamic_pointer_cast<offset_setting::OffsetSetting>(setting);
         if (!offset || loadingOffset || offsetLevel.empty()) return;
