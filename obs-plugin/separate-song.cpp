@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <obs-module.h>
 #include <string>
 #include <thread>
@@ -48,6 +49,86 @@ struct LinkState {
     Clock::time_point received{};
     bool connected = false;
 };
+// Checks a song packet's size, version and fields. Returns nothing if any of them is invalid.
+static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, size_t size) {
+    SongLinkPacket p{};
+    if (size != sizeof(p) && size != SONG_LINK_V4_SIZE && size != SONG_LINK_V3_SIZE && size != SONG_LINK_V2_SIZE)
+        return std::nullopt;
+    memcpy(&p, data, size);
+    if (!((size == sizeof(p) && p.version == 5) ||
+          (size == SONG_LINK_V4_SIZE && p.version == 4) ||
+          (size == SONG_LINK_V3_SIZE && p.version == 3) ||
+          (size == SONG_LINK_V2_SIZE && p.version == 2)) ||
+        memcmp(p.magic, "GDSONG1", 8))
+        return std::nullopt;
+    if (!std::isfinite(p.musicVolume) || p.musicVolume < 0 || p.musicVolume > 1 ||
+        !std::isfinite(p.effectsVolume) || p.effectsVolume < 0 || p.effectsVolume > 1 ||
+        !std::isfinite(p.position) || p.position < -600 || p.position >= 86400 ||
+        !std::isfinite(p.offset) || !std::isfinite(p.rate) || p.rate < .25 || p.rate > 4 ||
+        p.channelID < -1 || p.channelID >= SONG_LINK_MAX_CHANNELS ||
+        !std::isfinite(p.triggerGain) || p.triggerGain < 0 || p.triggerGain > 16 ||
+        p.fadeCount > 8)
+        return std::nullopt;
+    uint64_t previous = 0;
+    for (unsigned i = 0; i < p.fadeCount; ++i) {
+        const auto &f = p.fades[i];
+        if (f.offsetNs < previous || f.offsetNs > 86400000000000ULL || !std::isfinite(f.gain) || f.gain < 0 ||
+            f.gain > 16)
+            return std::nullopt;
+        previous = f.offsetNs;
+    }
+    if ((p.flags & 4) && (!std::isfinite(p.loopStart) || !std::isfinite(p.loopEnd) || p.loopStart < 0 ||
+                          p.loopEnd <= p.loopStart || p.loopEnd > 86400))
+        return std::nullopt;
+    p.status[23] = p.level[95] = p.song[95] = p.path[1023] = 0;
+    return p;
+}
+struct EffectsInput {
+    EffectsPacket packet;
+    uint64_t session = 0; // GDSFX2 only
+    bool modern = false;  // GDSFX2 rather than GDSFX1
+};
+// Checks an effects packet (GDSFX2, or the older GDSFX1) and converts it to one type.
+static std::optional<EffectsInput> parseEffectsPacket(const unsigned char *data, size_t size) {
+    EffectsInput input;
+    auto &effect = input.packet;
+    input.modern = size >= 44 && !memcmp(data, "GDSFX2\0", 8);
+    if (input.modern) {
+        if (size > sizeof(EffectsPacketV2))
+            return std::nullopt;
+        EffectsPacketV2 p;
+        memcpy(&p, data, size);
+        if (p.version != 2 || p.frames > 512 || size != 44 + p.frames * 8)
+            return std::nullopt;
+        effect.sequence = p.sequence;
+        effect.sampleRate = p.sampleRate;
+        effect.frames = p.frames;
+        effect.timestamp = p.timestamp;
+        effect.stream = p.stream;
+        input.session = p.sessionID;
+        std::copy_n(p.samples, p.frames * 2, effect.samples);
+    } else {
+        if (size < 36 || memcmp(data, "GDSFX1\0", 8) || size > sizeof(effect))
+            return std::nullopt;
+        memcpy(&effect, data, size);
+        if (effect.version != 1 || effect.frames > 512 || size != 36 + effect.frames * 8)
+            return std::nullopt;
+    }
+    if (effect.frames < 1 || effect.sampleRate < 8000 || effect.sampleRate > 192000 || effect.stream > 1)
+        return std::nullopt;
+#ifndef OBS_JUKEBOX_QA
+    if (effect.stream != 0)
+        return std::nullopt;
+#endif
+    for (unsigned i = 0; i < effect.frames * 2; ++i)
+        if (!std::isfinite(effect.samples[i]))
+            return std::nullopt;
+    return input;
+}
+// Effects more than a second from now are dropped.
+static bool effectsCurrent(uint64_t timestamp, uint64_t now) {
+    return timestamp <= now + 1000000000 && timestamp + 1000000000 >= now;
+}
 class Receiver {
     SongSocket sock = BAD_SOCKET;
     std::thread worker;
@@ -68,6 +149,7 @@ class Receiver {
     std::deque<uint64_t> probes;
     sockaddr_in peer{};
     std::deque<SongLinkPacket> pending;
+    FILE *reference = nullptr;
 #if defined(__linux__)
     LinuxAudioClock effectsClock;
 #endif
@@ -84,6 +166,28 @@ class Receiver {
             voice.clear();
         effects.clear();
         state.connected = false;
+    }
+    // Forgets everything learned from the previous sender: its clock, waiting packets, effects
+    // ports and timeline.
+    void resetSession(uint64_t id) {
+        session = id;
+        clock.reset();
+        pending.clear();
+        pendingEffects.clear();
+        probes.clear();
+        lastProbe = 0;
+        effectsPort.fill(0);
+        lastEffectsReceived.fill(0);
+        clearTimeline();
+    }
+    // The effects tap uses its own socket. Pin its port independently and permit a replacement
+    // tap only after the previous one is stale.
+    bool pinEffectsPort(unsigned stream, uint16_t port, uint64_t now) {
+        if (effectsPort[stream] && effectsPort[stream] != port && now - lastEffectsReceived[stream] <= sessionTimeoutNs)
+            return false;
+        effectsPort[stream] = port;
+        lastEffectsReceived[stream] = now;
+        return true;
     }
     void accept(SongLinkPacket p, uint64_t now) {
         auto senderTimestamp = p.timestamp;
@@ -125,6 +229,114 @@ class Receiver {
         sendto(sock, reinterpret_cast<const char *>(&p), sizeof(p), 0, reinterpret_cast<sockaddr *>(&peer),
                sizeof(peer));
     }
+    // Handles one datagram from the game, received at `now`.
+    void handle(const unsigned char *data, size_t size, const sockaddr_in &from, uint64_t now) {
+        if (size < 8)
+            return;
+        if (!memcmp(data, "GDCLK1\0", 8))
+            handleClockReply(data, size, from, now);
+        else if (!memcmp(data, "GDSFX", 5)) {
+            if (auto effect = parseEffectsPacket(data, size))
+                handleEffects(*effect, from, now);
+        } else if (auto song = parseSongPacket(data, size))
+            handleSong(*song, from, now);
+    }
+    void handleClockReply(const unsigned char *data, size_t size, const sockaddr_in &from, uint64_t now) {
+        if (size != sizeof(ClockSyncPacket))
+            return;
+        ClockSyncPacket p;
+        memcpy(&p, data, sizeof(p));
+        auto found = std::find(probes.begin(), probes.end(), p.t1);
+        if (p.version != 1 || p.kind != 2 || p.sessionID != session || found == probes.end() ||
+            from.sin_port != peer.sin_port)
+            return;
+        probes.erase(found);
+        bool changed = false;
+        std::lock_guard lock(mutex);
+        if (!clock.observe(p, now, changed))
+            return;
+        if (changed)
+            clearTimeline();
+        for (auto &waiting : pending)
+            accept(waiting, now);
+        pending.clear();
+        for (auto waiting : pendingEffects)
+            if (clock.translate(waiting.timestamp) && effectsCurrent(waiting.timestamp, now))
+                queueEffects(waiting);
+        pendingEffects.clear();
+    }
+    void handleEffects(const EffectsInput &input, const sockaddr_in &from, uint64_t now) {
+        auto effect = input.packet;
+        std::lock_guard lock(mutex);
+        if (input.modern) {
+            if (!session || input.session != session || !pinEffectsPort(effect.stream, from.sin_port, now))
+                return;
+            if (!clock.valid()) {
+                if (effect.stream == 0) {
+                    pendingEffects.push_back(effect);
+                    while (pendingEffects.size() > 128)
+                        pendingEffects.pop_front();
+                }
+                return;
+            }
+            if (!clock.translate(effect.timestamp))
+                return;
+        } else {
+            // v2-v4 song packets and GDSFX1 remain compatible with pre-clock-sync
+            // releases, but may never inject audio into an active v5 session.
+            if (session || !lastSongReceived || from.sin_addr.s_addr != peer.sin_addr.s_addr ||
+                !pinEffectsPort(effect.stream, from.sin_port, now))
+                return;
+#if defined(__linux__)
+            if (effectsClock.translate(effect.timestamp, now))
+                effects.clear();
+#endif
+        }
+        if (!effectsCurrent(effect.timestamp, now))
+            return;
+        if (effect.stream == 1) {
+            if (reference) {
+                std::fwrite(&effect, sizeof(effect), 1, reference);
+                std::fflush(reference);
+            }
+            return;
+        }
+        queueEffects(effect);
+    }
+    void handleSong(SongLinkPacket p, const sockaddr_in &from, uint64_t now) {
+        if (p.version < 4)
+            p.timestamp = now;
+        std::lock_guard lock(mutex);
+        if (p.version >= 5) {
+            if (!p.sessionID)
+                return;
+            if (session != p.sessionID || from.sin_port != peer.sin_port) {
+                if (lastSongReceived && now - lastSongReceived <= sessionTimeoutNs)
+                    return;
+                blog(LOG_INFO, "[OBS Jukebox] Adopting game session %llu",
+                     static_cast<unsigned long long>(p.sessionID));
+                resetSession(p.sessionID);
+                peer = from;
+            }
+            lastSongReceived = now;
+            if (!clock.valid()) {
+                pending.push_back(p);
+                while (pending.size() > 256)
+                    pending.pop_front();
+                probe(now);
+                return;
+            }
+        } else {
+            if (lastSongReceived && (session || from.sin_port != peer.sin_port) &&
+                now - lastSongReceived <= sessionTimeoutNs)
+                return;
+            if (session || (lastSongReceived && from.sin_port != peer.sin_port))
+                resetSession(0);
+            peer = from;
+            lastSongReceived = now;
+        }
+        accept(p, now);
+    }
 
   public:
     Receiver() {
@@ -146,12 +358,11 @@ class Receiver {
         int receiveBuffer = 1024 * 1024;
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char *>(&receiveBuffer),
                    sizeof(receiveBuffer));
-        worker = std::thread([this] {
-            FILE *reference = nullptr;
 #ifdef OBS_JUKEBOX_QA
-            if (auto path = std::getenv("SEPARATE_SONG_REFERENCE_FILE"))
-                reference = std::fopen(path, "wb");
+        if (auto path = std::getenv("SEPARATE_SONG_REFERENCE_FILE"))
+            reference = std::fopen(path, "wb");
 #endif
+        worker = std::thread([this] {
             while (!stop) {
                 std::array<unsigned char, sizeof(EffectsPacketV2) + 1> buffer{};
                 sockaddr_in from{};
@@ -168,208 +379,17 @@ class Receiver {
                     waitSocketReadable(sock, 50);
                     continue;
                 }
-                if (from.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
-                    continue;
-                if (size == sizeof(ClockSyncPacket) && !memcmp(buffer.data(), "GDCLK1\0", 8)) {
-                    ClockSyncPacket p;
-                    memcpy(&p, buffer.data(), sizeof(p));
-                    auto found = std::find(probes.begin(), probes.end(), p.t1);
-                    if (p.version != 1 || p.kind != 2 || p.sessionID != session || found == probes.end() ||
-                        from.sin_port != peer.sin_port)
-                        continue;
-                    probes.erase(found);
-                    bool changed = false;
-                    std::lock_guard lock(mutex);
-                    if (clock.observe(p, now, changed)) {
-                        if (changed)
-                            clearTimeline();
-                        for (auto &waiting : pending)
-                            accept(waiting, now);
-                        pending.clear();
-                        for (auto waiting : pendingEffects)
-                            if (clock.translate(waiting.timestamp) && waiting.timestamp <= now + 1000000000 &&
-                                waiting.timestamp + 1000000000 >= now)
-                                queueEffects(waiting);
-                        pendingEffects.clear();
-                    }
-                    continue;
-                }
-                bool modernEffects = size >= 44 && !memcmp(buffer.data(), "GDSFX2\0", 8);
-                if (modernEffects || (size >= 36 && !memcmp(buffer.data(), "GDSFX1\0", 8))) {
-                    EffectsPacket effect;
-                    uint64_t effectSession = 0;
-                    if (modernEffects) {
-                        if (size > sizeof(EffectsPacketV2))
-                            continue;
-                        EffectsPacketV2 p;
-                        memcpy(&p, buffer.data(), size);
-                        if (p.version != 2 || p.frames > 512 || size_t(size) != 44 + p.frames * 8)
-                            continue;
-                        effect.sequence = p.sequence;
-                        effect.sampleRate = p.sampleRate;
-                        effect.frames = p.frames;
-                        effect.timestamp = p.timestamp;
-                        effect.stream = p.stream;
-                        effectSession = p.sessionID;
-                        std::copy_n(p.samples, p.frames * 2, effect.samples);
-                    } else {
-                        if (size > sizeof(effect))
-                            continue;
-                        memcpy(&effect, buffer.data(), size);
-                        if (effect.version != 1 || effect.frames > 512 || size_t(size) != 36 + effect.frames * 8)
-                            continue;
-                    }
-                    if (effect.frames < 1 || effect.sampleRate < 8000 || effect.sampleRate > 192000 ||
-                        effect.stream > 1)
-                        continue;
-#ifndef OBS_JUKEBOX_QA
-                    if (effect.stream != 0)
-                        continue;
-#endif
-                    bool finite = true;
-                    for (unsigned i = 0; i < effect.frames * 2; ++i)
-                        finite &= std::isfinite(effect.samples[i]);
-                    if (!finite)
-                        continue;
-                    std::lock_guard lock(mutex);
-                    if (modernEffects) {
-                        if (!session || effectSession != session)
-                            continue;
-                        // The effects tap uses its own socket. Pin its port independently
-                        // and permit a replacement tap only after the previous one is stale.
-                        if (effectsPort[effect.stream] && effectsPort[effect.stream] != from.sin_port &&
-                            now - lastEffectsReceived[effect.stream] <= sessionTimeoutNs)
-                            continue;
-                        effectsPort[effect.stream] = from.sin_port;
-                        lastEffectsReceived[effect.stream] = now;
-                        if (!clock.valid()) {
-                            if (effect.stream == 0) {
-                                pendingEffects.push_back(effect);
-                                while (pendingEffects.size() > 128)
-                                    pendingEffects.pop_front();
-                            }
-                            continue;
-                        }
-                        if (!clock.translate(effect.timestamp))
-                            continue;
-                    } else {
-                        // v2-v4 song packets and GDSFX1 remain compatible with pre-clock-sync
-                        // releases, but may never inject audio into an active v5 session.
-                        if (session || !lastSongReceived || from.sin_addr.s_addr != peer.sin_addr.s_addr)
-                            continue;
-                        if (effectsPort[effect.stream] && effectsPort[effect.stream] != from.sin_port &&
-                            now - lastEffectsReceived[effect.stream] <= sessionTimeoutNs)
-                            continue;
-                        effectsPort[effect.stream] = from.sin_port;
-                        lastEffectsReceived[effect.stream] = now;
-#if defined(__linux__)
-                        if (effectsClock.translate(effect.timestamp, now))
-                            effects.clear();
-#endif
-                    }
-                    if (effect.timestamp > now + 1000000000 || effect.timestamp + 1000000000 < now)
-                        continue;
-                    if (effect.stream == 1) {
-                        if (reference) {
-                            std::fwrite(&effect, sizeof(effect), 1, reference);
-                            std::fflush(reference);
-                        }
-                        continue;
-                    }
-                    queueEffects(effect);
-                    continue;
-                }
-                SongLinkPacket p{};
-                if (size != sizeof(p) && size != SONG_LINK_V4_SIZE && size != SONG_LINK_V3_SIZE &&
-                    size != SONG_LINK_V2_SIZE)
-                    continue;
-                memcpy(&p, buffer.data(), size);
-                if (!((size == sizeof(p) && p.version == 5) ||
-                      (size == SONG_LINK_V4_SIZE && p.version == 4) ||
-                      (size == SONG_LINK_V3_SIZE && p.version == 3) ||
-                      (size == SONG_LINK_V2_SIZE && p.version == 2)) ||
-                    memcmp(p.magic, "GDSONG1", 8))
-                    continue;
-                if (!std::isfinite(p.musicVolume) || p.musicVolume < 0 || p.musicVolume > 1 ||
-                    !std::isfinite(p.effectsVolume) || p.effectsVolume < 0 || p.effectsVolume > 1 ||
-                    !std::isfinite(p.position) || p.position < -600 || p.position >= 86400 ||
-                    !std::isfinite(p.offset) || !std::isfinite(p.rate) || p.rate < .25 || p.rate > 4 ||
-                    p.channelID < -1 || p.channelID >= SONG_LINK_MAX_CHANNELS ||
-                    !std::isfinite(p.triggerGain) || p.triggerGain < 0 || p.triggerGain > 16 ||
-                    p.fadeCount > 8)
-                    continue;
-                bool valid = true;
-                uint64_t previous = 0;
-                for (unsigned i = 0; i < p.fadeCount; ++i) {
-                    const auto &f = p.fades[i];
-                    if (f.offsetNs < previous || f.offsetNs > 86400000000000ULL || !std::isfinite(f.gain) ||
-                        f.gain < 0 || f.gain > 16)
-                        valid = false;
-                    previous = f.offsetNs;
-                }
-                if ((p.flags & 4) && (!std::isfinite(p.loopStart) || !std::isfinite(p.loopEnd) ||
-                                      p.loopStart < 0 || p.loopEnd <= p.loopStart || p.loopEnd > 86400))
-                    valid = false;
-                if (!valid)
-                    continue;
-                p.status[23] = p.level[95] = p.song[95] = p.path[1023] = 0;
-                if (p.version < 4)
-                    p.timestamp = now;
-                std::lock_guard lock(mutex);
-                if (p.version >= 5) {
-                    if (!p.sessionID)
-                        continue;
-                    if (session != p.sessionID || from.sin_port != peer.sin_port) {
-                        if (lastSongReceived && now - lastSongReceived <= sessionTimeoutNs)
-                            continue;
-                        blog(LOG_INFO, "[OBS Jukebox] Adopting game session %llu",
-                             static_cast<unsigned long long>(p.sessionID));
-                        session = p.sessionID;
-                        peer = from;
-                        clock.reset();
-                        pending.clear();
-                        pendingEffects.clear();
-                        probes.clear();
-                        lastProbe = 0;
-                        effectsPort.fill(0);
-                        lastEffectsReceived.fill(0);
-                        clearTimeline();
-                    }
-                    lastSongReceived = now;
-                    if (!clock.valid()) {
-                        pending.push_back(p);
-                        while (pending.size() > 256)
-                            pending.pop_front();
-                        probe(now);
-                        continue;
-                    }
-                } else {
-                    if (lastSongReceived && (session || from.sin_port != peer.sin_port) &&
-                        now - lastSongReceived <= sessionTimeoutNs)
-                        continue;
-                    if (session || (lastSongReceived && from.sin_port != peer.sin_port)) {
-                        session = 0;
-                        clock.reset();
-                        pending.clear();
-                        pendingEffects.clear();
-                        probes.clear();
-                        effectsPort.fill(0);
-                        lastEffectsReceived.fill(0);
-                        clearTimeline();
-                    }
-                    peer = from;
-                    lastSongReceived = now;
-                }
-                accept(p, now);
+                if (from.sin_addr.s_addr == htonl(INADDR_LOOPBACK))
+                    handle(buffer.data(), size_t(size), from, now);
             }
-            if (reference)
-                std::fclose(reference);
         });
     }
     ~Receiver() {
         stop = true;
         if (worker.joinable())
             worker.join();
+        if (reference)
+            std::fclose(reference);
         if (sock != BAD_SOCKET)
             closeSocket(sock);
     }
