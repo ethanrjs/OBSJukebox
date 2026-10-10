@@ -7,7 +7,6 @@
 #include <Geode/modify/LevelPage.hpp>
 #include <Geode/modify/LevelSelectLayer.hpp>
 #include <Geode/modify/EditLevelLayer.hpp>
-#include <Geode/ui/GeodeUI.hpp>
 #include "Bridge.hpp"
 #include "JukeboxLink.hpp"
 #include "AudioTap.hpp"
@@ -20,8 +19,6 @@
 #include "MonotonicClock.hpp"
 #include <map>
 #include <set>
-#include <fstream>
-#include <sstream>
 #include <chrono>
 #include <cmath>
 #include <optional>
@@ -187,14 +184,18 @@ static void publish(const std::string& status, bool playing) {
     state.playing = playing;
     bridge().publish(state);
 }
+// Live positions are dated by the mixer and can be up to a block ahead of now. A stop must not
+// sort before them, or OBS would play on until they go stale.
+static void markStopped(Snapshot& snapshot, uint64_t now) {
+    snapshot.timestamp = std::max(snapshot.timestamp, now);
+    snapshot.playing = false;
+    snapshot.epoch = ++nextEpoch;
+}
 static void stopVoices() {
+    const auto now = monotonicNowNs();
     for (auto& [id, voice] : voices) {
-        // Live positions are dated by the mixer and can be up to a block ahead of now. A stop must
-        // not sort before them, or OBS would play on until they go stale.
-        voice.snapshot.timestamp = std::max(voice.snapshot.timestamp, monotonicNowNs());
-        voice.snapshot.playing = false;
+        markStopped(voice.snapshot, now);
         voice.snapshot.path.clear();
-        voice.snapshot.epoch = ++nextEpoch;
         bridge().publish(voice.snapshot);
     }
     voices.clear();
@@ -202,7 +203,7 @@ static void stopVoices() {
 // Samples one live GD music channel into its voice and publishes it. With a PlayLayer, the level's
 // OBS choice can replace the song. With null (menus, shop, editor), OBS plays GD's own file.
 static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, PlayLayer* play) {
-    if (id < 0 || id >= 64) return false;
+    if (id < 0 || id >= SONG_LINK_MAX_CHANNELS) return false;
     auto channel = engine->getActiveMusicChannel(id);
     bool live = false;
     FMOD::Sound* sound = nullptr;
@@ -287,7 +288,8 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, Pla
 // Publishes a stop for a voice whose channel is gone and forgets it.
 static std::map<int, MusicVoice>::iterator endVoice(std::map<int, MusicVoice>::iterator it, uint64_t now) {
     auto& out = it->second.snapshot;
-    out.timestamp = std::max(now, out.timestamp); out.playing = false; out.path.clear(); out.epoch = ++nextEpoch;
+    markStopped(out, now);
+    out.path.clear();
     bridge().publish(out);
     return voices.erase(it);
 }
@@ -427,9 +429,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         selectOffsetLevel(m_level);
         if (m_fields->suspendedContinuation) {
             auto& voice = *m_fields->suspendedContinuation;
-            voice.snapshot.timestamp = std::max(voice.snapshot.timestamp, monotonicNowNs());
-            voice.snapshot.playing = false;
-            voice.snapshot.epoch = ++nextEpoch;
+            markStopped(voice.snapshot, monotonicNowNs());
             voices[0] = std::move(voice);
             m_fields->suspendedContinuation.reset();
         }
