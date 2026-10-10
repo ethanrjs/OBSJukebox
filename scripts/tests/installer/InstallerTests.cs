@@ -119,6 +119,9 @@ static class InstallerTests
             }
             Check(undoable("OBS Jukebox 1.2.1") && undoable("OBS Jukebox 1.1.0") && undoable("Separate Song 1.0.0"),"installs from earlier releases can be undone");
             Check(!undoable("Something Else 1.0.0"),"other products' manifests are not undone");
+            string noProduct=Path.Combine(manifests,"no-product.json");
+            File.WriteAllText(noProduct,"""{"Product":null,"Status":"installed","Files":[]}""");
+            Check(!Engine.CanUndo(new Options { Manifest=noProduct }),"a manifest with no product name is not undone");
         }
         finally { Directory.Delete(manifests,true); }
         Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");
