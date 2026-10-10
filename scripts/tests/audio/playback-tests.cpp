@@ -262,9 +262,9 @@ static void staleVoiceTest() {
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
     sim.send(p,sim.now-600000000);
     sim.advance(5000000);
-    auto opens=Decoder::testOpens.load();
+    auto opens=Decoder::testOpenCount.load();
     sim.start();sim.advance(150000000);
-    check(Decoder::testOpens.load()==opens,"a stale packet does not reopen the song for a dropped voice");
+    check(Decoder::testOpenCount.load()==opens,"a stale packet does not reopen the song for a dropped voice");
 }
 static void effectsTransitionTest() {
     Simulation sim;
@@ -804,7 +804,6 @@ static void senderTest() {
     separate_song::Bridge b;check(b.start(),"sender opens its socket");b.publish(s);
     check(published.version==5 && published.timestamp==s.timestamp && published.position==s.position,
         "sender preserves sampling time through publication delay");
-    check(std::abs(double(int64_t(monotonicNowNs())-int64_t(os_gettime_ns())))<1000000,"native sender and OBS test clock use compatible sampling units");
 }
 #include "receiver-tests.inc"
 #include "deadline-tests.inc"

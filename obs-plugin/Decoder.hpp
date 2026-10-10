@@ -48,7 +48,6 @@ class Decoder {
     inline static std::atomic<bool> testFailOnNextSeek{false};
     inline static std::atomic<bool> testStarveAllReads{false};
     inline static std::atomic<unsigned> testOpenCount{0};
-    inline static std::atomic<int> testOpens{0};
 #endif
     double position = 0;
     std::string error;
@@ -123,10 +122,8 @@ class Decoder {
         }
         seekValid = opened;
 #ifdef OBS_JUKEBOX_QA
-        if (opened) {
+        if (opened)
             ++testOpenHandles;
-            ++testOpens;
-        }
 #endif
         if (!opened) {
 #ifdef _WIN32
