@@ -11,7 +11,8 @@ inline uint64_t framesToNs(uint64_t frames, uint32_t rate) {
 // Wall-clock timestamps for the effects tap's mixer blocks. Timestamps follow the frame count, so
 // blocks butt up against each other and the OBS plugin can play them back to back. Each block
 // steers the timeline at most one sample towards the wall clock, which follows the output
-// device's clock drifting from the system clock without jumps. Only a stall starts over.
+// device's clock drifting from the system clock without jumps. It starts over only when it falls
+// over 20 ms behind (a stall) or runs over 100 ms ahead.
 struct TapClock {
     uint64_t start = 0, frames = 0;
     // Timestamp of the block about to be processed. Call advance() with its length afterwards.

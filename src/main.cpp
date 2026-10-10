@@ -118,6 +118,7 @@ static void sampleEnvelope(MusicVoice& voice, FMOD::Channel* channel, unsigned s
     channel->getDSPClock(nullptr, &clock);
     unsigned count = 0;
     if (channel->getFadePoints(&count, nullptr, nullptr) == FMOD_OK && count) {
+        // FMOD also reads count as the arrays' capacity (checked against GD's FMOD 2.02).
         count = std::min(count, 128u);
         std::vector<unsigned long long> clocks(count);
         std::vector<float> gains(count);
@@ -134,7 +135,7 @@ static void sampleEnvelope(MusicVoice& voice, FMOD::Channel* channel, unsigned s
     if (!sampleRate || !out.playing) return;
     unsigned long long start = 0, end = 0;
     channel->getDelay(&start, &end, nullptr);
-    auto limit = end > clock ? out.fades.size() - 2 : out.fades.size();
+    auto limit = end > clock ? out.fades.size() - 2 : out.fades.size(); // room for the stop below
     for (const auto& point : voice.fadePoints) {
         if (point.clock <= clock || (end && point.clock >= end)) continue;
         if (out.fadeCount == limit) break;

@@ -4,18 +4,9 @@
 
 using namespace geode::prelude;
 
-namespace {
-class EffectsCreationGuard {
-    float& volume;
-    float saved;
-public:
-    EffectsCreationGuard(float& value, bool capture) : volume(value), saved(value) {
-        if (capture && value <= 0.f) volume = 1.f;
-    }
-    ~EffectsCreationGuard() { volume = saved; }
-};
-}
-
+// GD returns without starting an effect while its SFX volume is 0, so with the game's effects muted
+// none would reach OBS. While OBS takes effects, the volume reads 1 as GD starts one; the effects
+// tap sits before the effects group's fader (AudioTap.cpp).
 class $modify(SeparateSongEffectsPlayback, FMODAudioEngine) {
     int playEffectAdvanced(gd::string path, float speed, float unknown,
                            float volume, float pitch, bool fastFourierTransform,
@@ -26,10 +17,13 @@ class $modify(SeparateSongEffectsPlayback, FMODAudioEngine) {
                            int sfxGroup) {
         const bool capture = Mod::get()->getSettingValue<bool>("enabled") &&
             separate_song::obs_volume::effects() > 0.f;
-        EffectsCreationGuard guard(m_sfxVolume, capture);
-        return FMODAudioEngine::playEffectAdvanced(
+        const float saved = m_sfxVolume;
+        if (capture && saved <= 0.f) m_sfxVolume = 1.f;
+        auto id = FMODAudioEngine::playEffectAdvanced(
             path, speed, unknown, volume, pitch, fastFourierTransform, reverb,
             startMillis, endMillis, fadeIn, fadeOut, loopEnabled, effectID,
             override, noPreload, channelID, uniqueID, minInterval, sfxGroup);
+        m_sfxVolume = saved;
+        return id;
     }
 };

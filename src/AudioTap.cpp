@@ -9,6 +9,7 @@
 #include <Geode/fmod/fmod_dsp.h>
 #include <atomic>
 #include <array>
+#include <cstddef>
 #include <thread>
 #include <cstring>
 #include <cstdlib>
@@ -91,7 +92,7 @@ struct Tap {
             p.sampleRate = rate;
             p.stream = stream;
             p.sessionID = processSessionID();
-            p.timestamp = timestamp + uint64_t(start) * 1000000000 / rate;
+            p.timestamp = timestamp + framesToNs(start, rate);
             for (unsigned i = 0; i < p.frames; ++i) {
                 auto stereo = downmixStereo(input + (start + i) * channels, channels);
                 p.samples[i * 2] = stereo[0];
@@ -123,11 +124,7 @@ struct Tap {
         rate = engine->m_sampleRate > 0 ? engine->m_sampleRate : 44100;
         FMOD_DSP_DESCRIPTION description{};
         description.pluginsdkversion = FMOD_PLUGIN_SDK_VERSION;
-        std::strncpy(description.name,
-                     id == 2 ? "OBS replacement"
-                     : id    ? "OBS calibration"
-                             : "OBS effects",
-                     31);
+        std::strncpy(description.name, id ? "OBS calibration" : "OBS effects", 31);
         description.version = 0x10000;
         description.numinputbuffers = 1;
         description.numoutputbuffers = 1;
@@ -168,7 +165,8 @@ struct Tap {
                     break;
                 auto r = read.load(std::memory_order_relaxed);
                 auto &p = queue[r % capacity];
-                sendto(socket, reinterpret_cast<const char *>(&p), 44 + p.frames * 8, 0,
+                auto size = offsetof(EffectsPacketV2, samples) + p.frames * 2 * sizeof(float);
+                sendto(socket, reinterpret_cast<const char *>(&p), static_cast<int>(size), 0,
                        reinterpret_cast<sockaddr *>(&target), sizeof(target));
                 read.store(r + 1, std::memory_order_release);
             }
