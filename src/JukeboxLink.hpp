@@ -8,7 +8,7 @@ void initialize();
 void shutdown();
 void refreshUI();
 struct MusicSource { std::string path; std::vector<int> extraIDs; };
-struct LevelSongs { std::vector<int> ids; };
+using LevelSongs = std::vector<int>;
 LevelSongs snapshotSongs(GJGameLevel* level);
 void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source);
 Readiness prepare(GJGameLevel* level, bool retry = false);

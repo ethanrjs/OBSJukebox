@@ -118,13 +118,12 @@ static void sampleEnvelope(MusicVoice& voice, FMOD::Channel* channel, unsigned s
     channel->getDSPClock(nullptr, &clock);
     unsigned count = 0;
     if (channel->getFadePoints(&count, nullptr, nullptr) == FMOD_OK && count) {
-        // FMOD also reads count as the arrays' capacity (checked against GD's FMOD 2.02).
         count = std::min(count, 128u);
+        // FMOD also reads count as the arrays' capacity (checked against GD's FMOD 2.02).
         std::vector<unsigned long long> clocks(count);
         std::vector<float> gains(count);
         if (channel->getFadePoints(&count, clocks.data(), gains.data()) == FMOD_OK) {
             voice.fadePoints.clear();
-            count = std::min(count, static_cast<unsigned>(clocks.size()));
             for (unsigned i = 0; i < count; ++i) voice.fadePoints.push_back({clocks[i], gains[i]});
             normalizeMusicFades(voice.fadePoints);
         }
@@ -185,7 +184,7 @@ static void publish(const std::string& status, bool playing) {
     bridge().publish(state);
 }
 // Live positions are dated by the mixer and can be up to a block ahead of now. A stop must not
-// sort before them, or OBS would play on until they go stale.
+// sort before them, or OBS would play on until they go stale. Callers decide whether to clear the path.
 static void markStopped(Snapshot& snapshot, uint64_t now) {
     snapshot.timestamp = std::max(snapshot.timestamp, now);
     snapshot.playing = false;

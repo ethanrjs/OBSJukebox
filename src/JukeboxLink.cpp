@@ -177,7 +177,6 @@ void clear(int id) {
     invalidate(id);
 }
 std::string manifestPath(int id) { return string::pathToString(base()/"manifest"/fmt::format("{}.json", id)); }
-// FileCache keeps the last manifest that parsed, so a read that fails mid-write changes nothing.
 matjson::Value manifest(int id) {
     if (!cellLayoutMatches()) return {};
     return files().get(manifestPath(id), true).second;
@@ -450,6 +449,8 @@ void select(jukebox::NongCell* cell) {
 }
 
 void shutdown() { files().shutdown(); }
+// No Jukebox list can be open during unpaused gameplay.
+bool inGameplay() { auto play = PlayLayer::get(); return play && !play->m_isPaused; }
 void refreshUI() {
     static auto lastRequestCheck = Clock::time_point{};
     if (Clock::now() - lastRequestCheck >= std::chrono::seconds(1)) {
@@ -463,7 +464,7 @@ void refreshUI() {
         deferredDownloads.clear();
         for (auto& [key, entry] : pending) download(entry.first, entry.second);
     }
-    if (auto play = PlayLayer::get(); play && !play->m_isPaused) return;
+    if (inGameplay()) return;
     if (!cellLayoutMatches()) return;
     auto scene = CCDirector::get()->getRunningScene(); if (!scene) return;
     auto list = findList(scene); if (!list) return;
@@ -474,7 +475,7 @@ void refreshUI() {
 // enters a scene, so it leaves gameplay alone and checks types rather than calling getID(),
 // which gives each node it touches its own Geode metadata object.
 void observeList(CCNode* node) {
-    if (auto play = PlayLayer::get(); play && !play->m_isPaused) return;
+    if (inGameplay()) return;
     if (!cellLayoutMatches()) return;
     if (auto list = typeinfo_cast<jukebox::NongList*>(node)) {
         visibleList() = list;
@@ -500,7 +501,7 @@ Readiness prepare(GJGameLevel* level, bool retry) {
 }
 LevelSongs snapshotSongs(GJGameLevel* level) {
     int id = songID(level);
-    return {levelSongIDs(id, std::string(level->m_songIDs))};
+    return levelSongIDs(id, std::string(level->m_songIDs));
 }
 void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
     state.path.clear(); state.song.clear();
@@ -508,13 +509,13 @@ void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
     // GD's own file, by full path: GD keeps built-in songs as names relative to its resources.
     auto gameSong = [&] {
         state.song = "In-game song";
-        state.path = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
+        if (!source.path.empty()) state.path = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
     };
     if (!cellLayoutMatches()) return gameSong();
     if (source.path.empty()) return;
     std::vector<MusicCandidate> candidates;
-    for (int id : songs->ids) candidates.push_back({id, forPlayback(id).normalizedGamePath});
-    for (int id : source.extraIDs) candidates.push_back({id, forPlayback(id).normalizedGamePath});
+    for (const auto* ids : {songs, &source.extraIDs})
+        for (int id : *ids) candidates.push_back({id, forPlayback(id).normalizedGamePath});
     auto matched = songForPath(normalizedMusicPath(source.path), candidates);
     if (!matched) return gameSong();
     const auto& cached = forPlayback(*matched);
@@ -569,7 +570,7 @@ void initialize() {
     }).leak();
 }
 void rightClick(CCPoint point) {
-    if (auto play = PlayLayer::get(); play && !play->m_isPaused) return;
+    if (inGameplay()) return;
     if (!cellLayoutMatches()) return;
     auto scene = CCDirector::get()->getRunningScene();
     auto list = findList(scene);

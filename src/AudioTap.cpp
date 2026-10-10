@@ -200,6 +200,7 @@ void install() {
     delete reference;
     reference = nullptr;
     auto tap = std::make_unique<Tap>();
+    tap->enabled = captureEnabled;
     if (!tap->attach(engine, engine->m_globalChannel, 0)) {
         nextAttach = now + uint64_t(retrySeconds) * 1000000000;
         retrySeconds = std::min(retrySeconds * 2, 30u);
@@ -210,7 +211,6 @@ void install() {
         return;
     }
     effects = tap.release();
-    effects->enabled = captureEnabled;
     attachFailureLogged = false;
     retrySeconds = 1;
     log::info("OBS effects tap attached at {} Hz", effects->rate);
@@ -237,6 +237,7 @@ void enable(bool value) {
     if (effects)
         effects->enabled = value;
 }
+bool enabled() { return captureEnabled; }
 std::optional<uint64_t> wallAtDspClock(unsigned long long clock) {
     if (!effects)
         return std::nullopt;
