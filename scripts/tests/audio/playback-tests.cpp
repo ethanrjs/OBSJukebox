@@ -35,13 +35,11 @@ static void writeRamp(const char* path,bool negative=false) {
     out.write("data",4);word(bytes,4);
     for(unsigned i=0;i<frames;++i){auto sample=int16_t(32768*(.1+double(i)/480000)*(negative?-1:1));word(uint16_t(sample),2);word(uint16_t(sample),2);}
 }
-static void sendState(SongSocket socket,SongLinkPacket p,uint64_t capture,int version=4) {
-    p.version=version;
+static void sendState(SongSocket socket,SongLinkPacket p,uint64_t capture) {
     p.timestamp=capture;
     sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    auto bytes=version==2?SONG_LINK_V2_SIZE:version==3?SONG_LINK_V3_SIZE:version==4?SONG_LINK_V4_SIZE:sizeof(p);
-    auto sent=sendto(socket,reinterpret_cast<const char*>(&p),int(bytes),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-    if(sent!=bytes)check(false,"loopback send succeeds");
+    auto sent=sendto(socket,reinterpret_cast<const char*>(&p),int(sizeof(p)),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+    if(sent!=int(sizeof(p)))check(false,"loopback send succeeds");
 }
 static std::vector<Captured> output() {std::lock_guard lock(capturedMutex);return captured;}
 static void resetOutput(){std::lock_guard lock(capturedMutex);captured.clear();}
@@ -60,10 +58,12 @@ struct Simulation {
     bool started=false;
     std::unique_ptr<SongSource> source;
     std::vector<Captured> output;
+    Game local;                    // sends when a test names no game; on OBS's clock, synced by its first packet
     const Game* answering=nullptr; // the game that answers clock probes
     Simulation() {
         receiver.reset(new Receiver(Receiver::Offline{}));
         source=std::make_unique<SongSource>(nullptr);source->active=true;
+        local=game();answering=&local;
     }
     ~Simulation(){source.reset();receiver.reset();}
     Game game(int64_t offset=0,uint16_t port=50001) {static uint64_t sessions=0;return {++sessions,offset,port,uint16_t(port+1)};}
@@ -81,13 +81,16 @@ struct Simulation {
         receiver->probe(now);answerProbes();
         handle(data,size,port);answerProbes();
     }
-    void send(SongLinkPacket p,uint64_t capture,int version=4,uint16_t port=50001) {
+    // A song packet of any version, sent as is. Versions 2 to 4 came from the v1.0 mod.
+    void sendRaw(SongLinkPacket p,uint64_t capture,int version,uint16_t port) {
         p.version=version;p.timestamp=capture;
         deliver(&p,version==2?SONG_LINK_V2_SIZE:version==3?SONG_LINK_V3_SIZE:version==4?SONG_LINK_V4_SIZE:sizeof(p),port);
     }
-    void send(const Game& game,SongLinkPacket p,uint64_t capture) {p.sessionID=game.session;send(p,game.stamp(capture),5,game.port);}
-    void sendEffects(const EffectsPacket& e,uint16_t port=50001) {deliver(&e,36+e.frames*8,port);}
+    void send(const Game& game,SongLinkPacket p,uint64_t capture) {p.sessionID=game.session;sendRaw(p,game.stamp(capture),5,game.port);}
+    void send(SongLinkPacket p,uint64_t capture) {send(local,p,capture);}
     void sendEffects(const EffectsPacketV2& e,uint16_t port) {deliver(&e,44+e.frames*8,port);}
+    void sendEffects(EffectsPacketV2 e) {e.sessionID=local.session;sendEffects(e,local.effectsPort);}
+    void sendEffects(const EffectsPacket& e,uint16_t port) {deliver(&e,36+e.frames*8,port);}
     // Says hello from the game every 10 ms and answers its clock probes, as SyncedSender does,
     // until the receiver follows the game's session on a clock within 100 ms of OBS's.
     bool synchronize(const Game& game,unsigned epoch=717) {
@@ -131,11 +134,11 @@ private:
 static void pauseTest() {
     Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
-    sim.send(p,sim.now,3);
+    sim.send(p,sim.now);
     sim.start();sim.advance(120000000);
     bool heard=false;for(const auto& b:sim.output)for(float s:b.samples)heard|=s>.1f;
-    check(heard,"legacy v3 music starts");
-    auto pauseAt=sim.now;p.flags=1;p.position=1.12;sim.send(p,pauseAt,3);
+    check(heard,"music starts");
+    auto pauseAt=sim.now;p.flags=1;p.position=1.12;sim.send(p,pauseAt);
     sim.advance(110000000);
     uint64_t firstSilent=0;
     for(const auto& b:sim.output)if(b.wall>pauseAt && !firstSilent)for(size_t i=0;i<b.samples.size()/2;++i){
@@ -266,43 +269,14 @@ static void staleVoiceTest() {
     sim.start();sim.advance(150000000);
     check(Decoder::testOpenCount.load()==opens,"a stale packet does not reopen the song for a dropped voice");
 }
-static void effectsTransitionTest() {
-    Simulation sim;
-    sim.send(SongLinkPacket{},sim.now-200000000);
-    EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=sim.now;
-    sim.sendEffects(initial);
-    sim.advance(5000000);
-    auto base=sim.now;
-    SongLinkPacket p;p.flags=1;p.effectsVolume=.2;sim.send(p,base-100000000);
-    p.flags=0;sim.send(p,base+30000000);
-    p.flags=1;p.effectsVolume=.8;sim.send(p,base+60000000);
-    for(int i=-5;i<12;++i){
-        EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=uint64_t(int64_t(base)+i*10000000LL);
-        std::fill_n(e.samples,960,.25f);
-        sim.sendEffects(e);
-    }
-    sim.advance(5000000);
-    sim.start();sim.advance(180000000);
-    bool correct=true;unsigned count=0;
-    for(const auto& b:sim.output)for(size_t i=0;i<480;++i){
-        auto at=b.timestamp+i*1000000000/48000;
-        if(at<base || at>base+100000000)continue;
-        auto expected=at<base+30000000?.05:at<base+60000000?0:.2;
-        correct&=std::abs(b.samples[i*2]-expected)<.00001;++count;
-    }
-    check(correct && count>4000,"legacy effects gain changes follow the timeline after fallback clock initialization");
-}
 // SFX audio comes from FMOD's mixer thread and keeps arriving while GD's main thread stalls,
 // so a stale status packet must not mute it.
 static void staleStatusEffectsTest() {
     Simulation sim;
-    EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=sim.now;
-    sim.sendEffects(initial);
-    sim.advance(5000000);
     auto base=sim.now;
     SongLinkPacket p;p.flags=1;sim.send(p,base-600000000);
     for(int i=0;i<12;++i){
-        EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=base+i*10000000ULL;
+        EffectsPacketV2 e;e.frames=480;e.sampleRate=48000;e.timestamp=base+i*10000000ULL;
         std::fill_n(e.samples,960,.25f);
         sim.sendEffects(e);
     }
@@ -361,12 +335,10 @@ static void clockSlewTest() {
 static void protocolTest() {
     Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;
-    sim.send(p,0,2);sim.advance(15000000);
-    auto v2=receiver->get();
-    check(v2.connected && v2.packet.version==2 && v2.packet.musicVolume==1 && v2.packet.effectsVolume==1,"v2 packets retain default gains");
     auto at=sim.now;sim.send(p,at);sim.advance(15000000);
     p.epoch=99;sim.send(p,at-1000000);sim.send(p,at+2000000000);
-    sim.send(p,0);sim.send(p,sim.now,6);
+    sim.send(p,0);
+    auto unsupported=p;unsupported.sessionID=sim.local.session;sim.sendRaw(unsupported,sim.now,6,sim.local.port);
     sim.advance(15000000);
     check(receiver->get().packet.timestamp==at && receiver->get().packet.epoch==0,"reordered, stale, future and unsupported packets cannot replace the latest state");
     auto before=receiver->playbackWindow(at-1,at+1);
@@ -374,6 +346,21 @@ static void protocolTest() {
         "reordered packets fill earlier timeline history without replacing a later transition");
     auto initial=receiver->playbackWindow(1,2);
     check(initial.size()==1 && initial.front().flags==0,"future state cannot start music before its timestamp");
+}// The v1.0 mod sends v3 song packets and GDSFX1 effects. OBS plays none of it and asks for a newer mod.
+static void oldModTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.start();
+    for(int i=0;i<10;++i){
+        sim.sendRaw(p,sim.now,3,50001);
+        EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=sim.now;std::fill_n(e.samples,960,.25f);
+        sim.sendEffects(e,50001);
+        sim.advance(10000000);
+    }
+    bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
+    check(!receiver->get().connected && silent,"packets from a mod older than v1.1 play nothing");
+    std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
+    check(detail.find("v1.1")!=std::string::npos,"the source asks for a newer mod while only an old one sends");
 }
 
 struct SyncedSender {
@@ -417,7 +404,7 @@ struct SyncedSender {
     ~SyncedSender(){stop=true;if(replies.joinable())replies.join();closeSocket(socket);}
     uint64_t stamp(uint64_t native) const {return uint64_t(int64_t(native)+clockOffset.load());}
     void send(SongLinkPacket p,uint64_t native) {
-        p.sessionID=session;sendState(socket,p,stamp(native),5);
+        p.sessionID=session;sendState(socket,p,stamp(native));
     }
     bool synchronize(unsigned epoch=717) {
         SongLinkPacket hello;hello.epoch=epoch;hello.flags=0;
@@ -707,28 +694,17 @@ static void tapClockDriftTest() {
 // last sample must blend into the next packet's first; holding it instead crackles at ~94 Hz.
 static void effectsSeamTest(unsigned sampleRate) {
     Simulation sim;
-    sim.send(SongLinkPacket{},sim.now-200000000); // legacy SFX need a song sender first
-    EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=sim.now;
-    sim.sendEffects(initial);
-    sim.advance(5000000);
     auto base=sim.now,first=base+7777;
-    // Linux dates legacy effects by receipt. A ramp ending well before the seams reveals that
-    // shift exactly: its value at any rendered time is the time since the ramp started.
-    EffectsPacket marker;marker.sequence=50;marker.frames=512;marker.sampleRate=8000;marker.timestamp=base-100000000;
-    for(unsigned i=0;i<512;++i)marker.samples[i*2]=marker.samples[i*2+1]=i/1024.f;
-    sim.sendEffects(marker);
     SongLinkPacket p;p.flags=1;sim.send(p,base-50000000);
     auto tone=[&](double frame){return .25*std::sin(frame*2*3.14159265358979*3000/sampleRate);};
     unsigned frames=sampleRate/100;
     for(unsigned k=0;k<12;++k){
-        EffectsPacket e;e.sequence=100+k;e.frames=frames;e.sampleRate=sampleRate;e.timestamp=first+k*10000000ULL;
+        EffectsPacketV2 e;e.sequence=100+k;e.frames=frames;e.sampleRate=sampleRate;e.timestamp=first+k*10000000ULL;
         for(unsigned i=0;i<frames;++i)e.samples[i*2]=e.samples[i*2+1]=float(tone(k*double(frames)+i));
         sim.sendEffects(e);
     }
     sim.advance(5000000);
-    std::array<float,2> ramp{};
-    auto probe=marker.timestamp+32000000;receiver->mixEffects(ramp.data(),1,probe,1);
-    auto mapped=first+(int64_t(probe)-int64_t(std::llround(ramp[0]*1024e9/8000))-int64_t(marker.timestamp));
+    const auto mapped=first;
     sim.start();sim.advance(180000000);
     double worst=0;unsigned count=0;
     for(const auto& b:sim.output)for(size_t i=0;i<480;++i){
@@ -738,29 +714,25 @@ static void effectsSeamTest(unsigned sampleRate) {
         double expected=tone(whole)+(tone(whole+1)-tone(whole))*(u-whole);
         worst=std::max(worst,std::abs(b.samples[i*2]-expected));++count;
     }
-    check(ramp[0]>0 && count>4000 && worst<.0001,sampleRate==44100?
+    check(count>4000 && worst<.0001,sampleRate==44100?
         "44.1 kHz effects blend across packet seams":"48 kHz effects blend across packet seams");
 }
 static void effectsGapTest() {
     Simulation sim;
-    sim.send(SongLinkPacket{},sim.now-200000000); // legacy SFX need a song sender first
+    sim.send(SongLinkPacket{},sim.now-200000000); // effects need a session first
     auto base=sim.now;
     // Consecutive sequence numbers do not prove continuity: the producer may have stalled.
     for(unsigned k=0;k<2;++k){
-        EffectsPacket e;e.sequence=100+k;e.frames=441;e.sampleRate=44100;e.timestamp=base+k*100000000ULL;
+        EffectsPacketV2 e;e.sequence=100+k;e.frames=441;e.sampleRate=44100;e.timestamp=base+k*100000000ULL;
         std::fill_n(e.samples,e.frames*2,k?0.f:.5f);
         sim.sendEffects(e);
     }
     sim.advance(20000000);
-    // Legacy effects are dated by receipt on Linux. Locate the actual first sample on the
-    // rendered timeline instead of assuming the sender's timestamp was left unchanged.
-    std::array<float,9600> observed{};
-    receiver->mixEffects(observed.data(),4800,base,1);
-    auto first=std::find(observed.begin(),observed.end(),.5f);
-    bool received=first!=observed.end();
-    auto mappedBase=base+uint64_t((first-observed.begin())/2)*1000000000/48000;
+    std::array<float,2> first{};
+    receiver->mixEffects(first.data(),1,base,1);
+    bool received=first[0]==.5f;
     std::array<float,960> audio{};
-    receiver->mixEffects(audio.data(),480,mappedBase+50000000,1);
+    receiver->mixEffects(audio.data(),480,base+50000000,1);
     check(received && std::all_of(audio.begin(),audio.end(),[](float s){return s==0;}),
         "SFX interpolation leaves real gaps silent at 44.1 kHz");
 }
@@ -820,7 +792,7 @@ int main(int argc,char** argv){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();oldModTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();

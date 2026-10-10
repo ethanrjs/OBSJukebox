@@ -9,6 +9,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -25,7 +26,6 @@
 #include <pthread/qos.h>
 #endif
 #if defined(__linux__)
-#include "LinuxAudioClock.hpp"
 #include "LinuxPaths.hpp"
 #endif
 
@@ -49,17 +49,13 @@ struct LinkState {
     Clock::time_point received{};
     bool connected = false;
 };
-// Checks a song packet's size, version and fields. Returns nothing if any of them is invalid.
+// Checks a v5 song packet's size and fields. Returns nothing if any of them is invalid.
 static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, size_t size) {
     SongLinkPacket p{};
-    if (size != sizeof(p) && size != SONG_LINK_V4_SIZE && size != SONG_LINK_V3_SIZE && size != SONG_LINK_V2_SIZE)
+    if (size != sizeof(p))
         return std::nullopt;
     memcpy(&p, data, size);
-    if (!((size == sizeof(p) && p.version == 5) ||
-          (size == SONG_LINK_V4_SIZE && p.version == 4) ||
-          (size == SONG_LINK_V3_SIZE && p.version == 3) ||
-          (size == SONG_LINK_V2_SIZE && p.version == 2)) ||
-        memcmp(p.magic, "GDSONG1", 8))
+    if (p.version != 5 || memcmp(p.magic, "GDSONG1", 8) || !p.sessionID)
         return std::nullopt;
     if (!std::isfinite(p.musicVolume) || p.musicVolume < 0 || p.musicVolume > 1 ||
         !std::isfinite(p.effectsVolume) || p.effectsVolume < 0 || p.effectsVolume > 1 ||
@@ -85,35 +81,26 @@ static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, 
 }
 struct EffectsInput {
     EffectsPacket packet;
-    uint64_t session = 0; // GDSFX2 only
-    bool modern = false;  // GDSFX2 rather than GDSFX1
+    uint64_t session = 0;
 };
-// Checks an effects packet (GDSFX2, or the older GDSFX1) and converts it to one type.
+// Checks a GDSFX2 effects packet and converts it to the type the receiver stores.
 static std::optional<EffectsInput> parseEffectsPacket(const unsigned char *data, size_t size) {
+    constexpr size_t header = offsetof(EffectsPacketV2, samples);
+    if (size < header || size > sizeof(EffectsPacketV2) || memcmp(data, "GDSFX2\0", 8))
+        return std::nullopt;
+    EffectsPacketV2 p;
+    memcpy(&p, data, size);
+    if (p.version != 2 || p.frames > 512 || size != header + p.frames * 2 * sizeof(float))
+        return std::nullopt;
     EffectsInput input;
     auto &effect = input.packet;
-    input.modern = size >= 44 && !memcmp(data, "GDSFX2\0", 8);
-    if (input.modern) {
-        if (size > sizeof(EffectsPacketV2))
-            return std::nullopt;
-        EffectsPacketV2 p;
-        memcpy(&p, data, size);
-        if (p.version != 2 || p.frames > 512 || size != 44 + p.frames * 8)
-            return std::nullopt;
-        effect.sequence = p.sequence;
-        effect.sampleRate = p.sampleRate;
-        effect.frames = p.frames;
-        effect.timestamp = p.timestamp;
-        effect.stream = p.stream;
-        input.session = p.sessionID;
-        std::copy_n(p.samples, p.frames * 2, effect.samples);
-    } else {
-        if (size < 36 || memcmp(data, "GDSFX1\0", 8) || size > sizeof(effect))
-            return std::nullopt;
-        memcpy(&effect, data, size);
-        if (effect.version != 1 || effect.frames > 512 || size != 36 + effect.frames * 8)
-            return std::nullopt;
-    }
+    effect.sequence = p.sequence;
+    effect.sampleRate = p.sampleRate;
+    effect.frames = p.frames;
+    effect.timestamp = p.timestamp;
+    effect.stream = p.stream;
+    input.session = p.sessionID;
+    std::copy_n(p.samples, p.frames * 2, effect.samples);
     if (effect.frames < 1 || effect.sampleRate < 8000 || effect.sampleRate > 192000 || effect.stream > 1)
         return std::nullopt;
 #ifndef OBS_JUKEBOX_QA
@@ -124,6 +111,17 @@ static std::optional<EffectsInput> parseEffectsPacket(const unsigned char *data,
         if (!std::isfinite(effect.samples[i]))
             return std::nullopt;
     return input;
+}
+// The v1.0 mod sent v3 song packets and GDSFX1 effects, before clock sync. Later mods send v5 and
+// GDSFX2.
+static bool fromModBeforeV11(const unsigned char *data, size_t size) {
+    if (size >= 8 && !memcmp(data, "GDSFX1\0", 8))
+        return true;
+    uint32_t version = 0;
+    if (size < offsetof(SongLinkPacket, version) + sizeof(version) || memcmp(data, "GDSONG1", 8))
+        return false;
+    memcpy(&version, data + offsetof(SongLinkPacket, version), sizeof(version));
+    return version < 5;
 }
 // Effects more than a second from now are dropped.
 static bool effectsCurrent(uint64_t timestamp, uint64_t now) {
@@ -142,7 +140,7 @@ class Receiver {
     std::array<std::deque<PlaybackPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
     std::deque<EffectsPacket> effects, pendingEffects;
     LinkClock clock;
-    uint64_t session = 0, lastProbe = 0, lastSongReceived = 0;
+    uint64_t session = 0, lastProbe = 0, lastSongReceived = 0, lastOldModPacket = 0;
     std::array<uint64_t, 2> lastEffectsReceived{};
     std::array<uint16_t, 2> effectsPort{};
     static constexpr uint64_t sessionTimeoutNs = 2000000000ULL;
@@ -150,9 +148,6 @@ class Receiver {
     sockaddr_in peer{};
     std::deque<SongLinkPacket> pending;
     FILE *reference = nullptr;
-#if defined(__linux__)
-    LinuxAudioClock effectsClock;
-#endif
     void queueEffects(const EffectsPacket &effect) {
         auto next = std::lower_bound(effects.begin(), effects.end(), effect.timestamp,
                                      [](const auto &a, uint64_t t) { return a.timestamp < t; });
@@ -199,7 +194,7 @@ class Receiver {
         // after a clock correction. Translated timestamps alone cannot identify the same sample.
         if (existing != voice.end())
             p.timestamp = existing->packet.timestamp;
-        else if (p.version >= 5 && !clock.translate(p.timestamp))
+        else if (!clock.translate(p.timestamp))
             return;
         if (p.timestamp > now + 100000000 || p.timestamp + 1000000000 < now)
             return;
@@ -235,7 +230,12 @@ class Receiver {
             return;
         if (!memcmp(data, "GDCLK1\0", 8))
             handleClockReply(data, size, from, now);
-        else if (!memcmp(data, "GDSFX", 5)) {
+        else if (fromModBeforeV11(data, size)) {
+            std::lock_guard lock(mutex);
+            if (!lastOldModPacket)
+                blog(LOG_WARNING, "[OBS Jukebox] Ignoring packets from an OBS Jukebox mod older than v1.1");
+            lastOldModPacket = now;
+        } else if (!memcmp(data, "GDSFX", 5)) {
             if (auto effect = parseEffectsPacket(data, size))
                 handleEffects(*effect, from, now);
         } else if (auto song = parseSongPacket(data, size))
@@ -268,31 +268,17 @@ class Receiver {
     void handleEffects(const EffectsInput &input, const sockaddr_in &from, uint64_t now) {
         auto effect = input.packet;
         std::lock_guard lock(mutex);
-        if (input.modern) {
-            if (!session || input.session != session || !pinEffectsPort(effect.stream, from.sin_port, now))
-                return;
-            if (!clock.valid()) {
-                if (effect.stream == 0) {
-                    pendingEffects.push_back(effect);
-                    while (pendingEffects.size() > 128)
-                        pendingEffects.pop_front();
-                }
-                return;
+        if (!session || input.session != session || !pinEffectsPort(effect.stream, from.sin_port, now))
+            return;
+        if (!clock.valid()) {
+            if (effect.stream == 0) {
+                pendingEffects.push_back(effect);
+                while (pendingEffects.size() > 128)
+                    pendingEffects.pop_front();
             }
-            if (!clock.translate(effect.timestamp))
-                return;
-        } else {
-            // v2-v4 song packets and GDSFX1 remain compatible with pre-clock-sync
-            // releases, but may never inject audio into an active v5 session.
-            if (session || !lastSongReceived || from.sin_addr.s_addr != peer.sin_addr.s_addr ||
-                !pinEffectsPort(effect.stream, from.sin_port, now))
-                return;
-#if defined(__linux__)
-            if (effectsClock.translate(effect.timestamp, now))
-                effects.clear();
-#endif
+            return;
         }
-        if (!effectsCurrent(effect.timestamp, now))
+        if (!clock.translate(effect.timestamp) || !effectsCurrent(effect.timestamp, now))
             return;
         if (effect.stream == 1) {
             if (reference) {
@@ -303,37 +289,22 @@ class Receiver {
         }
         queueEffects(effect);
     }
-    void handleSong(SongLinkPacket p, const sockaddr_in &from, uint64_t now) {
-        if (p.version < 4)
-            p.timestamp = now;
+    void handleSong(const SongLinkPacket &p, const sockaddr_in &from, uint64_t now) {
         std::lock_guard lock(mutex);
-        if (p.version >= 5) {
-            if (!p.sessionID)
+        if (session != p.sessionID || from.sin_port != peer.sin_port) {
+            if (lastSongReceived && now - lastSongReceived <= sessionTimeoutNs)
                 return;
-            if (session != p.sessionID || from.sin_port != peer.sin_port) {
-                if (lastSongReceived && now - lastSongReceived <= sessionTimeoutNs)
-                    return;
-                blog(LOG_INFO, "[OBS Jukebox] Adopting game session %llu",
-                     static_cast<unsigned long long>(p.sessionID));
-                resetSession(p.sessionID);
-                peer = from;
-            }
-            lastSongReceived = now;
-            if (!clock.valid()) {
-                pending.push_back(p);
-                while (pending.size() > 256)
-                    pending.pop_front();
-                probe(now);
-                return;
-            }
-        } else {
-            if (lastSongReceived && (session || from.sin_port != peer.sin_port) &&
-                now - lastSongReceived <= sessionTimeoutNs)
-                return;
-            if (session || (lastSongReceived && from.sin_port != peer.sin_port))
-                resetSession(0);
+            blog(LOG_INFO, "[OBS Jukebox] Adopting game session %llu", static_cast<unsigned long long>(p.sessionID));
+            resetSession(p.sessionID);
             peer = from;
-            lastSongReceived = now;
+        }
+        lastSongReceived = now;
+        if (!clock.valid()) {
+            pending.push_back(p);
+            while (pending.size() > 256)
+                pending.pop_front();
+            probe(now);
+            return;
         }
         accept(p, now);
     }
@@ -401,6 +372,11 @@ class Receiver {
             closeSocket(sock);
     }
     bool available() const { return sock != BAD_SOCKET; }
+    // Whether a mod older than v1.1 has sent packets in the last 2 s.
+    bool oldModSending(uint64_t now) {
+        std::lock_guard lock(mutex);
+        return lastOldModPacket && now - lastOldModPacket <= sessionTimeoutNs;
+    }
     // GD's main thread sends song packets and FMOD's mixer thread sends effects. Effects that keep
     // arriving after song packets stop mean the main thread is stalled (as while GD tears down a
     // level), and the game is still playing its music.
@@ -739,9 +715,10 @@ struct SongSource {
         for (auto &voice : voices)
             if (voice && !stalled && timestamp > voice->lastUsed + staleNs)
                 voice.reset();
+        bool oldMod = !connected && linkReceiver->oldModSending(now);
         std::lock_guard lock(mutex);
-        detail = !linkReceiver->available()
-                     ? "Game link unavailable: local UDP port is already in use."
+        detail = oldMod ? "Update the OBS Jukebox mod in Geometry Dash to v1.1 or later."
+                 : !linkReceiver->available() ? "Game link unavailable: local UDP port is already in use."
                  : !decoderError.empty() ? decoderError
                  : !connected            ? "Waiting for Geometry Dash"
                  : !latest.song[0]       ? noSongDetail

@@ -29,7 +29,7 @@ jobs:
         run: python3 tools/qa/test_link_protocol.py
       - name: Check timestamped playback
         run: bash scripts/tests/audio/run.sh
-      - name: Check Proton paths and audio clock
+      - name: Check Proton paths
         run: |
           c++ -std=c++20 -O2 tools/qa/linux-paths-check.cpp -o build-linux/linux-paths-check
           build-linux/linux-paths-check .

@@ -7,7 +7,7 @@ static void receiverIsolationTest() {
     for(int i=0;i<5;++i){sim.send(second,packet,sim.now);sim.advance(10000000);}
     check(receiver->get().packet.sessionID==first.session,"fresh session rejects a competing game sender");
     packet.sessionID=first.session;
-    sim.send(packet,first.stamp(sim.now),5,50005);
+    sim.sendRaw(packet,first.stamp(sim.now),5,50005);
     sim.advance(20000000);
     check(receiver->get().packet.epoch!=811,"same session from another song port is rejected");
     sim.advance(2050000000);
@@ -78,11 +78,12 @@ static void receiverFloodTest() {
 static void receiverLifetimeTest() {
     receiver=std::make_shared<Receiver>();
     std::weak_ptr<Receiver> lifetime=receiver;
-    auto sender=::socket(AF_INET,SOCK_DGRAM,0);
+    SyncedSender sender(0);
+    check(sender.synchronize(),"receiver lifetime test synchronizes its sender");
     resetOutput();
     SongLinkPacket packet;packet.flags=3;packet.position=.5;
     std::strcpy(packet.path,"artifacts/audio-tests/ramp.wav");
-    sendState(sender,packet,os_gettime_ns());
+    sender.send(packet,os_gettime_ns());
     const auto handles=Decoder::testOpenHandles.load();
     {
         SongSource source(nullptr);source.active=true;
@@ -102,5 +103,4 @@ static void receiverLifetimeTest() {
             "source continues safely and becomes silent after receiver owner reset");
     }
     check(lifetime.expired(),"last source releases retained receiver on destruction");
-    closeSocket(sender);
 }

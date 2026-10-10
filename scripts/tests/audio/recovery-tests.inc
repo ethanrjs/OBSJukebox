@@ -1,14 +1,15 @@
 
 static void sourceRecoveryTest(bool failedSeek) {
     receiver=std::make_shared<Receiver>();resetOutput();
-    auto sender=::socket(AF_INET,SOCK_DGRAM,0);
+    SyncedSender sender(0);
+    check(sender.synchronize(),"recovery test synchronizes its sender");
     const char* missing="artifacts/audio-tests/recovered.wav";
     if(!failedSeek)std::filesystem::remove(missing);
     SongLinkPacket packet;packet.flags=3;packet.epoch=91;
     std::strcpy(packet.path,failedSeek?"artifacts/audio-tests/short.mp3":missing);
     auto sendFor=[&](int milliseconds,double position){
         for(int elapsed=0;elapsed<milliseconds;elapsed+=10){
-            packet.position=position+elapsed/1000.;sendState(sender,packet,os_gettime_ns());
+            packet.position=position+elapsed/1000.;sender.send(packet,os_gettime_ns());
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     };
@@ -27,18 +28,19 @@ static void sourceRecoveryTest(bool failedSeek) {
         std::cout<<(failedSeek?"Seek":"Missing file")<<" recovery RMS: "<<rms<<", blocks: "<<blocks<<'\n';
         check(blocks>=20 && rms>.005,failedSeek?"MP3 restarts after failed beyond-end seek":"missing file recovers at same path and epoch after file appears");
     }
-    closeSocket(sender);receiver.reset();
+    receiver.reset();
 }
 
 static void sourceResyncRecoveryTest() {
     receiver=std::make_shared<Receiver>();resetOutput();
-    auto sender=::socket(AF_INET,SOCK_DGRAM,0);
+    SyncedSender sender(0);
+    check(sender.synchronize(),"output resync test synchronizes its sender");
     SongLinkPacket packet;packet.flags=3;packet.position=.5;
     std::strcpy(packet.path,"artifacts/audio-tests/ramp.wav");
     {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         auto sendFor=[&](unsigned count){for(unsigned i=0;i<count;++i){
-            sendState(sender,packet,os_gettime_ns());std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sender.send(packet,os_gettime_ns());std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }};
         sendFor(20);
         bool heard=false;for(const auto& block:output())for(float sample:block.samples)heard|=sample>.05f;
@@ -51,7 +53,7 @@ static void sourceResyncRecoveryTest() {
         }
         check(blocks>=20 && audible>=blocks-2,"music resumes after injected output stall resynchronizes timestamp grid");
     }
-    closeSocket(sender);receiver.reset();
+    receiver.reset();
 }
 
 static void decoderSeekRecoveryTest() {
@@ -122,7 +124,8 @@ static void decoderWatchdogSilenceTest() {
 
 static void decoderWatchdogBackoffTest() {
     receiver=std::make_shared<Receiver>();resetOutput();
-    auto sender=::socket(AF_INET,SOCK_DGRAM,0);
+    SyncedSender sender(0);
+    check(sender.synchronize(),"decoder backoff test synchronizes its sender");
     SongLinkPacket packet;packet.flags=3;packet.position=.5;
     std::strcpy(packet.path,"artifacts/audio-tests/ramp.wav");
     Decoder::testStarveAllReads=true;
@@ -130,7 +133,7 @@ static void decoderWatchdogBackoffTest() {
     {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         for(unsigned i=0;i<170;++i){
-            sendState(sender,packet,os_gettime_ns());
+            sender.send(packet,os_gettime_ns());
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         auto attempts=Decoder::testOpenCount.load()-opens;
@@ -138,12 +141,12 @@ static void decoderWatchdogBackoffTest() {
         Decoder::testStarveAllReads=false;
         auto recoverAt=os_gettime_ns();
         for(unsigned i=0;i<40;++i){
-            sendState(sender,packet,os_gettime_ns());
+            sender.send(packet,os_gettime_ns());
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         unsigned heard=0;
         for(const auto& block:output())if(block.timestamp>recoverAt+150000000 && block.samples.front()>.1f)++heard;
         check(heard>=10,"music recovers after a persistent decoder fault clears");
     }
-    Decoder::testStarveAllReads=false;closeSocket(sender);receiver.reset();
+    Decoder::testStarveAllReads=false;receiver.reset();
 }
