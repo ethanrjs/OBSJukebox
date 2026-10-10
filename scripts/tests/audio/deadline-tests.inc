@@ -27,7 +27,7 @@ static void musicDeadlineTest(bool delayedOpen) {
         }
     }
     Decoder::testOpenDelayMs=0;
-    auto blocks=output();uint64_t maximumGap=0;unsigned earlyEffects=0;bool music=false;
+    auto blocks=capturedBlocks();uint64_t maximumGap=0;unsigned earlyEffects=0;bool music=false;
     for(size_t i=1;i<blocks.size();++i)maximumGap=std::max(maximumGap,blocks[i].wall-blocks[i-1].wall);
     for(const auto& block:blocks){
         for(float sample:block.samples)music|=std::abs(sample)>.04f;

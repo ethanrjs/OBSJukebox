@@ -41,12 +41,16 @@ static void sendState(SongSocket socket,SongLinkPacket p,uint64_t capture) {
     auto sent=sendto(socket,reinterpret_cast<const char*>(&p),int(sizeof(p)),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
     if(sent!=int(sizeof(p)))check(false,"loopback send succeeds");
 }
-static std::vector<Captured> output() {std::lock_guard lock(capturedMutex);return captured;}
+static std::vector<Captured> capturedBlocks() {std::lock_guard lock(capturedMutex);return captured;}
 static void resetOutput(){std::lock_guard lock(capturedMutex);captured.clear();}
 // Runs a receiver and a source on simulated time, with no sockets, threads or sleeps. The receiver
 // polls every 10 ms, as its thread does. After start(), the source outputs the block starting at
 // t when the clock reaches t + bufferingNs, as its output thread does. Packets arrive the moment
 // they are sent.
+// What it leaves out: music renders at output time, about 20 ms later than the real decoder thread
+// does, and clock probes have no round trip. Clock::now() is still real time, so the retry and
+// recovery timers and the "connected" test don't follow the simulated clock. The offline receiver
+// reports the game link as unavailable. run() and the decode queue only run in the real-thread tests.
 struct Simulation {
     // A game whose clock is `offset` ns from OBS's. Songs and effects come from separate ports.
     struct Game {
@@ -66,7 +70,8 @@ struct Simulation {
         local=game();answering=&local;
     }
     ~Simulation(){source.reset();receiver.reset();}
-    Game game(int64_t offset=0,uint16_t port=50001) {static uint64_t sessions=0;return {++sessions,offset,port,uint16_t(port+1)};}
+    uint64_t sessions=0;
+    Game game(int64_t offset=0,uint16_t port=50001) {return {++sessions,offset,port,uint16_t(port+1)};}
     const std::deque<uint64_t>& probes() const {return receiver->probes;}
     void reply(const Game& game,uint64_t t1,uint64_t senderTime) {
         ClockSyncPacket p;p.kind=2;p.sessionID=game.session;p.t1=t1;p.t2=p.t3=senderTime;
@@ -81,10 +86,10 @@ struct Simulation {
         receiver->probe(now);answerProbes();
         handle(data,size,port);answerProbes();
     }
-    // A song packet of any version, sent as is. Versions 2 to 4 came from the v1.0 mod.
+    // A song packet of any version, sent as is. The v1.0 mod sent version 3.
     void sendRaw(SongLinkPacket p,uint64_t capture,int version,uint16_t port) {
         p.version=version;p.timestamp=capture;
-        deliver(&p,version==2?SONG_LINK_V2_SIZE:version==3?SONG_LINK_V3_SIZE:version==4?SONG_LINK_V4_SIZE:sizeof(p),port);
+        deliver(&p,version==3?SONG_LINK_V3_SIZE:sizeof(p),port);
     }
     void send(const Game& game,SongLinkPacket p,uint64_t capture) {p.sessionID=game.session;sendRaw(p,game.stamp(capture),5,game.port);}
     void send(SongLinkPacket p,uint64_t capture) {send(local,p,capture);}
@@ -92,7 +97,8 @@ struct Simulation {
     void sendEffects(EffectsPacketV2 e) {e.sessionID=local.session;sendEffects(e,local.effectsPort);}
     void sendEffects(const EffectsPacket& e,uint16_t port) {deliver(&e,36+e.frames*8,port);}
     // Says hello from the game every 10 ms and answers its clock probes, as SyncedSender does,
-    // until the receiver follows the game's session on a clock within 100 ms of OBS's.
+    // until the receiver follows the game's session on a clock within 100 ms of OBS's. The game
+    // keeps answering probes afterwards, until another one synchronizes.
     bool synchronize(const Game& game,unsigned epoch=717) {
         answering=&game;
         SongLinkPacket hello;hello.epoch=epoch;hello.flags=0;
@@ -346,21 +352,24 @@ static void protocolTest() {
         "reordered packets fill earlier timeline history without replacing a later transition");
     auto initial=receiver->playbackWindow(1,2);
     check(initial.size()==1 && initial.front().flags==0,"future state cannot start music before its timestamp");
-}// The v1.0 mod sends v3 song packets and GDSFX1 effects. OBS plays none of it and asks for a newer mod.
-static void oldModTest() {
+}
+// The v1.0 mod sends v3 song packets and GDSFX1 effects. OBS plays neither and asks for a newer mod,
+// whichever of the two arrives.
+static void oldModTest(bool songs,bool effects) {
     Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
     sim.start();
     for(int i=0;i<10;++i){
-        sim.sendRaw(p,sim.now,3,50001);
+        if(songs)sim.sendRaw(p,sim.now,3,50001);
         EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=sim.now;std::fill_n(e.samples,960,.25f);
-        sim.sendEffects(e,50001);
+        if(effects)sim.sendEffects(e,50001);
         sim.advance(10000000);
     }
     bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
-    check(!receiver->get().connected && silent,"packets from a mod older than v1.1 play nothing");
     std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
-    check(detail.find("v1.1")!=std::string::npos,"the source asks for a newer mod while only an old one sends");
+    check(!receiver->get().connected && silent && detail.find("v1.1")!=std::string::npos,
+        songs?"v3 song packets play nothing and ask for a mod of v1.1 or later":
+        "GDSFX1 effects play nothing and ask for a mod of v1.1 or later");
 }
 
 struct SyncedSender {
@@ -784,6 +793,11 @@ static void senderTest() {
 int main(int argc,char** argv){
     // --skip-timing leaves out the tests that need the machine to meet real-time audio deadlines.
     const bool timing=!(argc>1 && std::string(argv[1])=="--skip-timing");
+    if(argc>2 || (argc==2 && timing)){std::cerr<<"Usage: playback-tests [--skip-timing]\n";return 2;}
+#ifdef __APPLE__
+    // The real-thread tests send from this thread; give it the scheduling the plugin's audio threads use.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+#endif
 #ifdef _WIN32
     _putenv_s("OBS_JUKEBOX_TEST_PORT","49177");
 #else
@@ -792,7 +806,7 @@ int main(int argc,char** argv){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();oldModTest();
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();oldModTest(true,false);oldModTest(false,true);
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();

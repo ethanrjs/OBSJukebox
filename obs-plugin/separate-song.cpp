@@ -112,10 +112,10 @@ static std::optional<EffectsInput> parseEffectsPacket(const unsigned char *data,
             return std::nullopt;
     return input;
 }
-// The v1.0 mod sent v3 song packets and GDSFX1 effects, before clock sync. Later mods send v5 and
-// GDSFX2.
+// A GDSONG1 packet below version 5, or any GDSFX1 packet, comes from a mod older than v1.1: v1.0 sent
+// v3 song packets and GDSFX1 effects, before clock sync. handle() has checked that size >= 8.
 static bool fromModBeforeV11(const unsigned char *data, size_t size) {
-    if (size >= 8 && !memcmp(data, "GDSFX1\0", 8))
+    if (!memcmp(data, "GDSFX1\0", 8))
         return true;
     uint32_t version = 0;
     if (size < offsetof(SongLinkPacket, version) + sizeof(version) || memcmp(data, "GDSONG1", 8))
@@ -123,10 +123,18 @@ static bool fromModBeforeV11(const unsigned char *data, size_t size) {
     memcpy(&version, data + offsetof(SongLinkPacket, version), sizeof(version));
     return version < 5;
 }
-// Effects more than a second from now are dropped.
+// Whether an effect is within a second of now.
 static bool effectsCurrent(uint64_t timestamp, uint64_t now) {
     return timestamp <= now + 1000000000 && timestamp + 1000000000 >= now;
 }
+// Time from t to now, or 0 if t is later. Callers read now before taking the lock that guards t, so
+// the receiver thread may have stored a later t in between.
+static uint64_t since(uint64_t t, uint64_t now) { return now > t ? now - t : 0; }
+// OBS takes audio in 10 ms blocks of 480 stereo frames at 48 kHz.
+constexpr size_t blockFrames = 480;
+constexpr uint32_t blockRate = 48000;
+using AudioBlock = std::array<float, blockFrames * 2>;
+
 class Receiver {
     SongSocket sock = BAD_SOCKET;
     std::thread worker;
@@ -372,18 +380,18 @@ class Receiver {
             closeSocket(sock);
     }
     bool available() const { return sock != BAD_SOCKET; }
-    // Whether a mod older than v1.1 has sent packets in the last 2 s.
+    // Whether a mod older than v1.1 has sent packets within sessionTimeoutNs.
     bool oldModSending(uint64_t now) {
         std::lock_guard lock(mutex);
-        return lastOldModPacket && now - lastOldModPacket <= sessionTimeoutNs;
+        return lastOldModPacket && since(lastOldModPacket, now) <= sessionTimeoutNs;
     }
     // GD's main thread sends song packets and FMOD's mixer thread sends effects. Effects that keep
     // arriving after song packets stop mean the main thread is stalled (as while GD tears down a
     // level), and the game is still playing its music.
     bool mainThreadStalled(uint64_t now) {
         std::lock_guard lock(mutex);
-        return lastSongReceived && lastEffectsReceived[0] && now - lastEffectsReceived[0] < 100000000 &&
-               now - lastSongReceived > 200000000;
+        return lastSongReceived && lastEffectsReceived[0] && since(lastEffectsReceived[0], now) < 100000000 &&
+               since(lastSongReceived, now) > 200000000;
     }
     LinkState get() {
         std::lock_guard lock(mutex);
@@ -433,10 +441,10 @@ class Receiver {
             double delta = (double(start) - double(p.timestamp)) / 1e9;
             double lastTime = double(p.frames - 1) / p.sampleRate;
             double length = next ? (double(next->timestamp) - double(p.timestamp)) / 1e9 : duration;
-            if (delta >= length || delta + double(frames) / 48000 < 0)
+            if (delta >= length || delta + double(frames) / blockRate < 0)
                 continue;
             for (size_t i = 0; i < frames; ++i) {
-                double time = delta + double(i) / 48000;
+                double time = delta + double(i) / blockRate;
                 if (time < 0 || time >= length)
                     continue;
                 unsigned a = std::min(unsigned(time * p.sampleRate), p.frames - 1);
@@ -454,10 +462,6 @@ class Receiver {
 };
 static std::shared_ptr<Receiver> receiver;
 
-// OBS takes audio in 10 ms blocks of 480 stereo frames at 48 kHz.
-constexpr size_t blockFrames = 480;
-constexpr uint32_t blockRate = 48000;
-using AudioBlock = std::array<float, blockFrames * 2>;
 // The first frame of the block starting at `start` that is at or after `at`.
 static size_t frameAt(uint64_t start, uint64_t at) {
     return at <= start ? size_t(0)
@@ -488,7 +492,8 @@ struct SongSource {
     std::string detail = noSongDetail;
     std::thread worker, decoderWorker;
     std::shared_ptr<Receiver> linkReceiver;
-    static constexpr uint64_t blockNs = 10000000, bufferingNs = 40000000, staleNs = 400000000;
+    static constexpr uint64_t blockNs = blockFrames * 1000000000ULL / blockRate, bufferingNs = 40000000,
+                              staleNs = 400000000;
     // The output thread owns no decoder or filesystem object. A bounded queue
     // carries timestamped music blocks; missed deadlines produce silence while SFX continues.
     struct MusicBlock {
@@ -553,7 +558,7 @@ struct SongSource {
                     output[j * 2 + ch] += tail[tailRead * 2 + ch];
         }
     };
-    // Only the decoder thread touches these.
+    // Only the decoder thread touches these (the audio tests call renderMusic from their own thread).
     std::array<std::unique_ptr<Voice>, SONG_LINK_MAX_CHANNELS> voices;
     AudioBlock voiceAudio{};
 #if defined(__linux__)
@@ -601,7 +606,7 @@ struct SongSource {
     }
     // Adds `frames` frames of one voice, as packet p describes them from `time`, to `output`. A
     // packet that is no longer live only fades out what was playing.
-    void renderVoice(Voice &v, int channel, const SongLinkPacket &p, float *output, size_t frames, uint64_t time,
+    void renderVoice(Voice &v, const SongLinkPacket &p, float *output, size_t frames, uint64_t time,
                      bool live, std::string &decoderError) {
         v.lastUsed = p.timestamp;
         if (!live && !v.wasPlaying && v.tailRead >= declickFrames)
@@ -665,7 +670,7 @@ struct SongSource {
                 v.lastEpoch = ~0u;
                 playing = false;
                 v.starvedSince = 0;
-                blog(LOG_WARNING, "[OBS Jukebox] Recovering stalled music decoder on channel %d", channel);
+                blog(LOG_WARNING, "[OBS Jukebox] Recovering stalled music decoder on channel %d", p.channelID);
             }
         } else {
             v.starvedSince = 0;
@@ -705,10 +710,10 @@ struct SongSource {
             forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
                 size_t stale = stalled ? end : std::clamp(frameAt(timestamp, p.timestamp + staleNs), first, end);
                 if (stale > first)
-                    renderVoice(v, channel, p, audio.data() + first * 2, stale - first, frameTime(timestamp, first),
+                    renderVoice(v, p, audio.data() + first * 2, stale - first, frameTime(timestamp, first),
                                 true, decoderError);
                 if (end > stale)
-                    renderVoice(v, channel, p, audio.data() + stale * 2, end - stale, frameTime(timestamp, stale),
+                    renderVoice(v, p, audio.data() + stale * 2, end - stale, frameTime(timestamp, stale),
                                 false, decoderError);
             });
         }
@@ -754,7 +759,7 @@ struct SongSource {
             }
             timestamp += blockNs;
         }
-        // Each decoder started COM on this thread when it opened, so it has to close here too.
+        // On Windows each decoder started COM on this thread when it opened, so it has to close here too.
         for (auto &voice : voices)
             voice.reset();
     }
@@ -796,7 +801,7 @@ struct SongSource {
         uint64_t timestamp = os_gettime_ns() - bufferingNs + blockNs;
         wantedTimestamp = timestamp;
         decoderWorker = std::thread([this] { decodeMusic(); });
-        auto next = Clock::now() + std::chrono::milliseconds(10);
+        auto next = Clock::now() + std::chrono::nanoseconds(blockNs);
         while (!stop) {
             std::this_thread::sleep_until(next);
 #ifdef OBS_JUKEBOX_QA
@@ -812,7 +817,7 @@ struct SongSource {
             block.timestamp = timestamp;
             obs_source_output_audio(source, &block);
             timestamp += blockNs;
-            next += std::chrono::milliseconds(10);
+            next += std::chrono::nanoseconds(blockNs);
             auto now = Clock::now();
             if (next < now - std::chrono::milliseconds(100)) {
                 next = now;

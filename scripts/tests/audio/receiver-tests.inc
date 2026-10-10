@@ -1,4 +1,4 @@
-// Included after SyncedSender and the shared test helpers.
+// Included after Simulation, SyncedSender and the shared test helpers.
 static void receiverIsolationTest() {
     Simulation sim;
     auto first=sim.game(0,50001),second=sim.game(0,50003);
@@ -98,7 +98,7 @@ static void receiverLifetimeTest() {
         check(!lifetime.expired(),"live source retains receiver after module reference is released");
         std::this_thread::sleep_for(std::chrono::milliseconds(600));
         check(Decoder::testOpenHandles.load()==handles,"stale voice releases its decoder file handle while source remains alive");
-        auto blocks=output();
+        auto blocks=capturedBlocks();
         check(blocks.size()>40 && std::all_of(blocks.back().samples.begin(),blocks.back().samples.end(),[](float sample){return sample==0;}),
             "source continues safely and becomes silent after receiver owner reset");
     }

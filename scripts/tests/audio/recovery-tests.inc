@@ -21,7 +21,7 @@ static void sourceRecoveryTest(bool failedSeek) {
         auto recoveredAt=os_gettime_ns();
         sendFor(failedSeek?500:2000,0);
         unsigned blocks=0;double squares=0;unsigned samples=0;
-        for(const auto& block:output())if(block.wall>recoveredAt+(failedSeek?100000000:1300000000)){
+        for(const auto& block:capturedBlocks())if(block.wall>recoveredAt+(failedSeek?100000000:1300000000)){
             ++blocks;for(float sample:block.samples){squares+=sample*sample;++samples;}
         }
         double rms=samples?std::sqrt(squares/samples):0;
@@ -43,12 +43,12 @@ static void sourceResyncRecoveryTest() {
             sender.send(packet,os_gettime_ns());std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }};
         sendFor(20);
-        bool heard=false;for(const auto& block:output())for(float sample:block.samples)heard|=sample>.05f;
+        bool heard=false;for(const auto& block:capturedBlocks())for(float sample:block.samples)heard|=sample>.05f;
         check(heard,"output resync test starts audible music");
         auto delayedAt=os_gettime_ns();source.testOutputDelayMs=180;
         sendFor(70);
         unsigned audible=0,blocks=0;
-        for(const auto& block:output())if(block.wall>delayedAt+300000000){
+        for(const auto& block:capturedBlocks())if(block.wall>delayedAt+300000000){
             ++blocks;if(std::any_of(block.samples.begin(),block.samples.end(),[](float sample){return sample>.05f;}))++audible;
         }
         check(blocks>=20 && audible>=blocks-2,"music resumes after injected output stall resynchronizes timestamp grid");
@@ -145,7 +145,7 @@ static void decoderWatchdogBackoffTest() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         unsigned heard=0;
-        for(const auto& block:output())if(block.timestamp>recoverAt+150000000 && block.samples.front()>.1f)++heard;
+        for(const auto& block:capturedBlocks())if(block.timestamp>recoverAt+150000000 && block.samples.front()>.1f)++heard;
         check(heard>=10,"music recovers after a persistent decoder fault clears");
     }
     Decoder::testStarveAllReads=false;receiver.reset();
