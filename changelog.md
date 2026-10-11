@@ -5,7 +5,6 @@
 - Removed the "OBS song selected" and "OBS selection cleared" notifications; the OBS checkbox already shows your pick
 - When OBS falls back to the game song, it finds GD's file every time
 - Less background work during gameplay
-- OBS refuses network paths written with mixed slashes, as it already did for other network paths
 - OBS asks you to update the mod if it is still v1.0
 - No more "unknown key importance" warning in the Geode log
 ## v1.2.2
