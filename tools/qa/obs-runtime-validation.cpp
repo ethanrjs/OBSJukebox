@@ -133,7 +133,7 @@ int main(int argc,char** argv){
             } else { waitSocketReadable(sock, 50); }
         }
     });
-    SongLinkPacket packet;packet.version=3;std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));std::strcpy(packet.song,"Runtime synthetic tone");std::strcpy(packet.status,"playing");packet.flags=3;packet.epoch=1;
+    SongLinkPacket packet;packet.sessionID=0x51414e4154495644ULL;std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));std::strcpy(packet.song,"Runtime synthetic tone");std::strcpy(packet.status,"playing");packet.flags=3;packet.epoch=1;
     std::ofstream json(output/"runtime-results.json");json<<"{\"host\":\"Installed OBS libobs\",\"plugin\":\""<<std::filesystem::path(argv[1]).filename().string()<<"\",\"cases\":[\n";bool first=true;int failures=0;
     auto phase=[&](const char* name,double seconds,double expected,double pos,uint32_t flags,double rate=1,double offset=0,bool transmit=true,int effects=0,bool expectedMuted=false,bool expectEffectMean=false,bool advanceEpoch=true,double settleSeconds=.55){
         if(std::getenv("OBS_QA_RECOVERY_ONLY") && std::strcmp(name,"mp3_decode") && std::strcmp(name,"failed_seek_music_silence") && std::strcmp(name,"failed_seek_effects_continue") && std::strcmp(name,"failed_seek_restart_recovery"))return Metric{};
@@ -142,14 +142,13 @@ int main(int argc,char** argv){
         uint64_t effectClock=os_gettime_ns(),effectFrames=0;uint32_t sequence=0;
         while(Clock::now()<end){double elapsed=std::chrono::duration<double>(Clock::now()-start).count();packet.position=pos+((flags&2)?elapsed*rate:0);
             packet.timestamp=os_gettime_ns();
-            if(transmit)sendto(sock,reinterpret_cast<const char*>(&packet),packet.version==2?SONG_LINK_V2_SIZE:packet.version==3?SONG_LINK_V3_SIZE:packet.version==4?SONG_LINK_V4_SIZE:sizeof(packet),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-            if(effects==1 && packet.version>=5){EffectsPacketV2 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),44+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
-            if(effects==1 && packet.version<5){EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames;++i)e.samples[i*2]=e.samples[i*2+1]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
+            if(transmit)sendto(sock,reinterpret_cast<const char*>(&packet),sizeof(packet),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+            if(effects==1){EffectsPacketV2 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),44+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
             if(effects==2){
 
                 double jitter=(effectFrames/1024)%2?.006:0;
                 while(elapsed>=double(effectFrames)/44100+jitter){
-                    for(unsigned part=0;part<2;++part){EffectsPacket e;e.frames=512;e.sampleRate=44100;e.sequence=sequence++;e.timestamp=effectClock+effectFrames*1000000000/44100;effectFrames+=512;for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
+                    for(unsigned part=0;part<2;++part){EffectsPacketV2 e;e.sessionID=packet.sessionID;e.frames=512;e.sampleRate=44100;e.sequence=sequence++;e.timestamp=effectClock+effectFrames*1000000000/44100;effectFrames+=512;for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),44+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
                     jitter=(effectFrames/1024)%2?.006:0;
                 }
             }
@@ -167,7 +166,6 @@ int main(int argc,char** argv){
     phase("unicode_wav_decode",1,440,0,3);
     packet.musicVolume=0;phase("active_volume_mute_same_path_and_epoch",1,0,1,3,1,0,true,0,false,false,false);
     packet.musicVolume=1;phase("active_volume_restore_same_path_and_epoch",1,880,2,3,1,0,true,0,false,false,false);
-    packet.version=2;phase("legacy_v2_default_volumes",1,440,0,3);packet.version=3;
     packet.musicVolume=0;phase("obs_music_muted",1,0,0,3);
     phase("obs_music_muted_effects_unaffected",1,-1,0,3,1,0,true,2);
     packet.musicVolume=.5f;phase("obs_music_half_gain",1,440,0,3);
@@ -238,7 +236,7 @@ int main(int argc,char** argv){
     std::memset(packet.path,0,sizeof(packet.path));std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));
     // A different session can take ownership only after the prior sender is stale.
     phase("session_handoff_quiet_window",2.2,0,0,0,1,0,false);
-    packet.version=5;packet.sessionID=0x51414e4154495645ULL;
+    packet.sessionID=0x51414e4154495645ULL;
     phase("v5_clock_synchronized_playback",1,440,0,3);
     packet.triggerGain=0;phase("v5_trigger_volume_zero",1,0,0,3);
     packet.triggerGain=.5f;packet.musicVolume=1;

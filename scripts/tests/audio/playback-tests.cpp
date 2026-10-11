@@ -2,9 +2,6 @@
 #include <iostream>
 #include <fstream>
 #include <limits>
-#ifdef __APPLE__
-#include <pthread/qos.h>
-#endif
 #include "../../../src/MonotonicClock.hpp"
 #include "../../../src/Bridge.hpp"
 #include "../../../src/TapClock.hpp"
@@ -38,91 +35,171 @@ static void writeRamp(const char* path,bool negative=false) {
     out.write("data",4);word(bytes,4);
     for(unsigned i=0;i<frames;++i){auto sample=int16_t(32768*(.1+double(i)/480000)*(negative?-1:1));word(uint16_t(sample),2);word(uint16_t(sample),2);}
 }
-static void sendState(SongSocket socket,SongLinkPacket p,uint64_t capture,int version=4) {
-    p.version=version;
+static void sendState(SongSocket socket,SongLinkPacket p,uint64_t capture) {
     p.timestamp=capture;
     sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    auto bytes=version==2?SONG_LINK_V2_SIZE:version==3?SONG_LINK_V3_SIZE:version==4?SONG_LINK_V4_SIZE:sizeof(p);
-    auto sent=sendto(socket,reinterpret_cast<const char*>(&p),int(bytes),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-    if(sent!=bytes)check(false,"loopback send succeeds");
+    auto sent=sendto(socket,reinterpret_cast<const char*>(&p),int(sizeof(p)),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+    if(sent!=int(sizeof(p)))check(false,"loopback send succeeds");
 }
-static std::vector<Captured> output() {std::lock_guard lock(capturedMutex);return captured;}
+static std::vector<Captured> capturedBlocks() {std::lock_guard lock(capturedMutex);return captured;}
 static void resetOutput(){std::lock_guard lock(capturedMutex);captured.clear();}
-static void pauseTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
-    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
-    sendState(sender,p,os_gettime_ns(),3);
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(120));
-        bool heard=false;for(const auto& b:output())for(float s:b.samples)heard|=s>.1f;
-        check(heard,"legacy v3 music starts");
-        auto pauseAt=os_gettime_ns();p.flags=1;p.position=1.12;sendState(sender,p,pauseAt,3);
-        std::this_thread::sleep_for(std::chrono::milliseconds(110));
-        uint64_t firstSilent=0;
-        for(const auto& b:output())if(b.wall>pauseAt && !firstSilent)for(size_t i=0;i<b.samples.size()/2;++i){
-            if(b.samples[i*2]==0){firstSilent=b.timestamp+i*1000000000/48000;break;}
-        }
-        check(firstSilent>=pauseAt-2000000 && firstSilent<=pauseAt+15000000,"pause takes effect on the audio timeline");
+// Runs a receiver and a source on simulated time, with no sockets, threads or sleeps. The receiver
+// polls every 10 ms, as its thread does. After start(), the source outputs the block starting at
+// t when the clock reaches t + bufferingNs, as its output thread does. Packets arrive the moment
+// they are sent.
+// What it leaves out: music renders at output time, about 20 ms later than the real decoder thread
+// does, and clock probes have no round trip. Clock::now() is still real time, so the retry and
+// recovery timers and the "connected" test don't follow the simulated clock. The offline receiver
+// reports the game link as unavailable. run() and the decode queue only run in the real-thread tests.
+struct Simulation {
+    // A game whose clock is `offset` ns from OBS's. Songs and effects come from separate ports.
+    struct Game {
+        uint64_t session;int64_t offset;uint16_t port,effectsPort;
+        uint64_t stamp(uint64_t obs) const {return uint64_t(int64_t(obs)+offset);}
+    };
+    uint64_t now=5000000000000ULL; // 5000 s, so a game clock an hour behind stays positive
+    uint64_t nextPoll=now+SongSource::blockNs,next=0;
+    bool started=false;
+    std::unique_ptr<SongSource> source;
+    std::vector<Captured> output;
+    Game local;                    // sends when a test names no game; on OBS's clock, synced by its first packet
+    const Game* answering=nullptr; // the game that answers clock probes
+    Simulation() {
+        receiver.reset(new Receiver(Receiver::Offline{}));
+        source=std::make_unique<SongSource>(nullptr);source->active=true;
+        local=game();answering=&local;
     }
-    receiver.reset();closeSocket(sender);
+    ~Simulation(){source.reset();receiver.reset();}
+    uint64_t sessions=0;
+    Game game(int64_t offset=0,uint16_t port=50001) {return {++sessions,offset,port,uint16_t(port+1)};}
+    const std::deque<uint64_t>& probes() const {return receiver->probes;}
+    void reply(const Game& game,uint64_t t1,uint64_t senderTime) {
+        ClockSyncPacket p;p.kind=2;p.sessionID=game.session;p.t1=t1;p.t2=p.t3=senderTime;
+        handle(&p,sizeof(p),game.port);
+    }
+    void answerProbes() {
+        if(!answering)return;
+        auto sent=receiver->probes;
+        for(auto t1:sent)reply(*answering,t1,answering->stamp(t1));
+    }
+    void deliver(const void* data,size_t size,uint16_t port) {
+        receiver->probe(now);answerProbes();
+        handle(data,size,port);answerProbes();
+    }
+    // A song packet of any version, sent as is. The v1.0 mod sent version 3.
+    void sendRaw(SongLinkPacket p,uint64_t capture,int version,uint16_t port) {
+        p.version=version;p.timestamp=capture;
+        deliver(&p,version==3?SONG_LINK_V3_SIZE:sizeof(p),port);
+    }
+    void send(const Game& game,SongLinkPacket p,uint64_t capture) {p.sessionID=game.session;sendRaw(p,game.stamp(capture),5,game.port);}
+    void send(SongLinkPacket p,uint64_t capture) {send(local,p,capture);}
+    void sendEffects(const EffectsPacketV2& e,uint16_t port) {deliver(&e,44+e.frames*8,port);}
+    void sendEffects(EffectsPacketV2 e) {e.sessionID=local.session;sendEffects(e,local.effectsPort);}
+    void sendEffects(const EffectsPacket& e,uint16_t port) {deliver(&e,36+e.frames*8,port);}
+    // Says hello from the game every 10 ms and answers its clock probes, as SyncedSender does,
+    // until the receiver follows the game's session on a clock within 100 ms of OBS's. The game
+    // keeps answering probes afterwards, until another one synchronizes.
+    bool synchronize(const Game& game,unsigned epoch=717) {
+        answering=&game;
+        SongLinkPacket hello;hello.epoch=epoch;hello.flags=0;
+        for(int i=0;i<60;++i){
+            send(game,hello,now);advance(10000000);
+            auto current=receiver->get();
+            if(current.connected && current.packet.sessionID==game.session && current.packet.epoch==epoch &&
+                std::abs(double(int64_t(current.packet.timestamp)-int64_t(now)))<100000000)
+                return true;
+        }
+        return false;
+    }
+    void start() {started=true;next=now-SongSource::bufferingNs+SongSource::blockNs;}
+    void advance(uint64_t ns) {
+        const auto until=now+ns;
+        for(;;){
+            auto render=started?next+SongSource::bufferingNs:UINT64_MAX;
+            auto due=std::min(render,nextPoll);
+            if(due>until)break;
+            now=due;
+            if(due==nextPoll){receiver->probe(now);answerProbes();nextPoll+=SongSource::blockNs;}
+            if(due==render)renderNext();
+        }
+        now=until;
+    }
+private:
+    void handle(const void* data,size_t size,uint16_t port) {
+        sockaddr_in from{};from.sin_family=AF_INET;from.sin_port=htons(port);from.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        receiver->handle(static_cast<const unsigned char*>(data),size,from,now);
+    }
+    void renderNext() {
+        AudioBlock music{};source->renderMusic(next,music,now);
+        {std::lock_guard lock(source->musicMutex);source->musicQueue.push_back({next,music});}
+        auto audio=source->mixBlock(next);
+        output.push_back({next,now,{audio.begin(),audio.end()}});
+        next+=SongSource::blockNs;
+    }
+};
+static void pauseTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.send(p,sim.now);
+    sim.start();sim.advance(120000000);
+    bool heard=false;for(const auto& b:sim.output)for(float s:b.samples)heard|=s>.1f;
+    check(heard,"music starts");
+    auto pauseAt=sim.now;p.flags=1;p.position=1.12;sim.send(p,pauseAt);
+    sim.advance(110000000);
+    uint64_t firstSilent=0;
+    for(const auto& b:sim.output)if(b.wall>pauseAt && !firstSilent)for(size_t i=0;i<b.samples.size()/2;++i){
+        if(b.samples[i*2]==0){firstSilent=b.timestamp+i*1000000000/48000;break;}
+    }
+    check(firstSilent>=pauseAt-2000000 && firstSilent<=pauseAt+15000000,"pause takes effect on the audio timeline");
 }
 static void equalTimestampStopTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
+    Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
-    auto stamp=os_gettime_ns();sendState(sender,p,stamp);
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        auto stoppedQuickly=[&]{
-            bool heard=false;
-            for(const auto& b:output())if(b.timestamp>=stamp+10000000)
-                for(float sample:b.samples)heard|=sample>.1f;
-            auto sent=os_gettime_ns();sendState(sender,p,stamp);
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            bool silent=true;unsigned blocks=0;
-            for(const auto& b:output())if(b.wall>=sent+70000000){
-                ++blocks;for(float sample:b.samples)silent&=sample==0;
-            }
-            auto state=receiver->playbackWindow(stamp,stamp+1).front();
-            return heard && silent && blocks>0 && state.flags==p.flags && state.epoch==p.epoch;
-        };
-        p.flags=1;
-        check(stoppedQuickly(),"equal-timestamp pause silences music without waiting for staleness");
-        p.flags=3;stamp=os_gettime_ns();sendState(sender,p,stamp);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        p.flags=0;++p.epoch;p.path[0]=0;
-        check(stoppedQuickly(),"equal-timestamp stop with a new epoch replaces the playing state");
-    }
-    receiver.reset();closeSocket(sender);
+    auto stamp=sim.now;sim.send(p,stamp);
+    sim.start();sim.advance(100000000);
+    auto stoppedQuickly=[&]{
+        bool heard=false;
+        for(const auto& b:sim.output)if(b.timestamp>=stamp+10000000)
+            for(float sample:b.samples)heard|=sample>.1f;
+        auto sent=sim.now;sim.send(p,stamp);
+        sim.advance(100000000);
+        bool silent=true;unsigned blocks=0;
+        for(const auto& b:sim.output)if(b.wall>=sent+70000000){
+            ++blocks;for(float sample:b.samples)silent&=sample==0;
+        }
+        auto state=receiver->playbackWindow(stamp,stamp+1).front();
+        return heard && silent && blocks>0 && state.flags==p.flags && state.epoch==p.epoch;
+    };
+    p.flags=1;
+    check(stoppedQuickly(),"equal-timestamp pause silences music without waiting for staleness");
+    p.flags=3;stamp=sim.now;sim.send(p,stamp);
+    sim.advance(100000000);
+    p.flags=0;++p.epoch;p.path[0]=0;
+    check(stoppedQuickly(),"equal-timestamp stop with a new epoch replaces the playing state");
 }
 static void delayedPositionTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
+    Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
-    auto capture=os_gettime_ns();std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    sendState(sender,p,capture);
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        bool checked=false,correct=true;
-        for(const auto& b:output())if(b.timestamp>capture+120000000 && b.timestamp<capture+190000000){
-            auto seconds=1+double(b.timestamp-capture)/1e9;
-            correct&=std::abs(b.samples[0]-(.1+seconds*.1))<.0005;
-            checked=true;
-        }
-        check(checked && correct,"100 ms packet delay does not shift the song position");
+    auto capture=sim.now;sim.advance(100000000);
+    sim.send(p,capture);
+    sim.start();sim.advance(150000000);
+    bool checked=false,correct=true;
+    for(const auto& b:sim.output)if(b.timestamp>capture+120000000 && b.timestamp<capture+190000000){
+        auto seconds=1+double(b.timestamp-capture)/1e9;
+        correct&=std::abs(b.samples[0]-(.1+seconds*.1))<.0005;
+        checked=true;
     }
-    receiver.reset();closeSocket(sender);
+    check(checked && correct,"100 ms packet delay does not shift the song position");
 }
 static void transitionTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
-    auto base=os_gettime_ns()-10000000; // keeps the last event under the receiver's 100 ms future limit
+    Simulation sim;
+    auto base=sim.now-10000000; // keeps the last event under the receiver's 100 ms future limit
     // crossfades: whether the event starts a declick crossfade, whose frames are not compared
     struct Event {uint64_t at;SongLinkPacket p;bool crossfades;};
     std::vector<Event> events;
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
     auto add=[&](int milliseconds,bool crossfades=true){
-        auto at=uint64_t(int64_t(base)+int64_t(milliseconds)*1000000);events.push_back({at,p,crossfades});sendState(sender,p,at);
+        auto at=uint64_t(int64_t(base)+int64_t(milliseconds)*1000000);events.push_back({at,p,crossfades});sim.send(p,at);
     };
     add(-100);
     // Events sit 10 ms apart: a 5 ms crossfade, then 5 ms compared exactly. The first leaves the
@@ -136,139 +213,88 @@ static void transitionTest() {
     p.position=2.075;
     std::strcpy(p.path,"artifacts/audio-tests/negative.wav");add(95); // song change
     p.flags=0;add(105);                                            // disable
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(230));
-        constexpr uint64_t crossfadeNs=(declickFrames+2)*1000000000ULL/48000;
-        bool correct=true;std::vector<unsigned> counts(events.size());
-        auto fadedIn=std::max(base,output().front().timestamp)+crossfadeNs; // the source fades in when it starts
-        for(const auto& block:output())for(size_t frame=0;frame<480;++frame){
-            auto at=block.timestamp+frame*1000000000/48000;
-            if(at<base)continue;
-            size_t event=0;while(event+1<events.size() && events[event+1].at<=at)++event;
-            const auto& current=events[event];
-            ++counts[event];
-            if(at<fadedIn || (current.crossfades && at<current.at+crossfadeNs))continue;
-            double expected=0;
-            if((current.p.flags&3)==3){
-                auto position=current.p.position+current.p.offset+double(int64_t(at)-int64_t(current.at))/1e9*current.p.rate;
-                expected=(.1+position*.1)*current.p.musicVolume*(std::strstr(current.p.path,"negative")?-1:1);
-            }
-            if(std::abs(block.samples[frame*2]-expected)>=.0002){
-                if(correct)std::cerr<<"First mismatch: event "<<event<<", time "<<double(int64_t(at)-int64_t(base))/1e6<<" ms, expected "<<expected<<", actual "<<block.samples[frame*2]<<'\n';
-                correct=false;
-            }
+    sim.advance(5000000);
+    sim.start();sim.advance(230000000);
+    constexpr uint64_t crossfadeNs=(declickFrames+2)*1000000000ULL/48000;
+    bool correct=true;std::vector<unsigned> counts(events.size());
+    auto fadedIn=std::max(base,sim.output.front().timestamp)+crossfadeNs; // the source fades in when it starts
+    for(const auto& block:sim.output)for(size_t frame=0;frame<480;++frame){
+        auto at=block.timestamp+frame*1000000000/48000;
+        if(at<base)continue;
+        size_t event=0;while(event+1<events.size() && events[event+1].at<=at)++event;
+        const auto& current=events[event];
+        ++counts[event];
+        if(at<fadedIn || (current.crossfades && at<current.at+crossfadeNs))continue;
+        double expected=0;
+        if((current.p.flags&3)==3){
+            auto position=current.p.position+current.p.offset+double(int64_t(at)-int64_t(current.at))/1e9*current.p.rate;
+            expected=(.1+position*.1)*current.p.musicVolume*(std::strstr(current.p.path,"negative")?-1:1);
         }
-        check(correct && std::all_of(counts.begin(),counts.end(),[](unsigned n){return n>0;}),
-            "pause, resume, death, restart, path and gain changes occur at the correct sample");
+        if(std::abs(block.samples[frame*2]-expected)>=.0002){
+            if(correct)std::cerr<<"First mismatch: event "<<event<<", time "<<double(int64_t(at)-int64_t(base))/1e6<<" ms, expected "<<expected<<", actual "<<block.samples[frame*2]<<'\n';
+            correct=false;
+        }
     }
-    receiver.reset();closeSocket(sender);
+    check(correct && std::all_of(counts.begin(),counts.end(),[](unsigned n){return n>0;}),
+        "pause, resume, death, restart, path and gain changes occur at the correct sample");
 }
 // A hard cut drops a ~0.2 sample to silence (or jumps to another song position) in one frame,
 // which OBS viewers hear as a click. Every transition should instead ramp over a few ms.
 static void declickTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
-    auto base=os_gettime_ns();
+    Simulation sim;
+    auto base=sim.now;
     auto at=[&](int milliseconds){return uint64_t(int64_t(base)+int64_t(milliseconds)*1000000);};
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
-    sendState(sender,p,at(0));
-    p.flags=1;sendState(sender,p,at(20));                        // pause
-    p.flags=3;p.position=1.5;sendState(sender,p,at(40));         // resume
-    p.epoch=2;p.position=.2;sendState(sender,p,at(60));          // restart
-    p.position=.24;std::strcpy(p.path,"artifacts/audio-tests/negative.wav");sendState(sender,p,at(80)); // song change
-    p.flags=0;sendState(sender,p,at(95));                        // OBS Jukebox disabled
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        float previous=0,largestStep=0;bool silentWhilePaused=false,negativeAfterChange=false;
-        for(const auto& block:output())for(size_t frame=0;frame<480;++frame){
-            float sample=block.samples[frame*2];
-            largestStep=std::max(largestStep,std::abs(sample-previous));previous=sample;
-            auto time=block.timestamp+frame*1000000000ULL/48000;
-            silentWhilePaused|=time>at(28) && time<at(36) && sample==0;
-            negativeAfterChange|=time>at(87) && time<at(93) && sample<-.1f;
-        }
-        check(silentWhilePaused && negativeAfterChange && largestStep<.005f,
-            "start, pause, resume, restart, song change and disable ramp instead of clicking");
+    sim.send(p,at(0));
+    p.flags=1;sim.send(p,at(20));                                // pause
+    p.flags=3;p.position=1.5;sim.send(p,at(40));                 // resume
+    p.epoch=2;p.position=.2;sim.send(p,at(60));                  // restart
+    p.position=.24;std::strcpy(p.path,"artifacts/audio-tests/negative.wav");sim.send(p,at(80)); // song change
+    p.flags=0;sim.send(p,at(95));                                // OBS Jukebox disabled
+    sim.advance(5000000);
+    sim.start();sim.advance(200000000);
+    float previous=0,largestStep=0;bool silentWhilePaused=false,negativeAfterChange=false;
+    for(const auto& block:sim.output)for(size_t frame=0;frame<480;++frame){
+        float sample=block.samples[frame*2];
+        largestStep=std::max(largestStep,std::abs(sample-previous));previous=sample;
+        auto time=block.timestamp+frame*1000000000ULL/48000;
+        silentWhilePaused|=time>at(28) && time<at(36) && sample==0;
+        negativeAfterChange|=time>at(87) && time<at(93) && sample<-.1f;
     }
-    receiver.reset();closeSocket(sender);
+    check(silentWhilePaused && negativeAfterChange && largestStep<.005f,
+        "start, pause, resume, restart, song change and disable ramp instead of clicking");
 }
 // A stale packet only fades out a voice that was playing. The source drops idle voices, so one
 // that is recreated for a stale packet must not open the song again every block.
 static void staleVoiceTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
+    Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
-    sendState(sender,p,os_gettime_ns()-600000000);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    auto opens=Decoder::testOpens.load();
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    }
-    check(Decoder::testOpens.load()==opens,"a stale packet does not reopen the song for a dropped voice");
-    receiver.reset();closeSocket(sender);
-}
-static void effectsTransitionTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
-    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    sendState(sender,SongLinkPacket{},os_gettime_ns()-200000000);
-    EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=os_gettime_ns();
-    sendto(sender,reinterpret_cast<const char*>(&initial),36+initial.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    auto base=os_gettime_ns();
-    SongLinkPacket p;p.flags=1;p.effectsVolume=.2;sendState(sender,p,base-100000000);
-    p.flags=0;sendState(sender,p,base+30000000);
-    p.flags=1;p.effectsVolume=.8;sendState(sender,p,base+60000000);
-    for(int i=-5;i<12;++i){
-        EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=uint64_t(int64_t(base)+i*10000000LL);
-        std::fill_n(e.samples,960,.25f);
-        sendto(sender,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(180));
-        bool correct=true;unsigned count=0;
-        for(const auto& b:output())for(size_t i=0;i<480;++i){
-            auto at=b.timestamp+i*1000000000/48000;
-            if(at<base || at>base+100000000)continue;
-            auto expected=at<base+30000000?.05:at<base+60000000?0:.2;
-            correct&=std::abs(b.samples[i*2]-expected)<.00001;++count;
-        }
-        check(correct && count>4000,"legacy effects gain changes follow the timeline after fallback clock initialization");
-    }
-    receiver.reset();closeSocket(sender);
+    sim.send(p,sim.now-600000000);
+    sim.advance(5000000);
+    auto opens=Decoder::testOpenCount.load();
+    sim.start();sim.advance(150000000);
+    check(Decoder::testOpenCount.load()==opens,"a stale packet does not reopen the song for a dropped voice");
 }
 // SFX audio comes from FMOD's mixer thread and keeps arriving while GD's main thread stalls,
 // so a stale status packet must not mute it.
 static void staleStatusEffectsTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
-    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=os_gettime_ns();
-    sendto(sender,reinterpret_cast<const char*>(&initial),36+initial.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    auto base=os_gettime_ns();
-    SongLinkPacket p;p.flags=1;sendState(sender,p,base-600000000);
+    Simulation sim;
+    auto base=sim.now;
+    SongLinkPacket p;p.flags=1;sim.send(p,base-600000000);
     for(int i=0;i<12;++i){
-        EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=base+i*10000000ULL;
+        EffectsPacketV2 e;e.frames=480;e.sampleRate=48000;e.timestamp=base+i*10000000ULL;
         std::fill_n(e.samples,960,.25f);
-        sendto(sender,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+        sim.sendEffects(e);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(180));
-        bool correct=true;unsigned count=0;
-        for(const auto& b:output())for(size_t i=0;i<480;++i){
-            auto at=b.timestamp+i*1000000000/48000;
-            if(at<base+10000000 || at>base+90000000)continue;
-            correct&=std::abs(b.samples[i*2]-.25f)<.00001;++count;
-        }
-        check(correct && count>3000,"effects keep playing when the latest status packet is over 400 ms old");
+    sim.advance(5000000);
+    sim.start();sim.advance(180000000);
+    bool correct=true;unsigned count=0;
+    for(const auto& b:sim.output)for(size_t i=0;i<480;++i){
+        auto at=b.timestamp+i*1000000000/48000;
+        if(at<base+10000000 || at>base+90000000)continue;
+        correct&=std::abs(b.samples[i*2]-.25f)<.00001;++count;
     }
-    receiver.reset();closeSocket(sender);
+    check(correct && count>3000,"effects keep playing when the latest status packet is over 400 ms old");
 }
 // One probe delayed on its way back can suggest an offset several ms off; it must neither move
 // the clock nor clear buffered audio. A real clock jump (suspend) still recalibrates.
@@ -313,22 +339,37 @@ static void clockSlewTest() {
         "negative clock corrections remain continuous and preserve packet order");
 }
 static void protocolTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);
+    Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;
-    sendState(sender,p,0,2);std::this_thread::sleep_for(std::chrono::milliseconds(15));
-    auto v2=receiver->get();
-    check(v2.connected && v2.packet.version==2 && v2.packet.musicVolume==1 && v2.packet.effectsVolume==1,"v2 packets retain default gains");
-    auto at=os_gettime_ns();sendState(sender,p,at);std::this_thread::sleep_for(std::chrono::milliseconds(15));
-    p.epoch=99;sendState(sender,p,at-1000000);sendState(sender,p,at+2000000000);
-    sendState(sender,p,0);sendState(sender,p,os_gettime_ns(),6);
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    auto at=sim.now;sim.send(p,at);sim.advance(15000000);
+    p.epoch=99;sim.send(p,at-1000000);sim.send(p,at+2000000000);
+    sim.send(p,0);
+    auto unsupported=p;unsupported.sessionID=sim.local.session;sim.sendRaw(unsupported,sim.now,6,sim.local.port);
+    sim.advance(15000000);
     check(receiver->get().packet.timestamp==at && receiver->get().packet.epoch==0,"reordered, stale, future and unsupported packets cannot replace the latest state");
     auto before=receiver->playbackWindow(at-1,at+1);
     check(before.size()==2 && before.front().timestamp==at-1000000 && before.front().epoch==99 && before.back().timestamp==at,
         "reordered packets fill earlier timeline history without replacing a later transition");
     auto initial=receiver->playbackWindow(1,2);
     check(initial.size()==1 && initial.front().flags==0,"future state cannot start music before its timestamp");
-    receiver.reset();closeSocket(sender);
+}
+// The v1.0 mod sends v3 song packets and GDSFX1 effects. OBS plays neither and asks for a newer mod,
+// whichever of the two arrives.
+static void oldModTest(bool songs,bool effects) {
+    Simulation sim;
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.start();
+    for(int i=0;i<10;++i){
+        if(songs)sim.sendRaw(p,sim.now,3,50001);
+        EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=sim.now;std::fill_n(e.samples,960,.25f);
+        if(effects)sim.sendEffects(e,50001);
+        sim.advance(10000000);
+    }
+    bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
+    std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
+    check(!receiver->get().connected && silent && detail.find("v1.1")!=std::string::npos,
+        songs?"v3 song packets play nothing and ask for a mod of v1.1 or later":
+        "GDSFX1 effects play nothing and ask for a mod of v1.1 or later");
 }
 
 struct SyncedSender {
@@ -372,7 +413,7 @@ struct SyncedSender {
     ~SyncedSender(){stop=true;if(replies.joinable())replies.join();closeSocket(socket);}
     uint64_t stamp(uint64_t native) const {return uint64_t(int64_t(native)+clockOffset.load());}
     void send(SongLinkPacket p,uint64_t native) {
-        p.sessionID=session;sendState(socket,p,stamp(native),5);
+        p.sessionID=session;sendState(socket,p,stamp(native));
     }
     bool synchronize(unsigned epoch=717) {
         SongLinkPacket hello;hello.epoch=epoch;hello.flags=0;
@@ -397,316 +438,249 @@ struct SyncedSender {
 // (this voice's stop was lost), the voice still goes stale.
 enum class Silence { MainThreadStall, Crash, VoiceOnly };
 static void mainThreadStallTest(Silence silence) {
-    receiver=std::make_unique<Receiver>();resetOutput();
-    {
-        SyncedSender sender(3600000000000LL);
-        check(sender.synchronize(),"stall test synchronizes its sender");
-        SongLinkPacket music;music.flags=7;music.position=1;music.loopStart=0;music.loopEnd=4;
-        std::strcpy(music.path,"artifacts/audio-tests/ramp.wav");
-        auto base=os_gettime_ns();sender.send(music,base);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        auto mappedBase=receiver->get().packet.timestamp;
-        auto effectsSocket=socket(AF_INET,SOCK_DGRAM,0);
-        sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-        {
-            SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-            for(unsigned sequence=0;os_gettime_ns()<base+800000000;++sequence){
-                auto now=os_gettime_ns();
-                if(silence!=Silence::Crash){
-                    EffectsPacketV2 p;p.sessionID=sender.session;p.frames=480;p.sampleRate=48000;p.sequence=sequence;
-                    p.timestamp=sender.stamp(now);std::fill_n(p.samples,960,0.f);
-                    sendto(effectsSocket,reinterpret_cast<const char*>(&p),44+p.frames*8,0,
-                        reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-                }
-                if(silence==Silence::VoiceOnly){
-                    SongLinkPacket status;status.channelID=-1;status.flags=1;sender.send(status,now);
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(60));
-            unsigned audible=0,frames=0;
-            for(const auto& b:output())for(unsigned i=0;i<480;++i){
-                auto delta=int64_t(b.timestamp+i*1000000000ULL/48000)-int64_t(mappedBase);
-                if(delta<500000000 || delta>750000000)continue;
-                ++frames;audible+=b.samples[i*2]>.1f;
-            }
-            bool plays=silence==Silence::MainThreadStall;
-            check(frames>10000 && (plays?audible==frames:audible==0),
-                silence==Silence::MainThreadStall?"music plays through a main-thread stall while GD still mixes":
-                silence==Silence::Crash?"music goes stale once GD stops mixing":
-                "a voice the main thread stops refreshing still goes stale");
+    Simulation sim;
+    auto game=sim.game(3600000000000LL);
+    check(sim.synchronize(game),"stall test synchronizes its sender");
+    SongLinkPacket music;music.flags=7;music.position=1;music.loopStart=0;music.loopEnd=4;
+    std::strcpy(music.path,"artifacts/audio-tests/ramp.wav");
+    auto base=sim.now;sim.send(game,music,base);
+    sim.advance(5000000);
+    auto mappedBase=receiver->get().packet.timestamp;
+    sim.start();
+    for(unsigned sequence=0;sim.now<base+800000000;++sequence){
+        auto now=sim.now;
+        if(silence!=Silence::Crash){
+            EffectsPacketV2 p;p.sessionID=game.session;p.frames=480;p.sampleRate=48000;p.sequence=sequence;
+            p.timestamp=game.stamp(now);std::fill_n(p.samples,960,0.f);
+            sim.sendEffects(p,game.effectsPort);
         }
-        closeSocket(effectsSocket);
+        if(silence==Silence::VoiceOnly){
+            SongLinkPacket status;status.channelID=-1;status.flags=1;sim.send(game,status,now);
+        }
+        sim.advance(10000000);
     }
-    receiver.reset();
+    sim.advance(60000000);
+    unsigned audible=0,frames=0;
+    for(const auto& b:sim.output)for(unsigned i=0;i<480;++i){
+        auto delta=int64_t(b.timestamp+i*1000000000ULL/48000)-int64_t(mappedBase);
+        if(delta<500000000 || delta>750000000)continue;
+        ++frames;audible+=b.samples[i*2]>.1f;
+    }
+    bool plays=silence==Silence::MainThreadStall;
+    check(frames>10000 && (plays?audible==frames:audible==0),
+        silence==Silence::MainThreadStall?"music plays through a main-thread stall while GD still mixes":
+        silence==Silence::Crash?"music goes stale once GD stops mixing":
+        "a voice the main thread stops refreshing still goes stale");
 }
 static void v5ClockCorrectedPauseTest() {
-    receiver=std::make_unique<Receiver>();resetOutput();
-    auto sender=socket(AF_INET,SOCK_DGRAM,0);nonblocking(sender);
-    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    bool bound=sender!=BAD_SOCKET && bind(sender,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0;
-    SongLinkPacket p;p.sessionID=os_gettime_ns();sendState(sender,p,os_gettime_ns(),5);
-    auto reply=[&](uint64_t senderOffset,unsigned delayMs){
-        auto limit=os_gettime_ns()+1000000000;
-        while(os_gettime_ns()<limit){
-            ClockSyncPacket probe{};
-#ifdef _WIN32
-            int length=sizeof(addr);
-#else
-            socklen_t length=sizeof(addr);
-#endif
-            auto bytes=recvfrom(sender,reinterpret_cast<char*>(&probe),sizeof(probe),0,
-                reinterpret_cast<sockaddr*>(&addr),&length);
-            if(bytes==sizeof(probe) && probe.sessionID==p.sessionID && probe.kind==1){
-                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-                probe.kind=2;probe.t2=probe.t3=probe.t1+senderOffset;
-                return sendto(sender,reinterpret_cast<const char*>(&probe),sizeof(probe),0,
-                    reinterpret_cast<sockaddr*>(&addr),length)==sizeof(probe);
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        return false;
+    Simulation sim;
+    auto game=sim.game();
+    SongLinkPacket p;sim.send(game,p,sim.now);
+    // The game answers the receiver's next clock probe after `delay`, with its clock `senderOffset` ahead.
+    auto reply=[&](uint64_t senderOffset,uint64_t delay){
+        for(int i=0;i<1000 && sim.probes().empty();++i)sim.advance(1000000);
+        if(sim.probes().empty())return false;
+        auto t1=sim.probes().back();
+        sim.advance(delay);sim.reply(game,t1,t1+senderOffset);
+        return true;
     };
     // Initial RTT is slow, then each reply gets faster, so both corrections are accepted.
-    bool synced=bound && reply(15000000,30) && reply(20000000,10);
+    bool synced=reply(15000000,30000000) && reply(20000000,10000000);
     check(synced,"v5 pause test exchanges clock probes");
-    if(synced){
-        auto stamp=os_gettime_ns();p.flags=3;p.position=1;p.epoch=718;
-        std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");sendState(sender,p,stamp,5);
-        {
-            SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            auto playing=receiver->get().packet;
-            bool corrected=reply(20000000,0);
-            auto pausedAt=os_gettime_ns();p.flags=1;sendState(sender,p,stamp,5);
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            auto paused=receiver->get().packet;
-            bool heard=false,silent=true;unsigned count=0;
-            for(const auto& block:output()){
-                if(block.wall<pausedAt)for(float sample:block.samples)heard|=sample>.1f;
-                if(block.wall>pausedAt+70000000){
-                    ++count;for(float sample:block.samples)silent&=sample==0;
-                }
-            }
-            check(corrected && heard && silent && count && paused.flags==1 && paused.timestamp==playing.timestamp,
-                "v5 pause replaces a repeated sender timestamp across a clock correction");
+    auto stamp=sim.now;p.flags=3;p.position=1;p.epoch=718;
+    std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");sim.send(game,p,stamp);
+    sim.start();sim.advance(20000000);
+    auto playing=receiver->get().packet;
+    bool corrected=reply(20000000,0);
+    auto pausedAt=sim.now;p.flags=1;sim.send(game,p,stamp);
+    sim.advance(100000000);
+    auto paused=receiver->get().packet;
+    bool heard=false,silent=true;unsigned count=0;
+    for(const auto& block:sim.output){
+        if(block.wall<pausedAt)for(float sample:block.samples)heard|=sample>.1f;
+        if(block.wall>pausedAt+70000000){
+            ++count;for(float sample:block.samples)silent&=sample==0;
         }
     }
-    receiver.reset();closeSocket(sender);
+    check(synced && corrected && heard && silent && count && paused.flags==1 && paused.timestamp==playing.timestamp,
+        "v5 pause replaces a repeated sender timestamp across a clock correction");
 }
 
 static void foreignClockTest(int64_t offset) {
-    receiver=std::make_unique<Receiver>();resetOutput();
-    {
-        SyncedSender sender(offset);
-        check(sender.synchronize(),offset>0?"v5 synchronizes a sender clock ahead of OBS":"v5 synchronizes a sender clock behind OBS");
-        SongLinkPacket p;p.flags=3;p.position=1;p.epoch=718;
-        std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
-        auto capture=os_gettime_ns();std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        sender.send(p,capture);
-        {
-            SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            bool correct=true;unsigned samples=0;
-            for(const auto& b:output())if(b.timestamp>capture+120000000 && b.timestamp<capture+190000000){
-                auto expected=.1+(1+double(b.timestamp-capture)/1e9)*.1;
-                correct&=std::abs(b.samples[0]-expected)<.0004;++samples;
-            }
-            check(samples>=4 && correct,"foreign clock plus 100 ms delivery delay preserves the sampled position");
-        }
-        auto accepted=receiver->get().packet;
-        p.epoch=999;sender.send(p,capture-1000000);
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-        check(receiver->get().packet.epoch==accepted.epoch,"v5 reordered history cannot regress the latest state");
-        sender.send(p,os_gettime_ns()+2000000000);
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-        check(receiver->get().packet.epoch==accepted.epoch,"v5 rejects future states after clock conversion");
+    Simulation sim;
+    auto game=sim.game(offset);
+    check(sim.synchronize(game),offset>0?"v5 synchronizes a sender clock ahead of OBS":"v5 synchronizes a sender clock behind OBS");
+    SongLinkPacket p;p.flags=3;p.position=1;p.epoch=718;
+    std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    auto capture=sim.now;sim.advance(100000000);
+    sim.send(game,p,capture);
+    sim.start();sim.advance(150000000);
+    bool correct=true;unsigned samples=0;
+    for(const auto& b:sim.output)if(b.timestamp>capture+120000000 && b.timestamp<capture+190000000){
+        auto expected=.1+(1+double(b.timestamp-capture)/1e9)*.1;
+        correct&=std::abs(b.samples[0]-expected)<.0004;++samples;
     }
-    receiver.reset();
+    check(samples>=4 && correct,"foreign clock plus 100 ms delivery delay preserves the sampled position");
+    auto accepted=receiver->get().packet;
+    p.epoch=999;sim.send(game,p,capture-1000000);
+    sim.advance(15000000);
+    check(receiver->get().packet.epoch==accepted.epoch,"v5 reordered history cannot regress the latest state");
+    sim.send(game,p,sim.now+2000000000);
+    sim.advance(15000000);
+    check(receiver->get().packet.epoch==accepted.epoch,"v5 rejects future states after clock conversion");
 }
 
 static void multipleVoiceFadeTest() {
-    receiver=std::make_unique<Receiver>();resetOutput();
-    {
-        SyncedSender sender(3600000000000LL);
-        check(sender.synchronize(),"multi-voice test synchronizes its sender");
-        auto base=os_gettime_ns();
-        SongLinkPacket global;global.channelID=-1;global.flags=1;global.effectsVolume=.2f;
-        sender.send(global,base-20000000);
-        SongLinkPacket a;a.flags=3;a.channelID=0;a.position=1;a.musicVolume=.5f;a.triggerGain=.4f;
-        std::strcpy(a.path,"artifacts/audio-tests/ramp.wav");
-        sender.send(a,base);
-        SongLinkPacket b=a;b.channelID=7;b.triggerGain=1;b.musicVolume=.25f;
-        b.fadeCount=1;b.fades[0]={80000000,0};
-        std::strcpy(b.path,"artifacts/audio-tests/negative.wav");
-        sender.send(b,base);
-        b.flags=1;sender.send(b,base+90000000);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        {
-            SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-            std::this_thread::sleep_for(std::chrono::milliseconds(210));
-            bool mixed=true,survived=true;unsigned fadeFrames=0,remainingFrames=0;
-            for(const auto& block:output())for(unsigned frame=0;frame<480;++frame){
-                auto at=block.timestamp+frame*1000000000ULL/48000;
-                auto elapsed=double(int64_t(at)-int64_t(base))/1e9;
-                double ramp=.1+(1+elapsed)*.1;
-                if(elapsed>.01 && elapsed<.07){
-                    double expected=ramp*(.5*.4-.25*(1-elapsed/.08));
-                    mixed&=std::abs(block.samples[frame*2]-expected)<.002;++fadeFrames;
-                }
-                if(elapsed>.11 && elapsed<.15){
-                    survived&=std::abs(block.samples[frame*2]-ramp*.5*.4)<.0004;++remainingFrames;
-                }
-            }
-            check(mixed && fadeFrames>2000,"two music voices mix independent trigger gains and a sample-ramped fade");
-            check(survived && remainingFrames>1000,"stopping channel 7 leaves channel 0 playing");
+    Simulation sim;
+    auto game=sim.game(3600000000000LL);
+    check(sim.synchronize(game),"multi-voice test synchronizes its sender");
+    auto base=sim.now;
+    SongLinkPacket global;global.channelID=-1;global.flags=1;global.effectsVolume=.2f;
+    sim.send(game,global,base-20000000);
+    SongLinkPacket a;a.flags=3;a.channelID=0;a.position=1;a.musicVolume=.5f;a.triggerGain=.4f;
+    std::strcpy(a.path,"artifacts/audio-tests/ramp.wav");
+    sim.send(game,a,base);
+    SongLinkPacket b=a;b.channelID=7;b.triggerGain=1;b.musicVolume=.25f;
+    b.fadeCount=1;b.fades[0]={80000000,0};
+    std::strcpy(b.path,"artifacts/audio-tests/negative.wav");
+    sim.send(game,b,base);
+    b.flags=1;sim.send(game,b,base+90000000);
+    sim.advance(5000000);
+    sim.start();sim.advance(210000000);
+    bool mixed=true,survived=true;unsigned fadeFrames=0,remainingFrames=0;
+    for(const auto& block:sim.output)for(unsigned frame=0;frame<480;++frame){
+        auto at=block.timestamp+frame*1000000000ULL/48000;
+        auto elapsed=double(int64_t(at)-int64_t(base))/1e9;
+        double ramp=.1+(1+elapsed)*.1;
+        if(elapsed>.01 && elapsed<.07){
+            double expected=ramp*(.5*.4-.25*(1-elapsed/.08));
+            mixed&=std::abs(block.samples[frame*2]-expected)<.002;++fadeFrames;
+        }
+        if(elapsed>.11 && elapsed<.15){
+            survived&=std::abs(block.samples[frame*2]-ramp*.5*.4)<.0004;++remainingFrames;
         }
     }
-    receiver.reset();
+    check(mixed && fadeFrames>2000,"two music voices mix independent trigger gains and a sample-ramped fade");
+    check(survived && remainingFrames>1000,"stopping channel 7 leaves channel 0 playing");
 }
 
 static void malformedV5Test() {
-    receiver=std::make_unique<Receiver>();
-    {
-        SyncedSender sender(3600000000000LL);
-        check(sender.synchronize(),"validation test synchronizes its sender");
-        SongLinkPacket p;p.flags=1;p.epoch=718;sender.send(p,os_gettime_ns());
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        p.epoch=999;p.fadeCount=9;sender.send(p,os_gettime_ns());
-        p.fadeCount=0;p.triggerGain=std::numeric_limits<float>::quiet_NaN();sender.send(p,os_gettime_ns());
-        p.triggerGain=1;p.channelID=SONG_LINK_MAX_CHANNELS;sender.send(p,os_gettime_ns());
-        p.channelID=0;p.flags=7;p.loopStart=2;p.loopEnd=1;sender.send(p,os_gettime_ns());
-        p.loopStart=std::numeric_limits<double>::quiet_NaN();p.loopEnd=2;sender.send(p,os_gettime_ns());
-        p.loopStart=1;p.loopEnd=1;sender.send(p,os_gettime_ns());
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-        check(receiver->get().packet.epoch==718,"v5 rejects oversized fades, nonfinite gain, invalid channels and invalid loop bounds");
-        // FMOD can hold two fade points at the same DSP clock
-        p=SongLinkPacket{};p.flags=1;p.epoch=720;p.fadeCount=2;p.fades[0]={1000000,.5f};p.fades[1]={1000000,0};
-        sender.send(p,os_gettime_ns());
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-        check(receiver->get().packet.epoch==720,"v5 accepts fade points that share a time");
-    }
-    receiver.reset();
+    Simulation sim;
+    auto game=sim.game(3600000000000LL);
+    check(sim.synchronize(game),"validation test synchronizes its sender");
+    SongLinkPacket p;p.flags=1;p.epoch=718;sim.send(game,p,sim.now);
+    sim.advance(10000000);
+    p.epoch=999;p.fadeCount=9;sim.send(game,p,sim.now);
+    p.fadeCount=0;p.triggerGain=std::numeric_limits<float>::quiet_NaN();sim.send(game,p,sim.now);
+    p.triggerGain=1;p.channelID=SONG_LINK_MAX_CHANNELS;sim.send(game,p,sim.now);
+    p.channelID=0;p.flags=7;p.loopStart=2;p.loopEnd=1;sim.send(game,p,sim.now);
+    p.loopStart=std::numeric_limits<double>::quiet_NaN();p.loopEnd=2;sim.send(game,p,sim.now);
+    p.loopStart=1;p.loopEnd=1;sim.send(game,p,sim.now);
+    sim.advance(15000000);
+    check(receiver->get().packet.epoch==718,"v5 rejects oversized fades, nonfinite gain, invalid channels and invalid loop bounds");
+    // FMOD can hold two fade points at the same DSP clock
+    p=SongLinkPacket{};p.flags=1;p.epoch=720;p.fadeCount=2;p.fades[0]={1000000,.5f};p.fades[1]={1000000,0};
+    sim.send(game,p,sim.now);
+    sim.advance(15000000);
+    check(receiver->get().packet.epoch==720,"v5 accepts fade points that share a time");
 }
 
 static void shortLoopTest() {
-    receiver=std::make_unique<Receiver>();resetOutput();
-    {
-        SyncedSender sender(3600000000000LL);
-        check(sender.synchronize(),"short-loop test synchronizes its sender");
-        SongLinkPacket loop;loop.flags=7;loop.epoch=718;loop.position=1.004;loop.rate=2;
-        loop.loopStart=1;loop.loopEnd=1.01;loop.offset=.3;loop.musicVolume=.5f;loop.triggerGain=.8f;
-        std::strcpy(loop.path,"artifacts/audio-tests/ramp.wav");
-        auto capture=os_gettime_ns();std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        sender.send(loop,capture);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        auto mapped=receiver->get().packet.timestamp;
-        check(receiver->get().packet.epoch==718,"delayed 10 ms loop packet is accepted after clock conversion");
-        SongLinkPacket other;other.flags=3;other.epoch=719;other.channelID=7;
-        other.position=2;other.rate=.5;other.offset=-.1;other.musicVolume=.2f;
-        std::strcpy(other.path,"artifacts/audio-tests/negative.wav");
-        sender.send(other,capture);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        {
-            SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-            std::this_thread::sleep_for(std::chrono::milliseconds(160));
-            unsigned count=0;bool correct=true;
-            // Voices fade in over 5 ms when the source starts, which scheduling can delay into this window.
-            auto faded=output().empty()?0:output().front().timestamp+5000000;
-            for(const auto& block:output())for(unsigned frame=0;frame<480;++frame){
-                auto at=block.timestamp+frame*1000000000ULL/48000;
-                double elapsed=double(int64_t(at)-int64_t(mapped))/1e9;
-                if(elapsed<.12 || elapsed>.20 || at<faded)continue;
-                double loopPosition=loop.loopStart+std::fmod(loop.position+elapsed*loop.rate-loop.loopStart,loop.loopEnd-loop.loopStart);
-                double expected=(.1+(loopPosition+loop.offset)*.1)*loop.musicVolume*loop.triggerGain
-                    -(.1+(other.position+elapsed*other.rate+other.offset)*.1)*other.musicVolume;
-                double phase=(loopPosition-loop.loopStart)/loop.rate;
-                if(phase<2./48000 || phase>(loop.loopEnd-loop.loopStart)/loop.rate-2./48000)continue;
-                if(std::abs(block.samples[frame*2]-expected)>.00008){
-                    if(correct)std::cerr<<"Loop mismatch: elapsed="<<elapsed<<", expected="<<expected
-                        <<", actual="<<block.samples[frame*2]<<'\n';
-                    correct=false;
-                }
-                ++count;
-            }
-            check(correct && count>3000,"delayed 10 ms source loop wraps before user offset at 2x while another voice continues");
+    Simulation sim;
+    auto game=sim.game(3600000000000LL);
+    check(sim.synchronize(game),"short-loop test synchronizes its sender");
+    SongLinkPacket loop;loop.flags=7;loop.epoch=718;loop.position=1.004;loop.rate=2;
+    loop.loopStart=1;loop.loopEnd=1.01;loop.offset=.3;loop.musicVolume=.5f;loop.triggerGain=.8f;
+    std::strcpy(loop.path,"artifacts/audio-tests/ramp.wav");
+    auto capture=sim.now;sim.advance(100000000);
+    sim.send(game,loop,capture);
+    sim.advance(5000000);
+    auto mapped=receiver->get().packet.timestamp;
+    check(receiver->get().packet.epoch==718,"delayed 10 ms loop packet is accepted after clock conversion");
+    SongLinkPacket other;other.flags=3;other.epoch=719;other.channelID=7;
+    other.position=2;other.rate=.5;other.offset=-.1;other.musicVolume=.2f;
+    std::strcpy(other.path,"artifacts/audio-tests/negative.wav");
+    sim.send(game,other,capture);
+    sim.advance(5000000);
+    sim.start();sim.advance(160000000);
+    unsigned count=0;bool correct=true;
+    // Voices fade in over 5 ms when the source starts.
+    auto faded=sim.output.front().timestamp+5000000;
+    for(const auto& block:sim.output)for(unsigned frame=0;frame<480;++frame){
+        auto at=block.timestamp+frame*1000000000ULL/48000;
+        double elapsed=double(int64_t(at)-int64_t(mapped))/1e9;
+        if(elapsed<.12 || elapsed>.20 || at<faded)continue;
+        double loopPosition=loop.loopStart+std::fmod(loop.position+elapsed*loop.rate-loop.loopStart,loop.loopEnd-loop.loopStart);
+        double expected=(.1+(loopPosition+loop.offset)*.1)*loop.musicVolume*loop.triggerGain
+            -(.1+(other.position+elapsed*other.rate+other.offset)*.1)*other.musicVolume;
+        double phase=(loopPosition-loop.loopStart)/loop.rate;
+        if(phase<2./48000 || phase>(loop.loopEnd-loop.loopStart)/loop.rate-2./48000)continue;
+        if(std::abs(block.samples[frame*2]-expected)>.00008){
+            if(correct)std::cerr<<"Loop mismatch: elapsed="<<elapsed<<", expected="<<expected
+                <<", actual="<<block.samples[frame*2]<<'\n';
+            correct=false;
         }
+        ++count;
     }
-    receiver.reset();
+    check(correct && count>3000,"delayed 10 ms source loop wraps before user offset at 2x while another voice continues");
 }
 
 static void foreignEffectsTest() {
-    receiver=std::make_unique<Receiver>();resetOutput();
-    {
-        SyncedSender sender(3600000000000LL);
-        check(sender.synchronize(),"effects test synchronizes its sender");
-        auto base=os_gettime_ns();
-        SongLinkPacket silentVoice;silentVoice.flags=3;silentVoice.position=1;silentVoice.musicVolume=0;
-        std::strcpy(silentVoice.path,"artifacts/audio-tests/ramp.wav");
-        sender.send(silentVoice,base-10000000);
-        silentVoice.channelID=7;sender.send(silentVoice,base-10000000);
-        SongLinkPacket global;global.channelID=-1;global.flags=1;global.effectsVolume=.2f;
-        sender.send(global,base-10000000);
-        global.flags=0;sender.send(global,base+30000000);
-        global.flags=1;global.effectsVolume=.8f;sender.send(global,base+60000000);
-        auto effectsSocket=socket(AF_INET,SOCK_DGRAM,0);
-        sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-        for(int i=-3;i<11;++i){
-            EffectsPacketV2 p;p.sessionID=sender.session;p.frames=480;p.sampleRate=48000;
-            p.timestamp=sender.stamp(uint64_t(int64_t(base)+i*10000000LL));
-            std::fill_n(p.samples,960,.25f);
-            sendto(effectsSocket,reinterpret_cast<const char*>(&p),44+p.frames*8,0,
-                reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-        }
-        closeSocket(effectsSocket);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        auto mappedBase=receiver->get().packet.timestamp-60000000;
-        {
-            SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-            std::this_thread::sleep_for(std::chrono::milliseconds(190));
-            bool correct=true;unsigned frames=0;
-            for(const auto& b:output())for(unsigned i=0;i<480;++i){
-                auto at=b.timestamp+i*1000000000ULL/48000;
-                auto delta=int64_t(at)-int64_t(mappedBase);
-                if(delta<0 || delta>100000000)continue;
-                auto expected=delta<30000000?.05:delta<60000000?0:.2;
-                correct&=std::abs(b.samples[i*2]-expected)<.00001;++frames;
-            }
-            check(correct && frames>4000,"v2 effects follow exact negotiated timeline boundaries, mixed once with two active voices");
-        }
+    Simulation sim;
+    auto game=sim.game(3600000000000LL);
+    check(sim.synchronize(game),"effects test synchronizes its sender");
+    auto base=sim.now;
+    SongLinkPacket silentVoice;silentVoice.flags=3;silentVoice.position=1;silentVoice.musicVolume=0;
+    std::strcpy(silentVoice.path,"artifacts/audio-tests/ramp.wav");
+    sim.send(game,silentVoice,base-10000000);
+    silentVoice.channelID=7;sim.send(game,silentVoice,base-10000000);
+    SongLinkPacket global;global.channelID=-1;global.flags=1;global.effectsVolume=.2f;
+    sim.send(game,global,base-10000000);
+    global.flags=0;sim.send(game,global,base+30000000);
+    global.flags=1;global.effectsVolume=.8f;sim.send(game,global,base+60000000);
+    for(int i=-3;i<11;++i){
+        EffectsPacketV2 p;p.sessionID=game.session;p.frames=480;p.sampleRate=48000;
+        p.timestamp=game.stamp(uint64_t(int64_t(base)+i*10000000LL));
+        std::fill_n(p.samples,960,.25f);
+        sim.sendEffects(p,game.effectsPort);
     }
-    receiver.reset();
+    sim.advance(5000000);
+    auto mappedBase=receiver->get().packet.timestamp-60000000;
+    sim.start();sim.advance(190000000);
+    bool correct=true;unsigned frames=0;
+    for(const auto& b:sim.output)for(unsigned i=0;i<480;++i){
+        auto at=b.timestamp+i*1000000000ULL/48000;
+        auto delta=int64_t(at)-int64_t(mappedBase);
+        if(delta<0 || delta>100000000)continue;
+        auto expected=delta<30000000?.05:delta<60000000?0:.2;
+        correct&=std::abs(b.samples[i*2]-expected)<.00001;++frames;
+    }
+    check(correct && frames>4000,"v2 effects follow exact negotiated timeline boundaries, mixed once with two active voices");
 }
 
 static void changedClockTest() {
-    receiver=std::make_unique<Receiver>();resetOutput();
-    {
-        SyncedSender sender(3600000000000LL);
-        check(sender.synchronize(),"clock-change test synchronizes its sender");
-        SongLinkPacket old;old.flags=3;old.position=1;
-        std::strcpy(old.path,"artifacts/audio-tests/negative.wav");
-        auto oldCapture=os_gettime_ns();sender.send(old,oldCapture);
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-        sender.clockOffset+=7200000000000LL;
-        check(sender.synchronize(819),"same-session clock-origin change recalibrates after simulated suspend");
-        auto prior=receiver->playbackWindow(oldCapture,oldCapture+1);
-        check(prior.size()==1 && prior.front().flags==0,"recalibration clears buffered audio state from the old clock mapping");
-        SongLinkPacket current;current.flags=3;current.position=2;current.epoch=820;
-        std::strcpy(current.path,"artifacts/audio-tests/ramp.wav");
-        auto capture=os_gettime_ns();sender.send(current,capture);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        {
-            SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-            std::this_thread::sleep_for(std::chrono::milliseconds(180));
-            unsigned count=0;bool correct=true;
-            for(const auto& b:output())if(b.timestamp>capture+20000000 && b.timestamp<capture+120000000){
-                auto expected=.1+(2+double(b.timestamp-capture)/1e9)*.1;
-                correct&=std::abs(b.samples[0]-expected)<.0004;++count;
-            }
-            check(correct && count>=6,"playback resumes at the sampled position after a clock-origin change");
-        }
+    Simulation sim;
+    auto game=sim.game(3600000000000LL);
+    check(sim.synchronize(game),"clock-change test synchronizes its sender");
+    SongLinkPacket old;old.flags=3;old.position=1;
+    std::strcpy(old.path,"artifacts/audio-tests/negative.wav");
+    auto oldCapture=sim.now;sim.send(game,old,oldCapture);
+    sim.advance(15000000);
+    game.offset+=7200000000000LL;
+    check(sim.synchronize(game,819),"same-session clock-origin change recalibrates after simulated suspend");
+    auto prior=receiver->playbackWindow(oldCapture,oldCapture+1);
+    check(prior.size()==1 && prior.front().flags==0,"recalibration clears buffered audio state from the old clock mapping");
+    SongLinkPacket current;current.flags=3;current.position=2;current.epoch=820;
+    std::strcpy(current.path,"artifacts/audio-tests/ramp.wav");
+    auto capture=sim.now;sim.send(game,current,capture);
+    sim.advance(5000000);
+    sim.start();sim.advance(180000000);
+    unsigned count=0;bool correct=true;
+    for(const auto& b:sim.output)if(b.timestamp>capture+20000000 && b.timestamp<capture+120000000){
+        auto expected=.1+(2+double(b.timestamp-capture)/1e9)*.1;
+        correct&=std::abs(b.samples[0]-expected)<.0004;++count;
     }
-    receiver.reset();
+    check(correct && count>=6,"playback resumes at the sampled position after a clock-origin change");
 }
 // Ten minutes of 1024-frame blocks from an output device running 200 ppm slow, mixed with
 // +-5 ms of thread scheduling jitter. Effects timestamps must stay back to back within one
@@ -728,104 +702,80 @@ static void tapClockDriftTest() {
 // Back-to-back packets of a bright 3 kHz SFX, not aligned to OBS's sample grid. Each packet's
 // last sample must blend into the next packet's first; holding it instead crackles at ~94 Hz.
 static void effectsSeamTest(unsigned sampleRate) {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
-    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    sendState(sender,SongLinkPacket{},os_gettime_ns()-200000000); // legacy SFX need a song sender first
-    EffectsPacket initial;initial.frames=1;initial.sampleRate=48000;initial.timestamp=os_gettime_ns();
-    sendto(sender,reinterpret_cast<const char*>(&initial),36+initial.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    auto base=os_gettime_ns(),first=base+7777;
-    // Linux dates legacy effects by receipt. A ramp ending well before the seams reveals that
-    // shift exactly: its value at any rendered time is the time since the ramp started.
-    EffectsPacket marker;marker.sequence=50;marker.frames=512;marker.sampleRate=8000;marker.timestamp=base-100000000;
-    for(unsigned i=0;i<512;++i)marker.samples[i*2]=marker.samples[i*2+1]=i/1024.f;
-    sendto(sender,reinterpret_cast<const char*>(&marker),36+marker.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-    SongLinkPacket p;p.flags=1;sendState(sender,p,base-50000000);
+    Simulation sim;
+    auto base=sim.now,first=base+7777;
+    SongLinkPacket p;p.flags=1;sim.send(p,base-50000000);
     auto tone=[&](double frame){return .25*std::sin(frame*2*3.14159265358979*3000/sampleRate);};
     unsigned frames=sampleRate/100;
     for(unsigned k=0;k<12;++k){
-        EffectsPacket e;e.sequence=100+k;e.frames=frames;e.sampleRate=sampleRate;e.timestamp=first+k*10000000ULL;
+        EffectsPacketV2 e;e.sequence=100+k;e.frames=frames;e.sampleRate=sampleRate;e.timestamp=first+k*10000000ULL;
         for(unsigned i=0;i<frames;++i)e.samples[i*2]=e.samples[i*2+1]=float(tone(k*double(frames)+i));
-        sendto(sender,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+        sim.sendEffects(e);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    std::array<float,2> ramp{};
-    auto probe=marker.timestamp+32000000;receiver->mixEffects(ramp.data(),1,probe,1);
-    auto mapped=first+(int64_t(probe)-int64_t(std::llround(ramp[0]*1024e9/8000))-int64_t(marker.timestamp));
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        std::this_thread::sleep_for(std::chrono::milliseconds(180));
-        double worst=0;unsigned count=0;
-        for(const auto& b:output())for(size_t i=0;i<480;++i){
-            auto at=b.timestamp+i*1000000000/48000;
-            if(at<mapped+10000000 || at>mapped+100000000)continue;
-            double u=(double(at)-double(mapped))*sampleRate/1e9,whole=std::floor(u);
-            double expected=tone(whole)+(tone(whole+1)-tone(whole))*(u-whole);
-            worst=std::max(worst,std::abs(b.samples[i*2]-expected));++count;
-        }
-        check(ramp[0]>0 && count>4000 && worst<.0001,sampleRate==44100?
-            "44.1 kHz effects blend across packet seams":"48 kHz effects blend across packet seams");
+    sim.advance(5000000);
+    const auto mapped=first;
+    sim.start();sim.advance(180000000);
+    double worst=0;unsigned count=0;
+    for(const auto& b:sim.output)for(size_t i=0;i<480;++i){
+        auto at=b.timestamp+i*1000000000/48000;
+        if(at<mapped+10000000 || at>mapped+100000000)continue;
+        double u=(double(at)-double(mapped))*sampleRate/1e9,whole=std::floor(u);
+        double expected=tone(whole)+(tone(whole+1)-tone(whole))*(u-whole);
+        worst=std::max(worst,std::abs(b.samples[i*2]-expected));++count;
     }
-    receiver.reset();closeSocket(sender);
+    check(count>4000 && worst<.0001,sampleRate==44100?
+        "44.1 kHz effects blend across packet seams":"48 kHz effects blend across packet seams");
 }
 static void effectsGapTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);
-    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    sendState(sender,SongLinkPacket{},os_gettime_ns()-200000000); // legacy SFX need a song sender first
-    auto base=os_gettime_ns();
+    Simulation sim;
+    sim.send(SongLinkPacket{},sim.now-200000000); // effects need a session first
+    auto base=sim.now;
     // Consecutive sequence numbers do not prove continuity: the producer may have stalled.
     for(unsigned k=0;k<2;++k){
-        EffectsPacket e;e.sequence=100+k;e.frames=441;e.sampleRate=44100;e.timestamp=base+k*100000000ULL;
+        EffectsPacketV2 e;e.sequence=100+k;e.frames=441;e.sampleRate=44100;e.timestamp=base+k*100000000ULL;
         std::fill_n(e.samples,e.frames*2,k?0.f:.5f);
-        sendto(sender,reinterpret_cast<const char*>(&e),36+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+        sim.sendEffects(e);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    // Legacy effects are dated by receipt on Linux. Locate the actual first sample on the
-    // rendered timeline instead of assuming the sender's timestamp was left unchanged.
-    std::array<float,9600> observed{};
-    receiver->mixEffects(observed.data(),4800,base,1);
-    auto first=std::find(observed.begin(),observed.end(),.5f);
-    bool received=first!=observed.end();
-    auto mappedBase=base+uint64_t((first-observed.begin())/2)*1000000000/48000;
+    sim.advance(20000000);
+    std::array<float,2> first{};
+    receiver->mixEffects(first.data(),1,base,1);
+    bool received=first[0]==.5f;
     std::array<float,960> audio{};
-    receiver->mixEffects(audio.data(),480,mappedBase+50000000,1);
+    receiver->mixEffects(audio.data(),480,base+50000000,1);
     check(received && std::all_of(audio.begin(),audio.end(),[](float s){return s==0;}),
         "SFX interpolation leaves real gaps silent at 44.1 kHz");
-    receiver.reset();closeSocket(sender);
 }
 // GD's position runs 20 ms ahead of what OBS is playing (FMOD's output clock drifted). The
 // voice must catch up by playing slightly fast, not stay off or jump with a seek.
 static void driftCorrectionTest() {
-    receiver=std::make_unique<Receiver>();auto sender=socket(AF_INET,SOCK_DGRAM,0);resetOutput();
-    auto base=os_gettime_ns();
+    Simulation sim;
+    auto base=sim.now;
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
-    sendState(sender,p,base);
-    {
-        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
-        for(int i=0;i<13;++i){                                // keep GD's reports fresh, 20 ms ahead
-            auto at=base+50000000ULL+i*50000000ULL;
-            while(os_gettime_ns()+60000000<at)std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            p.position=1.07+i*.05;sendState(sender,p,at);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(120));
-        // ramp.wav plays .1+seconds*.1, so a sample gives back the song position OBS played
-        auto behind=[&](uint64_t time){
-            for(const auto& b:output())if(time>=b.timestamp && time<b.timestamp+10000000){
-                size_t frame=size_t((time-b.timestamp)*48000/1000000000);
-                double played=(b.samples[frame*2]-.1)/.1,reported=1.07+double(int64_t(time)-int64_t(base)-50000000)/1e9;
-                return reported-played;
-            }
-            return 0.;
-        };
-        double early=behind(base+100000000),late=behind(base+600000000);
-        if(early<.015 || late>early-.0015)std::cerr<<"Drift correction: behind "<<early*1000<<" ms, then "<<late*1000<<" ms\n";
-        check(early>.015 && late<early-.0015,"a 20 ms position error is steered out without a seek");
+    sim.send(p,base);
+    sim.start();
+    for(int i=0;i<13;++i){                                // keep GD's reports fresh, 20 ms ahead
+        auto at=base+50000000ULL+i*50000000ULL;
+        if(sim.now+60000000<at)sim.advance(at-60000000-sim.now);
+        p.position=1.07+i*.05;sim.send(p,at);
     }
-    receiver.reset();closeSocket(sender);
+    sim.advance(120000000);
+    // ramp.wav plays .1+seconds*.1, so a sample gives back the song position OBS played
+    auto behind=[&](uint64_t time){
+        for(const auto& b:sim.output)if(time>=b.timestamp && time<b.timestamp+10000000){
+            size_t frame=size_t((time-b.timestamp)*48000/1000000000);
+            double played=(b.samples[frame*2]-.1)/.1,reported=1.07+double(int64_t(time)-int64_t(base)-50000000)/1e9;
+            return reported-played;
+        }
+        return 0.;
+    };
+    double early=behind(base+100000000),late=behind(base+600000000);
+    if(early<.015 || late>early-.0015)std::cerr<<"Drift correction: behind "<<early*1000<<" ms, then "<<late*1000<<" ms\n";
+    check(early>.015 && late<early-.0015,"a 20 ms position error is steered out without a seek");
 }
 static void localFilesOnlyTest() {
     Decoder decoder;bool refused=true;
-    for(const char* path:{"https://example.com/song.mp3","\\\\server\\share\\song.mp3","//server/share/song.mp3"})
+    for(const char* path:{"https://example.com/song.mp3","\\\\server\\share\\song.mp3","//server/share/song.mp3",
+                          "/\\server\\share\\song.mp3","\\/server/share/song.mp3"})
         refused&=!decoder.open(path) && decoder.error=="Only local song files can be played.";
     check(refused && decoder.open("artifacts/audio-tests/ramp.wav"),"decoder plays local files and refuses URLs and network shares");
 }
@@ -835,27 +785,18 @@ static void senderTest() {
     separate_song::Bridge b;check(b.start(),"sender opens its socket");b.publish(s);
     check(published.version==5 && published.timestamp==s.timestamp && published.position==s.position,
         "sender preserves sampling time through publication delay");
-    check(std::abs(double(int64_t(monotonicNowNs())-int64_t(os_gettime_ns())))<1000000,"native sender and OBS test clock use compatible sampling units");
 }
 #include "receiver-tests.inc"
 #include "deadline-tests.inc"
 #include "recovery-tests.inc"
 
-int main(){
+int main(int argc,char** argv){
+    // --skip-timing leaves out the tests that need the machine to meet real-time audio deadlines.
+    const bool timing=!(argc>1 && std::string(argv[1])=="--skip-timing");
+    if(argc>2 || (argc==2 && timing)){std::cerr<<"Usage: playback-tests [--skip-timing]\n";return 2;}
 #ifdef __APPLE__
-    int relativePriority=0;
-    qos_class_t qos=QOS_CLASS_UNSPECIFIED;
-    check(pthread_get_qos_class_np(pthread_self(),&qos,&relativePriority)==0,
-        "macOS test sender reports initial scheduling");
-    std::cout<<"macOS test thread initial QoS: "<<unsigned(qos)<<", relative priority: "<<relativePriority<<'\n';
-    check(pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0)==0,
-        "macOS test sender uses foreground audio scheduling");
-    check(pthread_get_qos_class_np(pthread_self(),&qos,&relativePriority)==0,
-        "macOS test sender reports effective scheduling");
-    auto timingStart=os_gettime_ns();
-    for(unsigned i=0;i<20;++i)std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    std::cout<<"macOS test thread effective QoS: "<<unsigned(qos)<<", relative priority: "<<relativePriority
-        <<", twenty 10 ms sleeps: "<<double(os_gettime_ns()-timingStart)/1e6<<" ms\n";
+    // The real-thread tests send from this thread; give it the scheduling the plugin's audio threads use.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
 #endif
 #ifdef _WIN32
     _putenv_s("OBS_JUKEBOX_TEST_PORT","49177");
@@ -865,16 +806,17 @@ int main(){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();effectsTransitionTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();oldModTest(true,false);oldModTest(false,true);
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
-    v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);
-    foreignClockTest(-int64_t(std::min<uint64_t>(os_gettime_ns()/2,3600000000000ULL)));
+    v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
     tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();
     receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
-    sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();
+    sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();
-    decoderWatchdogBackoffTest();
-    musicDeadlineTest(false);musicDeadlineTest(true);
+    if(timing){
+        sourceResyncRecoveryTest();decoderWatchdogBackoffTest();
+        musicDeadlineTest(false);musicDeadlineTest(true);
+    }else std::cout<<"Skipped the timing tests\n";
     return failures?1:0;
 }

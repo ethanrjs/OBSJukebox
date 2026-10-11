@@ -13,6 +13,9 @@
 
 class WindowsMediaDecoder {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
+    // Media Foundation's stream selectors are negative enum values that its methods take as DWORD.
+    static constexpr DWORD audioStream=static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM),
+        allStreams=static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS),mediaSource=static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE);
     Ptr<IMFSourceReader> reader;
     bool comStarted=false,mfStarted=false,eof=false,trimSeek=false;
     int64_t seekTime=0;
@@ -21,7 +24,7 @@ class WindowsMediaDecoder {
     size_t cursor=0;
     bool validType(){
         Ptr<IMFMediaType> type;GUID subtype{};UINT32 channels=0,rate=0,align=0;
-        return SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM,&type)) &&
+        return SUCCEEDED(reader->GetCurrentMediaType(audioStream,&type)) &&
             SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE,&subtype)) && subtype==MFAudioFormat_Float &&
             SUCCEEDED(type->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS,&channels)) && channels==2 &&
             SUCCEEDED(type->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND,&rate)) && rate==48000 &&
@@ -31,7 +34,7 @@ class WindowsMediaDecoder {
         pending.clear();cursor=0;
         for(unsigned attempt=0;attempt<16 && !eof;++attempt){
             Ptr<IMFSample> sample;DWORD flags=0;LONGLONG timestamp=0;
-            auto result=reader->ReadSample(MF_SOURCE_READER_FIRST_AUDIO_STREAM,0,nullptr,&flags,&timestamp,&sample);
+            auto result=reader->ReadSample(audioStream,0,nullptr,&flags,&timestamp,&sample);
             if(FAILED(result) || (flags&MF_SOURCE_READERF_ERROR)){eof=true;return false;}
             if((flags&MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) && !validType()){eof=true;return false;}
             if(flags&MF_SOURCE_READERF_ENDOFSTREAM)eof=true;
@@ -73,8 +76,8 @@ public:
         if(FAILED(result)){close();return false;}mfStarted=true;
         Ptr<IMFMediaType> type;
         if(FAILED(MFCreateSourceReaderFromURL(path.c_str(),nullptr,&reader)) ||
-            FAILED(reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS,FALSE)) ||
-            FAILED(reader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM,TRUE)) ||
+            FAILED(reader->SetStreamSelection(allStreams,FALSE)) ||
+            FAILED(reader->SetStreamSelection(audioStream,TRUE)) ||
             FAILED(MFCreateMediaType(&type)) ||
             FAILED(type->SetGUID(MF_MT_MAJOR_TYPE,MFMediaType_Audio)) ||
             FAILED(type->SetGUID(MF_MT_SUBTYPE,MFAudioFormat_Float)) ||
@@ -83,11 +86,11 @@ public:
             FAILED(type->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE,32)) ||
             FAILED(type->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT,8)) ||
             FAILED(type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,384000)) ||
-            FAILED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM,nullptr,type.Get())) || !validType()){
+            FAILED(reader->SetCurrentMediaType(audioStream,nullptr,type.Get())) || !validType()){
             close();return false;
         }
         PROPVARIANT value{};
-        if(SUCCEEDED(reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE,MF_PD_DURATION,&value)) && value.vt==VT_UI8)
+        if(SUCCEEDED(reader->GetPresentationAttribute(mediaSource,MF_PD_DURATION,&value)) && value.vt==VT_UI8)
             duration=value.uhVal.QuadPart;
         PropVariantClear(&value);
         return true;

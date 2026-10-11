@@ -15,6 +15,13 @@ qa_mods="$qa_gd/Contents/geode/mods"
 qa_plugin="$qa_home/Library/Application Support/obs-studio/plugins/separate-song.plugin"
 qa_logs="$qa_home/Library/Application Support/OBS Jukebox/Install Logs"
 run_install() { /usr/bin/env HOME="$qa_home" /bin/zsh "$qa_script" "$qa_gd" "${OBS_APP:-/Applications/OBS.app}" </dev/null; }
+# For an install that should succeed. The runner discards qa_root, so if it fails, print its log.
+install_ok() {
+    run_install > "$qa_root/$1.log" 2>&1 && return
+    print -r -- "$1: the installer failed. Its log:"
+    cat "$qa_root/$1.log"
+    exit 1
+}
 make_mod() {
     local destination="$1" id="$2" version="$3" platform="${4:-mac}"
     local staging=$(mktemp -d "$qa_root/mod.XXXXXX")
@@ -67,7 +74,7 @@ ln -s "$qa_payload/payload/fleym.nongd.geode" "$qa_mods/renamed.geode"
 reject_mods renamed-jukebox-symbolic-link
 rm "$qa_mods/renamed.geode"
 print unrelated-invalid > "$qa_mods/other.geode"
-run_install > "$qa_root/first.log" 2>&1
+install_ok first
 cmp "$qa_payload/payload/local.separate_song.geode" "$qa_mods/local.separate_song.geode"
 cmp "$qa_payload/payload/fleym.nongd.geode" "$qa_mods/fleym.nongd.geode"
 cmp "$qa_payload/payload/separate-song.plugin/Contents/MacOS/separate-song" "$qa_plugin/Contents/MacOS/separate-song"
@@ -80,7 +87,7 @@ rm "$qa_mods/local.separate_song.geode"
 make_mod "$qa_mods/local.separate_song.geode" local.separate_song 0.9.0
 cp "$qa_mods/local.separate_song.geode" "$qa_root/old-mod.geode"
 print old-plugin > "$qa_plugin/Contents/MacOS/separate-song"
-run_install > "$qa_root/reinstall.log" 2>&1
+install_ok reinstall
 qa_backups=("$qa_logs"/*/Backups)
 qa_found=0
 for qa_backup in "${qa_backups[@]}"; do
@@ -95,7 +102,7 @@ cmp "$qa_payload/payload/separate-song.plugin/Contents/MacOS/separate-song" "$qa
 print 'reinstall-backups: pass'
 mv "$qa_mods/fleym.nongd.geode" "$qa_mods/my-jukebox.geode"
 mv "$qa_mods/local.separate_song.geode" "$qa_mods/my-obs-jukebox.geode"
-run_install > "$qa_root/renamed.log" 2>&1
+install_ok renamed
 [[ ! -e "$qa_mods/fleym.nongd.geode" && ! -e "$qa_mods/local.separate_song.geode" ]]
 cmp "$qa_payload/payload/fleym.nongd.geode" "$qa_mods/my-jukebox.geode"
 cmp "$qa_payload/payload/local.separate_song.geode" "$qa_mods/my-obs-jukebox.geode"
@@ -125,7 +132,7 @@ rm "$qa_plugin"
 mv "$qa_root/held-plugin" "$qa_plugin"
 print stale > "$qa_plugin/stale.txt"
 /usr/bin/xattr -w com.apple.quarantine '0081;00000000;Fixture;' "$qa_payload/payload/separate-song.plugin"
-run_install > "$qa_root/replace.log" 2>&1
+install_ok replace
 [[ ! -e "$qa_plugin/stale.txt" ]]
 if /usr/bin/xattr -p com.apple.quarantine "$qa_plugin" >/dev/null 2>&1; then print 'Quarantine was copied'; exit 1; fi
 print 'bundle-replaced-without-quarantine: pass'
