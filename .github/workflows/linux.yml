@@ -43,24 +43,6 @@ jobs:
           OBS_JUKEBOX_TEST_PORT: '39023'
           LIBGL_ALWAYS_SOFTWARE: '1'
         run: xvfb-run -a build-linux/qa/obs-runtime-validation "$PWD/build-linux/plugin/separate-song.so" "$PWD/artifacts/linux-qa"
-      - name: Stage Linux files
-        run: |
-          cmake -S obs-plugin -B build-linux/production -G Ninja -DCMAKE_BUILD_TYPE=Release -DOBS_JUKEBOX_QA=OFF
-          cmake --build build-linux/production --parallel 2
-          mkdir -p artifacts/linux-native/payload
-          install -m 755 build-linux/production/separate-song.so artifacts/linux-native/payload/separate-song.so
-          install -m 755 scripts/install-linux.sh artifacts/linux-native/Install.sh
-          install -m 644 scripts/install-state.pl artifacts/linux-native/install-state.pl
-          install -m 644 scripts/check-geode-version.pl artifacts/linux-native/check-geode-version.pl
-          install -m 755 installer/linux/OBS-Jukebox-Setup artifacts/linux-native/OBS-Jukebox-Setup
-          install -m 644 installer/linux/installer.py artifacts/linux-native/installer.py
-          install -m 644 logo.png artifacts/linux-native/logo.png
-          ldd build-linux/production/separate-song.so > artifacts/linux-native/dependencies.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: OBS-Jukebox-Linux-native-x86_64
-          path: artifacts/linux-native
-          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

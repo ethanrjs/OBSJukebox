@@ -107,6 +107,23 @@ static class InstallerTests
             Check(JsonNode.DeepEquals(JsonNode.Parse(File.ReadAllBytes(scenePath)),undone) && File.ReadAllText(plugin)=="user replacement","transaction restore semantically undoes scenes and preserves replaced plugin bytes");
         }
         finally { Directory.Delete(fixture,true); }
+        string manifests=Path.Combine(Path.GetTempPath(),"obs-jukebox-manifests-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(manifests);
+        try
+        {
+            bool undoable(string product)
+            {
+                string path=Path.Combine(manifests,Guid.NewGuid().ToString("N")+".json");
+                File.WriteAllText(path,$$"""{"Product":"{{product}}","Status":"installed","Files":[]}""");
+                return Engine.CanUndo(new Options { Manifest=path });
+            }
+            Check(undoable("OBS Jukebox 1.2.1") && undoable("OBS Jukebox 1.1.0") && undoable("Separate Song 1.0.0"),"installs from earlier releases can be undone");
+            Check(!undoable("Something Else 1.0.0"),"other products' manifests are not undone");
+            string noProduct=Path.Combine(manifests,"no-product.json");
+            File.WriteAllText(noProduct,"""{"Product":null,"Status":"installed","Files":[]}""");
+            Check(!Engine.CanUndo(new Options { Manifest=noProduct }),"a manifest with no product name is not undone");
+        }
+        finally { Directory.Delete(manifests,true); }
         Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");
         var liveOptions=Options.Parse(["--mod-only"]);
         Check(liveOptions.ModOnly,"mod-only update is available from the command line");
@@ -118,9 +135,9 @@ static class InstallerTests
         Check(Engine.AppsForChanges(liveOptions,[Path.Combine(liveOptions.OBS,"obs-plugins","64bit","separate-song.dll")]).Select(a=>a.Name).SequenceEqual(["obs64"]),"plugin-only changes close OBS without closing GD");
         Check(Engine.AppsForChanges(liveOptions,[modDestination,Path.Combine(liveOptions.SceneRoot,"scene.json")]).Count==2,"scene edits still require OBS to close");
         Check(Engine.AppsForChanges(liveOptions,[liveOptions.GD+"-other/plugin.dll"]).Single().Name=="obs64","path prefix collision is not treated as a GD-only change");
-        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.0" }).StartsWith("Successfully updated to 1.2.2."),"existing installation reports successful version update");
-        Check(Engine.SuccessMessage(new Options()).StartsWith("Successfully installed OBS Jukebox 1.2.2."),"fresh installation reports install instead of update");
-        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.2",AlreadyCurrent=true }).Contains("already up to date"),"unchanged installation does not claim an update happened");
+        Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.0" }).StartsWith($"Successfully updated to {Program.ReleaseVersion}."),"existing installation reports successful version update");
+        Check(Engine.SuccessMessage(new Options()).StartsWith($"Successfully installed OBS Jukebox {Program.ReleaseVersion}."),"fresh installation reports install instead of update");
+        Check(Engine.SuccessMessage(new Options { PreviousVersion=Program.ReleaseVersion,AlreadyCurrent=true }).Contains("already up to date"),"unchanged installation does not claim an update happened");
         Check(Engine.SuccessMessage(new Options { PreviousVersion="1.2.0",ModOnly=true }).Contains("OBS was kept running"),"mod-only success explains the deferred plugin update");
         bool oldOptionRejected=false;
         try { Options.Parse(["--keep-desktop-audio"]); } catch(ArgumentException) { oldOptionRejected=true; }

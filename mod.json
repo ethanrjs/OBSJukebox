@@ -29,9 +29,6 @@
     "music"
   ],
   "dependencies": {
-    "fleym.nongd": {
-      "version": "v3.8.0",
-      "importance": "required"
-    }
+    "fleym.nongd": ">=v3.8.0"
   }
 }
