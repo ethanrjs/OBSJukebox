@@ -2,6 +2,7 @@
 #include "PlaybackIdentity.hpp"
 #include <Geode/utils/Keyboard.hpp>
 #include <jukebox/ui/list/nong_cell.hpp>
+#include <jukebox/ui/list/nong_list.hpp>
 #include <jukebox/events/start_download.hpp>
 #include <jukebox/events/song_download_finished.hpp>
 #include <jukebox/events/song_download_failed.hpp>
@@ -32,17 +33,15 @@ struct Choice {
 struct Request { bool pending = false; std::string error; Clock::time_point started{}; };
 std::unordered_map<std::string, Request> requests;
 std::unordered_map<std::string, Choice> addedSongs;
-struct CachedManifest { matjson::Value json; Clock::time_point read{}; };
-std::unordered_map<int, CachedManifest> manifests;
 struct CachedPlayback {
     std::optional<Choice> obs;
     Choice game;
     std::string normalizedGamePath;
-    bool obsReady = false, gameReady = false;
+    bool obsReady = false;
     Clock::time_point read{};
 };
 std::unordered_map<int, CachedPlayback> playback;
-void invalidate(int id) { playback.erase(id); if (auto it = manifests.find(id); it != manifests.end()) it->second.read = {}; }
+void invalidate(int id) { playback.erase(id); }
 
 struct CellAccess : jukebox::NongCell {
     static int id(jukebox::NongCell* c) { return c->*(&CellAccess::m_songID); }
@@ -177,13 +176,10 @@ void clear(int id) {
     Mod::get()->setSavedValue("obs-selections", data);
     invalidate(id);
 }
-matjson::Value manifest(int id, bool = false) {
+std::string manifestPath(int id) { return string::pathToString(base()/"manifest"/fmt::format("{}.json", id)); }
+matjson::Value manifest(int id) {
     if (!cellLayoutMatches()) return {};
-    auto& cache = manifests[id];
-    auto result = files().get(string::pathToString(base()/"manifest"/fmt::format("{}.json", id)), true).second;
-    if (result.isObject()) cache.json = std::move(result);
-    cache.read = Clock::now();
-    return cache.json;
+    return files().get(manifestPath(id), true).second;
 }
 matjson::Value find(const matjson::Value& data, const std::string& uid, bool original = false) {
     if (original || data["default"]["unique_id"].asString().unwrapOr("") == uid) return data["default"];
@@ -245,8 +241,7 @@ std::string download(Choice c, bool retry) {
     c = resolved(c);
     if (exists(c.path)) { requests.erase(key(c.id, c.uid)); return ""; }
     auto k = key(c.id, c.uid);
-    auto manifestPath = string::pathToString(base()/"manifest"/fmt::format("{}.json", c.id));
-    if ((!c.path.empty() && !files().known(c.path)) || !files().known(manifestPath)) {
+    if ((!c.path.empty() && !files().known(c.path)) || !files().known(manifestPath(c.id))) {
         deferredDownloads[k] = {c, retry};
         return "";
     }
@@ -284,7 +279,6 @@ CachedPlayback& forPlayback(int id) {
     CachedPlayback value;
     value.read = now;
     value.game = active(id);
-    value.gameReady = exists(value.game.path);
     value.normalizedGamePath = normalizedMusicPath(value.game.path);
     if (auto picked = choice(id)) {
         value.obs = resolved(*picked);
@@ -435,9 +429,8 @@ void select(jukebox::NongCell* cell) {
     Choice c; c.id = CellAccess::id(cell); c.uid = CellAccess::uid(cell); c.original = CellAccess::original(cell);
     c.name = ui->m_songName;
     if (auto old = choice(c.id); old && (old->uid == c.uid || (old->original && c.original))) {
-        clear(c.id); Notification::create("OBS selection cleared", NotificationIcon::Info)->show(); return;
+        clear(c.id); return;
     }
-    manifest(c.id, true);
     if (auto index = CellAccess::index(cell)) {
         c.offset = (*index)->startOffset;
         c.path = string::pathToString(base()/"nongs"/fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid));
@@ -447,13 +440,17 @@ void select(jukebox::NongCell* cell) {
     // song. Asking it to download one fails with "already downloaded" whenever the async file
     // cache has not caught up. GD's original song is the only one that may still be missing.
     auto error = c.original ? download(c, true) : std::string();
-    Notification::create(error.empty() ? "OBS song selected" : "OBS download failed", error.empty()?NotificationIcon::Success:NotificationIcon::Error)->show();
-    if (!error.empty()) FLAlertLayer::create("OBS Song", error, "OK")->show();
+    if (!error.empty()) {
+        Notification::create("OBS download failed", NotificationIcon::Error)->show();
+        FLAlertLayer::create("OBS Song", error, "OK")->show();
+    }
     refreshUI();
 }
 }
 
 void shutdown() { files().shutdown(); }
+// No Jukebox list can be open during unpaused gameplay.
+bool inGameplay() { auto play = PlayLayer::get(); return play && !play->m_isPaused; }
 void refreshUI() {
     static auto lastRequestCheck = Clock::time_point{};
     if (Clock::now() - lastRequestCheck >= std::chrono::seconds(1)) {
@@ -467,19 +464,22 @@ void refreshUI() {
         deferredDownloads.clear();
         for (auto& [key, entry] : pending) download(entry.first, entry.second);
     }
-    if (auto play = PlayLayer::get(); play && !play->m_isPaused) return;
+    if (inGameplay()) return;
     if (!cellLayoutMatches()) return;
     auto scene = CCDirector::get()->getRunningScene(); if (!scene) return;
     auto list = findList(scene); if (!list) return;
     for (auto cell : cells(list)) paint(cell);
 }
 // Rows get their OBS checkbox as they enter, so a new list or a search rebuild never draws a
-// frame of Jukebox's plain layout while waiting for refreshUI().
+// frame of Jukebox's plain layout while waiting for refreshUI(). This runs for every node that
+// enters a scene, so it leaves gameplay alone and checks types rather than calling getID(),
+// which gives each node it touches its own Geode metadata object.
 void observeList(CCNode* node) {
+    if (inGameplay()) return;
     if (!cellLayoutMatches()) return;
-    if (node->getID() == "NongList") {
-        visibleList() = node;
-        for (auto cell : cells(node)) paint(cell);
+    if (auto list = typeinfo_cast<jukebox::NongList*>(node)) {
+        visibleList() = list;
+        for (auto cell : cells(list)) paint(cell);
         return;
     }
     auto& list = visibleList();
@@ -501,58 +501,38 @@ Readiness prepare(GJGameLevel* level, bool retry) {
 }
 LevelSongs snapshotSongs(GJGameLevel* level) {
     int id = songID(level);
-    return {id, levelSongIDs(id, std::string(level->m_songIDs))};
+    return levelSongIDs(id, std::string(level->m_songIDs));
 }
 void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
     state.path.clear(); state.song.clear();
     if (!songs) return;
-    if (!cellLayoutMatches()) {
-        state.path = source.path;
+    // GD's own file, by full path: GD keeps built-in songs as names relative to its resources.
+    auto gameSong = [&] {
         state.song = "In-game song";
-        return;
-    }
-    int id = songs->initialID;
-    if (source.channel) {
-        if (source.path.empty()) return;
-        const auto sampledPath = normalizedMusicPath(source.path);
-        std::optional<int> matched;
-        bool ambiguous = false;
-        auto consider = [&](int candidate) {
-            if (forPlayback(candidate).normalizedGamePath != sampledPath) return;
-            if (matched && *matched != candidate) ambiguous = true;
-            else matched = candidate;
-        };
-        for (int candidate : songs->ids) consider(candidate);
-        for (int candidate : source.extraIDs) consider(candidate);
-        if (ambiguous) matched.reset();
-        if (!matched) {
-            state.song = "In-game song";
-            auto full = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
-            state.path = full;
-            return;
-        }
-        id = *matched;
-    }
-    const auto& cached = forPlayback(id);
-    if ((!cached.obs || !cached.obsReady) && source.channel) {
-        state.path = source.path;
-        state.song = "In-game song";
-        return;
-    }
-    const auto& obs = cached.obs ? *cached.obs : cached.game;
-    state.song = obs.name;
-    if (cached.obs ? cached.obsReady : cached.gameReady) state.path = obs.path;
-    state.offset += (obs.offset-(state.musicPosition?cached.game.offset:0))/1000.0;
+        if (!source.path.empty()) state.path = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
+    };
+    if (!cellLayoutMatches()) return gameSong();
+    if (source.path.empty()) return;
+    std::vector<MusicCandidate> candidates;
+    for (const auto* ids : {songs, &source.extraIDs})
+        for (int id : *ids) candidates.push_back({id, forPlayback(id).normalizedGamePath});
+    auto matched = songForPath(normalizedMusicPath(source.path), candidates);
+    if (!matched) return gameSong();
+    const auto& cached = forPlayback(*matched);
+    if (!cached.obs || !cached.obsReady) return gameSong();
+    state.song = cached.obs->name;
+    state.path = cached.obs->path;
+    state.offset += (cached.obs->offset - cached.game.offset) / 1000.0;
 }
 void initialize() {
     if (!cellLayoutMatches()) return;
     jukebox::event::IndexesLoaded().listen([] {
-        playback.clear(); manifests.clear();
+        playback.clear();
         for (auto& [key, request] : requests)
             if (!request.pending) request.error.clear();
     }).leak();
     jukebox::event::SongStateChanged().listen([](const jukebox::event::SongStateChangedData&) {
-        playback.clear(); manifests.clear();
+        playback.clear();
     }).leak();
     jukebox::event::ManualSongAdded().listen([](const jukebox::event::ManualSongAddedData& event) {
         auto song = event.song(); auto meta = song->metadata();
@@ -590,7 +570,7 @@ void initialize() {
     }).leak();
 }
 void rightClick(CCPoint point) {
-    if (auto play = PlayLayer::get(); play && !play->m_isPaused) return;
+    if (inGameplay()) return;
     if (!cellLayoutMatches()) return;
     auto scene = CCDirector::get()->getRunningScene();
     auto list = findList(scene);
