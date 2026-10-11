@@ -3,13 +3,7 @@
 #include <mutex>
 #include <vector>
 #include <chrono>
-#ifdef _WIN32
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <mach/mach_time.h>
-#else
-#include <time.h>
-#endif
+#include "../../../../src/MonotonicClock.hpp"
 #define OBS_DECLARE_MODULE()
 #define MODULE_EXPORT
 #define LOG_ERROR 1
@@ -38,19 +32,8 @@ inline void blog(int,const char*,...) {}
 inline obs_properties_t* obs_properties_create() { return nullptr; }
 inline void obs_properties_add_text(obs_properties_t*,const char*,const char*,int) {}
 inline void obs_register_source(obs_source_info*) {}
-inline uint64_t os_gettime_ns() {
-#ifdef _WIN32
- LARGE_INTEGER value,frequency; QueryPerformanceCounter(&value); QueryPerformanceFrequency(&frequency);
- return uint64_t(value.QuadPart/frequency.QuadPart)*1000000000 + uint64_t(value.QuadPart%frequency.QuadPart)*1000000000/frequency.QuadPart;
-#elif defined(__APPLE__)
- static mach_timebase_info_data_t timebase=[] { mach_timebase_info_data_t t{};mach_timebase_info(&t);return t; }();
- auto ticks=mach_absolute_time();
- return ticks/timebase.denom*timebase.numer + ticks%timebase.denom*timebase.numer/timebase.denom;
-#else
- timespec time{};clock_gettime(CLOCK_MONOTONIC,&time);
- return uint64_t(time.tv_sec)*1000000000+time.tv_nsec;
-#endif
-}
+// OBS's clock and the mod's are the same system clock on each platform.
+inline uint64_t os_gettime_ns() { return monotonicNowNs(); }
 struct Captured {uint64_t timestamp,wall; std::vector<float> samples;};
 inline std::mutex capturedMutex;
 inline std::vector<Captured> captured;

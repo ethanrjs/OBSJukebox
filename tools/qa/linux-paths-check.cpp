@@ -1,5 +1,4 @@
 #include "../../obs-plugin/LinuxPaths.hpp"
-#include "../../obs-plugin/LinuxAudioClock.hpp"
 #include <cassert>
 #include <iostream>
 #include <unistd.h>
@@ -39,19 +38,6 @@ int main() {
     assert(fs::equivalent(LinuxPaths().resolve(windows),song));
     unsetenv("STEAM_COMPAT_DATA_PATH");setenv("WINEPREFIX",prefix.c_str(),1);
     assert(fs::equivalent(LinuxPaths().resolve(windows),song));
-    LinuxAudioClock clock;
-    uint64_t ts=5000000000,now=9000000000;
-    assert(clock.translate(ts,now) && ts==now);
-    ts=5010000000;now=9012000000;
-    assert(!clock.translate(ts,now) && ts==9010000000);
-    ts=10000000;now=9020000000;
-    assert(clock.translate(ts,now) && ts==now);
-    ts=20000000;now=9030000000;
-    assert(!clock.translate(ts,now) && ts==now);
-    ts=5000000000;now=12000000000;
-    assert(clock.translate(ts,now) && ts==now);
-    ts=5010000000;now=12013000000;
-    assert(!clock.translate(ts,now) && ts==12010000000);
     fs::remove_all(root);
-    std::cout<<"11 path checks and 6 clock checks passed\n";
+    std::cout<<"11 path checks passed\n";
 }

@@ -8,4 +8,5 @@ ffmpeg -hide_banner -loglevel error -y -i artifacts/audio-tests/long.mp3 -t 4 -c
 flags=(-DOBS_JUKEBOX_QA -std=c++20 -O2 -pthread -Iscripts/tests/audio/stubs scripts/tests/audio/playback-tests.cpp obs-plugin/Decoder.cpp)
 if [[ "$(uname -s)" == Linux ]]; then flags+=(-ldl); fi
 "${CXX:-c++}" "${flags[@]}" -o artifacts/audio-tests/playback-tests
-if [[ "${1:-}" != --build-only ]]; then artifacts/audio-tests/playback-tests; fi
+# Other arguments go to the test binary: --skip-timing leaves out the real-time tests.
+if [[ "${1:-}" != --build-only ]]; then artifacts/audio-tests/playback-tests "$@"; fi
