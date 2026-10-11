@@ -13,4 +13,6 @@ clang++ -std=c++20 -O2 -bundle -arch "$MAC_ARCH" -mmacosx-version-min=13.0 \
   -Wl,-rpath,@executable_path/../Frameworks \
   -o dist/separate-song.plugin/Contents/MacOS/separate-song
 cp obs-plugin/Info.plist dist/separate-song.plugin/Contents/Info.plist
+song_version=$(/usr/bin/plutil -extract version raw -o - mod.json)
+/usr/bin/plutil -replace CFBundleShortVersionString -string "${song_version#v}" dist/separate-song.plugin/Contents/Info.plist
 codesign --force --sign - dist/separate-song.plugin

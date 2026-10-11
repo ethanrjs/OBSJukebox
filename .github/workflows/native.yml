@@ -22,13 +22,17 @@ jobs:
       - name: Protocol and decoder compilation
         run: |
           cmake -S tools/qa -B build-windows/qa -A x64 -DOBS_SDK="$PWD/tools/pinned/obs-sdk" -DSIMDE_INCLUDE="$PWD/tools/pinned/simde" -DOBS_IMPORT_LIBRARY="$PWD/build-windows/obs.lib"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cmake --build build-windows/qa --config Release --parallel 2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           ctest --test-dir build-windows/qa -C Release --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tools/qa/test_link_protocol.py
       - name: Audio regressions
         shell: pwsh
         run: |
           choco install ffmpeg -y --no-progress
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $env:PATH += ';C:\ProgramData\chocolatey\bin'
           ./scripts/tests/audio/run.ps1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

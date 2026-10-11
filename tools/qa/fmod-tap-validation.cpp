@@ -1,6 +1,6 @@
 #include <windows.h>
-#include "../geode-sdk/loader/include/Geode/fmod/fmod.h"
-#include "../geode-sdk/loader/include/Geode/fmod/fmod_dsp.h"
+#include <Geode/fmod/fmod.h>
+#include <Geode/fmod/fmod_dsp.h>
 #include <cstdio>
 #include <cstring>
 #include <cmath>

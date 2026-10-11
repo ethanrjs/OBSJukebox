@@ -6,13 +6,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>OBSJukeboxSetup</AssemblyName>
-    <Version>1.2.2</Version>
     <Authors>babbur</Authors>
     <Company>babbur</Company>
     <Product>OBS Jukebox</Product>
     <Description>Separate GD/Song output for OBS</Description>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>logo.ico</ApplicationIcon>
+    <!-- The release version, from mod.json, so builds outside package-windows.ps1 match the payload. -->
+    <Version Condition="'$(Version)' == ''">$([System.Text.RegularExpressions.Regex]::Replace($([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../mod.json')), '(?s).*?"version"\s*:\s*"v(\d+\.\d+\.\d+)".*', '$1'))</Version>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="logo.png" LogicalName="logo.png" />

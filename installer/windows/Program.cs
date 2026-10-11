@@ -15,8 +15,9 @@ namespace SeparateSongSetup;
 
 static class Program
 {
-    internal const string ReleaseVersion = "1.2.2";
-    internal const string ProductName = "OBS Jukebox " + ReleaseVersion;
+    // package-windows.ps1 builds with the version in mod.json.
+    internal static readonly string ReleaseVersion = typeof(Program).Assembly.GetName().Version!.ToString(3);
+    internal static readonly string ProductName = "OBS Jukebox " + ReleaseVersion;
     [STAThread]
     static int Main(string[] args)
     {
@@ -153,7 +154,9 @@ sealed class InstallRecord
 
 static class Engine
 {
-    static bool IsKnownProduct(string product) => product == Program.ProductName || product is "OBS Jukebox 1.0.0" or "Separate Song 1.0.0";
+    // Manifests name the release that wrote them, and an install by any release can be undone.
+    static bool IsKnownProduct(string? product) =>
+        product?.StartsWith("OBS Jukebox ", StringComparison.Ordinal) == true || product == "Separate Song 1.0.0";
     static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     public static string Hash(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
     static string HashFile(string path) { using var s = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(s)); }

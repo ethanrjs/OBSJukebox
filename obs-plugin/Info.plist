@@ -10,8 +10,9 @@
 	<string>Separate Song</string>
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
+	<!-- scripts/build-obs-plugin.sh sets the version from mod.json -->
 	<key>CFBundleShortVersionString</key>
-	<string>1.2.0</string>
+	<string>0.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>2</string>
 	<key>LSMinimumSystemVersion</key>

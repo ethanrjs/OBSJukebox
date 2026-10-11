@@ -1,3 +1,5 @@
+// ctest builds this in Release, and these asserts are the checks.
+#undef NDEBUG
 #include "../../../src/AudioDownmix.hpp"
 #include "../../../src/LinkPacket.hpp"
 #include "../../../src/Socket.hpp"
