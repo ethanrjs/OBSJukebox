@@ -1,3 +1,15 @@
+## v1.2.3
+-  Level editor support
+- Less notification spam
+- Less background work during gameplay
+- Fixed the macOS installer refusing to install properly
+- The installer can now undo installs made by earlier versions
+- Fixed a Jukebox warning in the Geode log on every launch
+- OBS refuses more kinds of network paths for safety
+- The OBS plugin now asks you to update the mod if it’s paired with a v1.0 mod
+
+Pretty much all of these were done thanks to @navinor, I appreciate the contributions so much! Mod is far more stable and polished than it was just a few days ago.
+
 ## v1.2.2
 - Fixed a crash when opening a second Jukebox menu
 - Fixed OBS checkboxes disappearing and false "OBS download failed" errors

@@ -7,6 +7,7 @@
 #include <Geode/modify/LevelPage.hpp>
 #include <Geode/modify/LevelSelectLayer.hpp>
 #include <Geode/modify/EditLevelLayer.hpp>
+#include <Geode/modify/LevelEditorLayer.hpp>
 #include "Bridge.hpp"
 #include "JukeboxLink.hpp"
 #include "AudioTap.hpp"
@@ -199,9 +200,10 @@ static void stopVoices() {
     }
     voices.clear();
 }
-// Samples one live GD music channel into its voice and publishes it. With a PlayLayer, the level's
-// OBS choice can replace the song. With null (menus, shop, editor), OBS plays GD's own file.
-static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, PlayLayer* play) {
+// Samples one live GD music channel into its voice and publishes it. With a level layer (a
+// PlayLayer or the editor), the level's OBS choice can replace the song. With null (menus, shop),
+// OBS plays GD's own file.
+static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJBaseGameLayer* play) {
     if (id < 0 || id >= SONG_LINK_MAX_CHANNELS) return false;
     auto channel = engine->getActiveMusicChannel(id);
     bool live = false;
@@ -352,13 +354,19 @@ static void leaveLevel() {
     publish("Ready", false);
 }
 // Outside a level OBS mirrors whatever GD plays: the menu song, shop music, editor playtests.
+// In the editor the level's OBS choice applies, as it does when the level is played.
 static void sampleMusicOutsideLevels() {
     const auto now = monotonicNowNs();
     state.song.clear();
+    auto editor = LevelEditorLayer::get();
+    if (editor && !editor->m_level) editor = nullptr;
+    // Re-read every sample: the song can change in the editor's level settings.
+    if (editor) playingSongs = jukebox_link::snapshotSongs(editor->m_level);
+    else playingSongs.reset();
     auto engine = FMODAudioEngine::get();
     std::set<int> seen;
     for (auto& [id, music] : engine->m_fmodMusic)
-        if (sampleChannel(engine, id, music, nullptr)) seen.insert(id);
+        if (sampleChannel(engine, id, music, editor)) seen.insert(id);
     for (auto it = voices.begin(); it != voices.end();)
         it = seen.contains(it->first) ? std::next(it) : endVoice(it, now);
     publish("Ready", false);
@@ -535,6 +543,15 @@ class $modify(SeparateSongEdit, EditLevelLayer) {
     bool init(GJGameLevel* level) {
         if (!EditLevelLayer::init(level)) return false;
         selectOffsetLevel(level);
+        return true;
+    }
+};
+class $modify(SeparateSongEditor, LevelEditorLayer) {
+    bool init(GJGameLevel* level, bool noUI) {
+        if (!LevelEditorLayer::init(level, noUI)) return false;
+        // Start fetching the level's OBS replacement, as playing the level would.
+        selectOffsetLevel(level);
+        jukebox_link::prepare(level);
         return true;
     }
 };
