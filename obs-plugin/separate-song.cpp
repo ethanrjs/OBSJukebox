@@ -36,6 +36,12 @@ MODULE_EXPORT const char *obs_module_description(void) {
 MODULE_EXPORT const char *obs_module_name(void) { return "OBS Jukebox"; }
 MODULE_EXPORT const char *obs_module_author(void) { return "babbur"; }
 
+// The release version from mod.json, set by the build. The fallback covers builds that don't set it,
+// such as a bare editor compile.
+#ifndef OBS_JUKEBOX_VERSION
+#define OBS_JUKEBOX_VERSION "dev"
+#endif
+
 using Clock = std::chrono::steady_clock;
 static void configureAudioThread() {
 #ifdef __APPLE__
@@ -845,10 +851,7 @@ static void *create(obs_data_t *, obs_source_t *source) {
 }
 static obs_properties_t *properties(void *data) {
     auto props = obs_properties_create();
-    obs_properties_add_text(props, "selection",
-                            "In Jukebox, Game selects the in-game song. OBS selects the OBS song. Click it "
-                            "again to clear the OBS song.",
-                            OBS_TEXT_INFO);
+    obs_properties_add_text(props, "version", "OBSJukebox " OBS_JUKEBOX_VERSION, OBS_TEXT_INFO);
     std::string detail = "Playback follows GD automatically.";
     if (data) {
         auto s = static_cast<SongSource *>(data);
@@ -857,9 +860,8 @@ static obs_properties_t *properties(void *data) {
     }
     obs_properties_add_text(props, "link", detail.c_str(), OBS_TEXT_INFO);
     obs_properties_add_text(props, "help",
-                            "Includes the selected custom song and GD sound effects, including clicks routed "
-                            "through GD's effects engine. Keep Audio Monitoring at Monitor Off and disable "
-                            "audio on other GD/desktop captures to prevent duplicate music.",
+                            "Includes all sounds through GD, including selected custom song. Mute audio on "
+                            "other GD/desktop captures to prevent duplicated audio.",
                             OBS_TEXT_INFO);
     return props;
 }
