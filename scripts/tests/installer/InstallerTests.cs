@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -9,6 +10,12 @@ static class InstallerTests
     {
         if(!condition) throw new Exception(name);
         Console.WriteLine("PASS: "+name);
+    }
+    static void WriteMod(string path,string id,string version,string binary)
+    {
+        using var zip=ZipFile.Open(path,ZipArchiveMode.Create);
+        using(var writer=new StreamWriter(zip.CreateEntry("mod.json").Open())) writer.Write($$"""{"id":"{{id}}","version":"v{{version}}"}""");
+        zip.CreateEntry(binary).Open().Dispose();
     }
     static async Task Main()
     {
@@ -124,6 +131,23 @@ static class InstallerTests
             Check(!Engine.CanUndo(new Options { Manifest=noProduct }),"a manifest with no product name is not undone");
         }
         finally { Directory.Delete(manifests,true); }
+        string gd=Path.Combine(Path.GetTempPath(),"obs-jukebox-mods-"+Guid.NewGuid().ToString("N"));
+        string mods=Path.Combine(gd,"geode","mods");
+        Directory.CreateDirectory(mods);
+        try
+        {
+            WriteMod(Path.Combine(mods,"my-obs-jukebox.geode"),"local.separate_song","1.2.2","local.separate_song.dll");
+            Check(Engine.FindInstalledMod(gd)?.Path==Path.Combine(mods,"my-obs-jukebox.geode") && Engine.InstalledVersion(gd)=="1.2.2","a renamed OBS Jukebox package is found by its ID");
+            WriteMod(Path.Combine(mods,"local.separate_song.geode"),"local.separate_song","1.2.3","local.separate_song.dll");
+            bool refused=false; try { Engine.FindInstalledMod(gd); } catch(IOException) { refused=true; }
+            Check(refused,"two OBS Jukebox packages are refused");
+            WriteMod(Path.Combine(mods,"jukebox.geode"),"fleym.nongd","3.8.0","other.dll");
+            Check(Engine.FindJukebox(gd)?.Version=="without Windows support","a Jukebox package without fleym.nongd.dll is not counted as Windows support");
+            WriteMod(Path.Combine(mods,"jukebox-copy.geode"),"fleym.nongd","3.8.0","fleym.nongd.dll");
+            refused=false; try { Engine.FindJukebox(gd); } catch(IOException) { refused=true; }
+            Check(refused,"two Jukebox packages are refused");
+        }
+        finally { Directory.Delete(gd,true); }
         Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");
         var liveOptions=Options.Parse(["--mod-only"]);
         Check(liveOptions.ModOnly,"mod-only update is available from the command line");

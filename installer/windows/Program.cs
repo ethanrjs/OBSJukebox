@@ -177,29 +177,48 @@ static class Engine
         var e = zip.GetEntry("mod.json") ?? throw new IOException("Missing mod.json in " + expectedId);
         using var input = e.Open(); var j = JsonNode.Parse(input)!;
         if (j["id"]?.ToString() != expectedId) throw new IOException("Unexpected package id for " + expectedId);
-        if (!zip.Entries.Any(x => x.FullName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))) throw new IOException(expectedId + " has no Windows DLL.");
+        if (zip.GetEntry(expectedId + ".dll") == null) throw new IOException(expectedId + " has no Windows DLL.");
         return j["version"]!.ToString().TrimStart('v');
     }
     internal const string JukeboxUrl="https://github.com/Fleeym/jukebox/releases/download/v3.8.0/fleym.nongd.geode";
     internal const string JukeboxHash="A0ECA6C82C7FA6149B956A809A9058959957D7C4672368B6933EA030E641B621";
-    internal static (string Path,string Version)? FindJukebox(string gd)
+    // Every package in the mods folder whose mod.json has this ID. Geode loads only one package per
+    // ID, and which one depends on the file names, so callers refuse more than one.
+    static List<(string Path,JsonNode Metadata,bool HasDll)> FindPackages(string gd,string id)
     {
+        var found=new List<(string,JsonNode,bool)>();
         string mods=Path.Combine(gd,"geode","mods");
-        if(!Directory.Exists(mods)) return null;
+        if(!Directory.Exists(mods)) return found;
         foreach(string file in Directory.GetFiles(mods,"*.geode"))
         {
             try
             {
                 using var zip=ZipFile.OpenRead(file); var metadata=zip.GetEntry("mod.json"); if(metadata==null)continue;
                 using var input=metadata.Open(); var json=JsonNode.Parse(input);
-                if(json?["id"]?.ToString()!="fleym.nongd")continue;
-                if(!zip.Entries.Any(e=>e.FullName.EndsWith(".dll",StringComparison.OrdinalIgnoreCase))) return (file,"without Windows support");
-                return (file,json["version"]?.ToString().TrimStart('v')??"unknown version");
+                if(json?["id"]?.ToString()!=id)continue;
+                found.Add((file,json,zip.GetEntry(id+".dll")!=null));
             }
             catch(InvalidDataException) { }
             catch(JsonException) { }
         }
-        return null;
+        return found;
+    }
+    static IOException Duplicates(string name,List<(string Path,JsonNode Metadata,bool HasDll)> found) =>
+        new("More than one "+name+" package is installed ("+string.Join(", ",found.Select(f=>Path.GetFileName(f.Path)))+"). Remove the extra copies from geode/mods, then retry.");
+    internal static (string Path,string Version)? FindJukebox(string gd)
+    {
+        var found=FindPackages(gd,"fleym.nongd");
+        if(found.Count>1) throw Duplicates("Jukebox",found);
+        if(found.Count==0) return null;
+        var (path,json,hasDll)=found[0];
+        return hasDll ? (path,json["version"]?.ToString().TrimStart('v')??"unknown version") : (path,"without Windows support");
+    }
+    internal static (string Path,string? Version)? FindInstalledMod(string gd)
+    {
+        var found=FindPackages(gd,"local.separate_song");
+        if(found.Count>1) throw Duplicates("OBS Jukebox",found);
+        if(found.Count==0) return null;
+        return (found[0].Path,found[0].Metadata["version"]?.ToString().TrimStart('v'));
     }
     static byte[] DownloadJukebox(Action<string> log)
     {
@@ -228,14 +247,7 @@ static class Engine
         catch(UnauthorizedAccessException) { return false; }
         catch(JsonException) { return false; }
     }
-    internal static string? InstalledVersion(string gd)
-    {
-        string path=Path.Combine(gd,"geode","mods","local.separate_song.geode");
-        if(!File.Exists(path)) return null;
-        try { return PackageVersion(File.ReadAllBytes(path),"local.separate_song"); }
-        catch(InvalidDataException) { return null; }
-        catch(JsonException) { return null; }
-    }
+    internal static string? InstalledVersion(string gd) => FindInstalledMod(gd)?.Version;
     internal static string SuccessMessage(Options o)
     {
         string result=o.AlreadyCurrent ? "OBS Jukebox " + Program.ReleaseVersion + " is already up to date." :
@@ -278,7 +290,9 @@ static class Engine
         byte[] Required(string key) => payload.TryGetValue(key,out var data) ? data : throw new IOException("This setup is incomplete: missing " + key + ". Download a complete release installer and retry.");
         byte[] mod=Required("mods/local.separate_song.geode");
         if(PackageVersion(mod,"local.separate_song")!=Program.ReleaseVersion) throw new IOException("Unexpected OBS Jukebox payload version.");
-        Add(Path.Combine(o.GD,"geode","mods","local.separate_song.geode"),mod,"OBS Jukebox mod " + Program.ReleaseVersion);
+        // Update the installed package where it is, so a renamed copy isn't left beside the new one.
+        string modDestination=FindInstalledMod(o.GD)?.Path ?? Path.Combine(o.GD,"geode","mods","local.separate_song.geode");
+        Add(modDestination,mod,"OBS Jukebox mod " + Program.ReleaseVersion);
         bool portable = File.Exists(Path.Combine(o.OBS,"portable_mode.txt")) || File.Exists(Path.Combine(o.OBS,"portable_mode"));
         string plugin = portable ? Path.Combine(o.OBS,"obs-plugins","64bit","separate-song.dll") : Path.Combine(o.PluginRoot,"separate-song","bin","64bit","separate-song.dll");
         if (o.ModOnly)
@@ -664,6 +678,7 @@ sealed class SetupForm : Form
             dependency.Text=found==null?"Jukebox 3.8.0 is required.":found.Value.Version=="3.8.0"?"Jukebox 3.8.0 is installed.":"Install Jukebox 3.8.0 from Geode before continuing.";
             if(found!=null)jukebox.Checked=false;
         }
+        catch(IOException ex){dependency.Text=ex.Message;jukebox.Visible=false;}
         catch(Exception){dependency.Text="Choose your Geometry Dash folder.";jukebox.Visible=false;}
     }
     void Collect(){options.GD=Options.NormalizeGD(gd.Text);options.OBS=Options.NormalizeOBS(obs.Text);options.CloseApps=close.Checked;options.Restart=restart.Checked;options.ModOnly=modOnly.Checked;options.CreateScene=scene.Checked&&!modOnly.Checked;options.InstallJukebox=jukebox.Visible&&jukebox.Checked;}
