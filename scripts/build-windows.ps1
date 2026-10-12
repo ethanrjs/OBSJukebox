@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Force -Path $sdkBinaryDirectory | Out-Null
 Copy-Item -LiteralPath "$loaderDirectory\Geode.lib" -Destination "$sdkBinaryDirectory\Geode.lib" -Force
 if (!$SkipMod) {
     $env:GEODE_SDK = $sdk.Replace('\','/')
-    & cmake -S $root -B "$buildRoot\mod" -G 'Visual Studio 17 2022' -A x64 "-DGEODE_BINDINGS_REPO_PATH=$DependencyRoot/bindings" "-DGEODE_CLI=$DependencyRoot/geode-cli/geode.exe" '-DGEODE_DISABLE_PRECOMPILED_HEADERS=ON' '-DOBS_JUKEBOX_QA=OFF'
+    & cmake -S $root -B "$buildRoot\mod" -G 'Visual Studio 17 2022' -A x64 "-DGEODE_BINDINGS_REPO_PATH=$DependencyRoot/bindings" "-DGEODE_CLI=$DependencyRoot/geode-cli/geode.exe" '-DGEODE_DISABLE_PRECOMPILED_HEADERS=ON' '-DSKIP_BUILDING_CODEGEN=OFF' '-DOBS_JUKEBOX_QA=OFF'
     if ($LASTEXITCODE) { throw 'Mod configuration failed.' }
     & cmake --build "$buildRoot\mod" --config $Configuration --parallel $Parallel
     if ($LASTEXITCODE) { throw 'Mod compilation failed.' }
