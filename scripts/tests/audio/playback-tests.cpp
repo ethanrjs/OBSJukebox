@@ -364,6 +364,19 @@ static void invalidPathTest() {
     check(receiver->get().packet.epoch==0 && std::string(receiver->get().packet.path)=="artifacts/audio-tests/ramp.wav",
         "a song packet whose path is not UTF-8 is dropped");
 }
+// OBS must not ask Windows about a URL or network share before refusing it: a stat of a share
+// opens an SMB connection and can hang the decoder thread. A URL keeps a failing run quick.
+static void networkPathTest() {
+    Simulation sim;sim.start();
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"https://example.com/song.mp3");
+    auto before=sim.source->testStatCount.load();
+    // Output runs bufferingNs (40 ms) behind, so wait long enough for each packet to be rendered.
+    sim.send(p,sim.now);sim.advance(100000000);
+    auto afterNetwork=sim.source->testStatCount.load();
+    p.epoch=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");sim.send(p,sim.now);sim.advance(100000000);
+    check(afterNetwork==before && sim.source->testStatCount.load()>afterNetwork,
+        "a network path is refused before OBS reads its file information");
+}
 // The v1.0 mod sends v3 song packets and GDSFX1 effects. OBS plays neither and asks for a newer mod,
 // whichever of the two arrives.
 static void oldModTest(bool songs,bool effects) {
@@ -826,7 +839,7 @@ int main(int argc,char** argv){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();oldModTest(true,false);oldModTest(false,true);
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();

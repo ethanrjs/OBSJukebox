@@ -516,6 +516,7 @@ struct SongSource {
     std::atomic<uint64_t> wantedTimestamp{0};
 #ifdef OBS_JUKEBOX_QA
     std::atomic<int> testOutputDelayMs{0};
+    std::atomic<unsigned> testStatCount{0};
 #endif
     explicit SongSource(obs_source_t *s)
         : source(s), linkReceiver(receiver) {}
@@ -588,11 +589,17 @@ struct SongSource {
         resolved = paths.resolve(newPath);
 #endif
         std::error_code error;
+        // Never stat a URL or network share: Decoder::open refuses them, and a stat would reach the network.
+        bool local = !resolved.empty() && localSongPath(resolved);
         auto file = std::filesystem::path(std::u8string(resolved.begin(), resolved.end()));
-        auto size = resolved.empty() ? 0 : std::filesystem::file_size(file, error);
-        auto modified = resolved.empty() || error ? std::filesystem::file_time_type{}
-                                                  : std::filesystem::last_write_time(file, error);
-        bool available = !resolved.empty() && !error;
+#ifdef OBS_JUKEBOX_QA
+        if (local)
+            ++testStatCount;
+#endif
+        auto size = local ? std::filesystem::file_size(file, error) : 0;
+        auto modified = !local || error ? std::filesystem::file_time_type{}
+                                        : std::filesystem::last_write_time(file, error);
+        bool available = local && !error;
         bool fileChanged = resolved != v.resolvedPath || available != v.fileAvailable ||
                            (available && (size != v.loadedSize || modified != v.loadedWriteTime));
         if (pathChanged || fileChanged || (!decoder.ready() && Clock::now() >= v.reopenAt)) {
