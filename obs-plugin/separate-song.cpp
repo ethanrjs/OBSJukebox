@@ -546,6 +546,7 @@ struct SongSource {
 #ifdef OBS_JUKEBOX_QA
     std::atomic<int> testOutputDelayMs{0};
     std::atomic<unsigned> testStatCount{0};
+    std::atomic<unsigned> testVoiceCount{0};
 #endif
     explicit SongSource(obs_source_t *s)
         : source(s), linkReceiver(receiver) {}
@@ -746,13 +747,22 @@ struct SongSource {
         for (int channel : linkReceiver->getChannels()) {
             if (channel < 0)
                 continue;
-            if (!voices[channel])
-                voices[channel] = std::make_unique<Voice>();
-            auto &v = *voices[channel];
             // A packet goes stale 400 ms after its timestamp; that stretch is still rendered, with
             // live=false, so a playing voice fades out instead of cutting off. Nothing goes stale
             // while GD's main thread is stalled but its mixer still plays.
             auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, channel);
+            // A channel with no voice and only stale packets has nothing to play or fade out.
+            if (!voices[channel] && !stalled &&
+                std::none_of(window.begin(), window.end(),
+                             [&](const SongLinkPacket &p) { return p.timestamp + staleNs > timestamp; }))
+                continue;
+            if (!voices[channel]) {
+                voices[channel] = std::make_unique<Voice>();
+#ifdef OBS_JUKEBOX_QA
+                ++testVoiceCount;
+#endif
+            }
+            auto &v = *voices[channel];
             forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
                 size_t stale = stalled ? end : std::clamp(frameAt(timestamp, p.timestamp + staleNs), first, end);
                 if (stale > first)

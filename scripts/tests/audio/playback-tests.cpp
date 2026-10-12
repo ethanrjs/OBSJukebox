@@ -276,6 +276,16 @@ static void staleVoiceTest() {
     sim.start();sim.advance(150000000);
     check(Decoder::testOpenCount.load()==opens,"a stale packet does not reopen the song for a dropped voice");
 }
+// A channel that played once keeps its packets until GD restarts. Once they are all stale, rendering
+// must not allocate and free a voice for it every block.
+static void staleChannelTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=3;p.position=1;p.channelID=7;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.send(p,sim.now);sim.start();sim.advance(1000000000);
+    auto voices=sim.source->testVoiceCount.load();
+    sim.advance(500000000);
+    check(voices>0 && sim.source->testVoiceCount.load()==voices,"a channel whose packets have all gone stale allocates no voice");
+}
 // SFX audio comes from FMOD's mixer thread and keeps arriving while GD's main thread stalls,
 // so a stale status packet must not mute it.
 static void staleStatusEffectsTest() {
@@ -901,7 +911,7 @@ int main(int argc,char** argv){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);newModTest();
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);newModTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
