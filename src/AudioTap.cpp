@@ -44,13 +44,15 @@ struct Tap {
             auto engine = FMODAudioEngine::get();
             auto current = engine ? (stream == 1 ? engine->m_backgroundMusicChannel
                                                 : engine->m_globalChannel) : nullptr;
+            // A late render callback then passes audio through without touching this Tap.
+            dsp->setUserData(nullptr);
             // removeDSP reconnects a live group's neighboring DSPs. Only fall
             // back to disconnecting the obsolete graph when its group changed.
-            if (current && current == group)
-                current->removeDSP(dsp);
-            else
-                dsp->disconnectAll(true, true);
-            dsp->release();
+            auto removed = current && current == group ? current->removeDSP(dsp) : dsp->disconnectAll(true, true);
+            auto released = dsp->release();
+            if (removed != FMOD_OK || released != FMOD_OK)
+                log::warn("OBS effects tap teardown: remove returned {}, release returned {}", int(removed),
+                          int(released));
             dsp = nullptr;
             if (locked)
                 system->unlockDSP();
