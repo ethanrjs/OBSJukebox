@@ -3,7 +3,6 @@
 #include <Geode/utils/Keyboard.hpp>
 #include <jukebox/ui/list/nong_cell.hpp>
 #include <jukebox/ui/list/nong_list.hpp>
-#include <jukebox/events/start_download.hpp>
 #include <jukebox/events/song_download_finished.hpp>
 #include <jukebox/events/song_download_failed.hpp>
 #include <jukebox/events/nong_deleted.hpp>
@@ -261,7 +260,10 @@ std::string download(Choice c, bool retry) {
         return false;
     }())
         request = {false, "Local song file is unavailable. Choose an existing file in Jukebox."};
-    else jukebox::event::StartDownload().send({c.id, c.uid});
+    // Jukebox makes every song it finishes downloading GD's active song, so asking it to fetch the
+    // OBS song would switch the song GD plays. The user downloads it in Jukebox, which switches it
+    // too, so the message says to pick the Game song again.
+    else request = {false, "OBS song audio is missing.\nDownload it in Jukebox, then pick your Game song again."};
     return requests[k].error;
 }
 Choice active(int id) {
