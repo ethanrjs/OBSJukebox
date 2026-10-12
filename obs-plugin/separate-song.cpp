@@ -464,7 +464,7 @@ class Receiver {
                 for (unsigned ch = 0; ch < 2; ++ch) {
                     float from = p.samples[a * 2 + ch],
                           to = seam ? (next ? next->samples[ch] : from) : p.samples[(a + 1) * 2 + ch];
-                    output[i * 2 + ch] += gain * float(from + (to - from) * blend);
+                    output[i * 2 + ch] += gain * float(double(from) + (double(to) - double(from)) * blend);
                 }
             }
         }
@@ -810,6 +810,10 @@ struct SongSource {
                                              p.effectsVolume);
             });
         }
+        // A corrupt float WAV or a hostile packet must not put NaN or Inf into OBS's mix.
+        for (auto &sample : audio)
+            if (!std::isfinite(sample))
+                sample = 0;
         return audio;
     }
     void run() {

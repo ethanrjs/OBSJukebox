@@ -234,7 +234,7 @@ class Decoder {
             for (size_t ch = 0; ch < 2; ++ch) {
                 float a = at < count ? cache[at * 2 + ch] : 0,
                       b = at + 1 < count ? cache[(at + 1) * 2 + ch] : a;
-                output[i * 2 + ch] = float(a + (b - a) * blend);
+                output[i * 2 + ch] = float(double(a) + (double(b) - double(a)) * blend);
             }
             phase += rate;
         }

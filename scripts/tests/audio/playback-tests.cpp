@@ -297,6 +297,42 @@ static void staleStatusEffectsTest() {
     }
     check(correct && count>3000,"effects keep playing when the latest status packet is over 400 ms old");
 }
+// FLT_MAX next to -FLT_MAX overflows a float subtraction to Inf, and Inf * 0 is NaN. One NaN in
+// OBS's mix silences every source on the track for that sample.
+static void finiteOutputTest() {
+    Simulation sim;
+    auto base=sim.now;
+    SongLinkPacket p;p.flags=1;sim.send(p,base);
+    for(int i=0;i<12;++i){
+        EffectsPacketV2 e;e.frames=480;e.sampleRate=48000;e.sequence=i;e.timestamp=base+i*10000000ULL;
+        for(unsigned s=0;s<960;++s)e.samples[s]=(s/2)%2?std::numeric_limits<float>::max():-std::numeric_limits<float>::max();
+        sim.sendEffects(e);
+    }
+    sim.advance(5000000);
+    sim.start();sim.advance(180000000);
+    bool finite=true;unsigned loud=0;
+    for(const auto& b:sim.output)for(float s:b.samples){finite&=std::isfinite(s);loud+=s!=0;}
+    check(finite && loud>1000,"extreme effects samples reach OBS as finite, audible samples");
+}
+// A one-second stereo IEEE float WAV whose every sample is `value`.
+static void writeFloatWav(const char* path,float value) {
+    std::ofstream out(path,std::ios::binary);
+    auto word=[&](uint32_t n,int bytes){for(int i=0;i<bytes;++i)out.put(char(n>>(i*8)));};
+    constexpr uint32_t frames=48000,bytes=frames*8;
+    out.write("RIFF",4);word(36+bytes,4);out.write("WAVEfmt ",8);word(16,4);
+    word(3,2);word(2,2);word(48000,4);word(48000*8,4);word(8,2);word(32,2);
+    out.write("data",4);word(bytes,4);
+    for(uint32_t i=0;i<frames*2;++i)out.write(reinterpret_cast<const char*>(&value),4);
+}
+// The decoder passes a float WAV's samples through as they are, so a corrupt file can carry NaN.
+static void nanSongTest() {
+    writeFloatWav("artifacts/audio-tests/nan.wav",std::numeric_limits<float>::quiet_NaN());
+    Simulation sim;sim.start();
+    SongLinkPacket p;p.flags=3;p.position=0;std::strcpy(p.path,"artifacts/audio-tests/nan.wav");
+    sim.send(p,sim.now);sim.advance(300000000);
+    bool finite=true;for(const auto& b:sim.output)for(float s:b.samples)finite&=std::isfinite(s);
+    check(finite && !sim.output.empty(),"a song file full of NaN samples reaches OBS as finite audio");
+}
 // One probe delayed on its way back can suggest an offset several ms off; it must neither move
 // the clock nor clear buffered audio. A real clock jump (suspend) still recalibrates.
 static void clockNoiseTest() {
@@ -845,7 +881,7 @@ int main(int argc,char** argv){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
