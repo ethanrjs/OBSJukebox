@@ -1,5 +1,6 @@
 #include "../src/LinkPacket.hpp"
 #include "../src/Socket.hpp"
+#include "../src/Utf8.hpp"
 #include "Decoder.hpp"
 #include "LinkClock.hpp"
 #include <algorithm>
@@ -83,6 +84,9 @@ static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, 
                           p.loopEnd <= p.loopStart || p.loopEnd > 86400))
         return std::nullopt;
     p.status[23] = p.level[95] = p.song[95] = p.path[1023] = 0;
+    // The mod only sends UTF-8. Anything else would throw when the decoder builds a path from it.
+    if (!separate_song::validUtf8(p.path))
+        return std::nullopt;
     return p;
 }
 struct EffectsInput {

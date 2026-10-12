@@ -354,6 +354,16 @@ static void protocolTest() {
     auto initial=receiver->playbackWindow(1,2);
     check(initial.size()==1 && initial.front().flags==0,"future state cannot start music before its timestamp");
 }
+// MSVC throws building a path from invalid UTF-8, and the decoder thread has no handler, so OBS
+// would exit. Such a packet must never reach the decoder.
+static void invalidPathTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    auto at=sim.now;sim.send(p,at);sim.advance(15000000);
+    auto bad=p;bad.epoch=5;std::strcpy(bad.path,"C:/s\xFF.mp3");sim.send(bad,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==0 && std::string(receiver->get().packet.path)=="artifacts/audio-tests/ramp.wav",
+        "a song packet whose path is not UTF-8 is dropped");
+}
 // The v1.0 mod sends v3 song packets and GDSFX1 effects. OBS plays neither and asks for a newer mod,
 // whichever of the two arrives.
 static void oldModTest(bool songs,bool effects) {
@@ -816,7 +826,7 @@ int main(int argc,char** argv){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();oldModTest(true,false);oldModTest(false,true);
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();oldModTest(true,false);oldModTest(false,true);
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
