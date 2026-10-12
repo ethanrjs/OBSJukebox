@@ -819,6 +819,12 @@ static void senderTest() {
     check(published.version==5 && published.timestamp==s.timestamp && published.position==s.position,
         "sender preserves sampling time through publication delay");
 }
+static void senderInvalidPathTest() {
+    separate_song::Snapshot s;s.playing=true;s.path="C:/s\xFF.mp3";s.timestamp=monotonicNowNs();
+    separate_song::Bridge b;check(b.start(),"sender opens its socket");b.publish(s);
+    check(published.path[0]==0 && !(published.flags&2) && std::string(published.status)=="Song path is not UTF-8",
+        "the sender stops playback instead of sending a path that is not UTF-8");
+}
 #include "receiver-tests.inc"
 #include "deadline-tests.inc"
 #include "recovery-tests.inc"
@@ -843,7 +849,7 @@ int main(int argc,char** argv){
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
-    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();utf8Test();
+    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();senderInvalidPathTest();utf8Test();
     receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();

@@ -25,7 +25,7 @@ class Bridge {
     SongSocket socket = BAD_SOCKET;
     std::atomic<bool> stop{false};
     std::thread worker;
-    bool longPathLogged = false;
+    bool longPathLogged = false, invalidPathLogged = false;
 
   public:
     ~Bridge();
