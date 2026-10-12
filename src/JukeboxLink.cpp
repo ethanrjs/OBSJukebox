@@ -141,15 +141,17 @@ public:
 FileCache& files() { static auto cache = new FileCache(); return *cache; }
 bool exists(const std::string& path) { return files().get(path).first; }
 std::filesystem::path base() { return Loader::get()->getLoadedMod("fleym.nongd")->getSaveDir(); }
-// CellAccess and UIAccess read Jukebox's protected fields using the vendored 3.8.0 headers.
-// Geode lets the dependency update to any newer 3.x, so skip the row UI on other builds.
+// CellAccess and UIAccess read Jukebox's protected fields using the vendored headers for
+// JUKEBOX_VERSION (set in CMakeLists.txt). Geode lets the dependency update to any newer 3.x, so
+// skip the row UI on other builds.
 bool cellLayoutMatches() {
     static const bool matches = [] {
         auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
         if (!dependency) return false;
         auto version = dependency->getVersion();
-        bool ok = version.getMajor() == 3 && version.getMinor() == 8 && version.getPatch() == 0 && !version.getTag();
-        if (!ok) log::warn("Jukebox {} is not 3.8.0; OBS Jukebox integration is disabled; following game audio", version.toVString());
+        bool ok = version.toNonVString() == JUKEBOX_VERSION;
+        if (!ok) log::warn("Jukebox {} is not {}; OBS Jukebox integration is disabled; following game audio",
+                           version.toVString(), JUKEBOX_VERSION);
         return ok;
     }();
     return matches;

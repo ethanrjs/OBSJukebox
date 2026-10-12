@@ -9,7 +9,11 @@ if(APPLE)
   target_sources(${PROJECT_NAME} PRIVATE src/MacInput.mm)
   target_link_libraries(${PROJECT_NAME} "-framework Cocoa")
 endif()
-target_include_directories(${PROJECT_NAME} PRIVATE vendor/jukebox-3.8.0)
+# The Jukebox version whose vendored headers the mod is built against. JukeboxLink turns the
+# integration off on any other version, since it reads Jukebox's fields at these headers' offsets.
+set(JUKEBOX_VERSION 3.8.0)
+target_include_directories(${PROJECT_NAME} PRIVATE vendor/jukebox-${JUKEBOX_VERSION})
+target_compile_definitions(${PROJECT_NAME} PRIVATE JUKEBOX_VERSION="${JUKEBOX_VERSION}")
 if(OBS_JUKEBOX_QA)
   target_compile_definitions(${PROJECT_NAME} PRIVATE OBS_JUKEBOX_QA=1)
 endif()
@@ -27,5 +31,5 @@ if(NOT DEFINED ENV{GEODE_SDK})
   message(FATAL_ERROR "Set GEODE_SDK to the Geode SDK directory")
 endif()
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_BINARY_DIR}/geode)
-# Jukebox comes from the vendored 3.8.0 headers rather than the Geode index.
-setup_geode_mod(${PROJECT_NAME} DONT_INSTALL EXTERNALS fleym.nongd:v3.8.0)
+# Jukebox comes from the vendored headers rather than the Geode index.
+setup_geode_mod(${PROJECT_NAME} DONT_INSTALL EXTERNALS fleym.nongd:v${JUKEBOX_VERSION})
