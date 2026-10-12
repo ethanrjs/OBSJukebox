@@ -431,6 +431,26 @@ static void oldModTest(bool songs,bool effects) {
         songs?"v3 song packets play nothing and ask for a mod of v1.1 or later":
         "GDSFX1 effects play nothing and ask for a mod of v1.1 or later");
 }
+// Geode updates the mod by itself, while the plugin is installed by hand. Packets from a newer
+// protocol play nothing and ask for a newer plugin, instead of "Waiting for Geometry Dash".
+static void newModTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=3;p.position=1;p.sessionID=sim.local.session;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.start();
+    for(int i=0;i<10;++i){sim.sendRaw(p,sim.now,6,50001);sim.advance(10000000);}
+    bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
+    std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
+    check(!receiver->get().connected && silent && detail.find("Update the OBS Jukebox plugin")!=std::string::npos,
+        "packets from a newer mod play nothing and ask for a newer plugin");
+    // A later protocol might rename the song magic instead of bumping its version.
+    Simulation renamed;
+    std::memcpy(p.magic,"GDSONG2",8);p.sessionID=renamed.local.session;
+    renamed.start();
+    for(int i=0;i<10;++i){renamed.sendRaw(p,renamed.now,5,50001);renamed.advance(10000000);}
+    {std::lock_guard lock(renamed.source->mutex);detail=renamed.source->detail;}
+    check(!receiver->get().connected && detail.find("Update the OBS Jukebox plugin")!=std::string::npos,
+        "a renamed song packet from a newer mod asks for a newer plugin");
+}
 
 struct SyncedSender {
     SongSocket socket=BAD_SOCKET;
@@ -881,7 +901,7 @@ int main(int argc,char** argv){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);newModTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
