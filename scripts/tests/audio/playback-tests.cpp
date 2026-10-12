@@ -5,6 +5,7 @@
 #include "../../../src/MonotonicClock.hpp"
 #include "../../../src/Bridge.hpp"
 #include "../../../src/TapClock.hpp"
+#include "../../../src/Utf8.hpp"
 
 static SongLinkPacket published;
 static int captureSend(SongSocket,const char* data,int size,int,const sockaddr*,
@@ -779,6 +780,15 @@ static void localFilesOnlyTest() {
         refused&=!decoder.open(path) && decoder.error=="Only local song files can be played.";
     check(refused && decoder.open("artifacts/audio-tests/ramp.wav"),"decoder plays local files and refuses URLs and network shares");
 }
+static void utf8Test() {
+    using separate_song::validUtf8;
+    check(validUtf8("C:/Users/Jos\xC3\xA9/song.mp3") && validUtf8("\xE6\x9B\xB2.ogg") && validUtf8("\xF0\x9F\x8E\xB5.mp3") && validUtf8(""),
+        "valid UTF-8 paths are accepted");
+    bool refused=true;
+    for(const char* bad:{"C:/s\xFF.mp3","C:/Jos\xE9/song.mp3","\xC0\xAF","\xED\xA0\x80","\xF4\x90\x80\x80","\xE6\x9B"})
+        refused&=!validUtf8(bad);
+    check(refused,"malformed, overlong, surrogate, out-of-range and truncated UTF-8 is refused");
+}
 static void senderTest() {
     separate_song::Snapshot s;s.timestamp=monotonicNowNs();s.position=1.25;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -810,7 +820,7 @@ int main(int argc,char** argv){
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
-    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();
+    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();utf8Test();
     receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();
