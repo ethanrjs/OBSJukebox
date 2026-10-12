@@ -148,6 +148,29 @@ static class InstallerTests
             Check(refused,"two Jukebox packages are refused");
         }
         finally { Directory.Delete(gd,true); }
+        string rollback=Path.Combine(Path.GetTempPath(),"obs-jukebox-rollback-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(rollback);
+        try
+        {
+            string added=Path.Combine(rollback,"added.dll"),replaced=Path.Combine(rollback,"replaced.dll");
+            File.WriteAllText(added,"installed");File.WriteAllText(replaced,"installed");
+            string installedHash=Engine.Hash(Encoding.UTF8.GetBytes("installed"));
+            var broken=new InstallRecord { Files=[
+                new ChangedFile { Destination=added,InstalledHash=installedHash,Applied=true },
+                new ChangedFile { Destination=replaced,Backup=Path.Combine(rollback,"missing.bak"),OriginalHash="00",InstalledHash=installedHash,Applied=true }] };
+            bool reported=false; try { Engine.Restore(broken,_=>{}); } catch(IOException) { reported=true; }
+            Check(reported && !File.Exists(added),"a missing backup is reported after the rest of the transaction is restored");
+            File.WriteAllText(added,"installed");
+            string locked=Path.Combine(rollback,"locked.dll"),lockedBackup=Path.Combine(rollback,"locked.bak");
+            File.WriteAllText(locked,"installed");File.WriteAllText(lockedBackup,"original");
+            var blocked=new InstallRecord { Files=[
+                new ChangedFile { Destination=added,InstalledHash=installedHash,Applied=true },
+                new ChangedFile { Destination=locked,Backup=lockedBackup,OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("original")),InstalledHash=installedHash,Applied=true }] };
+            reported=false;
+            using(new FileStream(locked,FileMode.Open,FileAccess.Read,FileShare.None)) { try { Engine.Restore(blocked,_=>{}); } catch(IOException) { reported=true; } }
+            Check(reported && !File.Exists(added),"a file that can't be written is reported after the rest of the transaction is restored");
+        }
+        finally { Directory.Delete(rollback,true); }
         Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");
         var liveOptions=Options.Parse(["--mod-only"]);
         Check(liveOptions.ModOnly,"mod-only update is available from the command line");

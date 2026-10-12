@@ -551,7 +551,10 @@ static class Engine
         catch(Exception ex)
         {
             Log("Install failed: "+ex.Message+". Restoring this transaction.");
-            Restore(record,Log); record.Status="rolled-back"; Save(); throw;
+            // A rollback problem is logged; the user still sees why the install failed.
+            try { Restore(record,Log); }
+            catch(Exception restoreError) { Log("Rollback incomplete: "+restoreError.Message); }
+            record.Status="rolled-back"; Save(); throw;
         }
         if(closedApps==null && o.Restart) RestartApps(stopped,Log);
     }
@@ -571,33 +574,51 @@ static class Engine
             log("Restarted: "+exe);
         }
     }
+    // Restores every file it can, then reports the ones it couldn't.
     internal static void Restore(InstallRecord record,Action<string> log)
     {
+        var failed=new List<string>();
         foreach(var f in record.Files.AsEnumerable().Reverse())
         {
             if(!f.Applied) continue;
-            if(File.Exists(f.Destination) && HashFile(f.Destination)!=f.InstalledHash)
+            try { if(!RestoreFile(f,log)) failed.Add(f.Destination); }
+            catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
             {
-                if(f.InstalledScene!=null && f.Backup!=null && File.Exists(f.Backup) && HashFile(f.Backup)==f.OriginalHash)
-                {
-                    var restored=UndoCollection(File.ReadAllBytes(f.Backup),f.InstalledScene,File.ReadAllBytes(f.Destination));
-                    File.WriteAllBytes(f.Destination,restored); log("Removed installer scene changes while preserving later edits: "+f.Destination);
-                }
-                else log("Preserve changed file; manual restore available: "+f.Destination);
-                continue;
+                log("Could not restore, restore this file by hand: "+f.Destination+" ("+ex.Message+")"+(f.Backup!=null?" Backup: "+f.Backup:""));
+                failed.Add(f.Destination);
             }
-            if(f.Backup!=null)
-            {
-                if(!File.Exists(f.Backup) || HashFile(f.Backup)!=f.OriginalHash) throw new IOException("Missing or altered backup: "+f.Backup);
-                try { Directory.CreateDirectory(Path.GetDirectoryName(f.Destination)!); File.Copy(f.Backup,f.Destination,true); }
-                catch(UnauthorizedAccessException) when(IsMachinePlugin(f.Destination)) { PrivilegedPluginWrite(File.ReadAllBytes(f.Backup)); }
-                log("Restored: "+f.Destination);
-            }
-            else if(File.Exists(f.Destination)) {
-                try { File.Delete(f.Destination); }
-                catch(UnauthorizedAccessException) when(IsMachinePlugin(f.Destination)) { RunPluginHelper("remove",f.InstalledHash); }
-                log("Removed: "+f.Destination); }
         }
+        if(failed.Count>0) throw new IOException("Could not restore "+failed.Count+" file(s): "+string.Join(", ",failed)+". The setup log says how to restore each one by hand.");
+    }
+    // False when the backup is missing or altered.
+    static bool RestoreFile(ChangedFile f,Action<string> log)
+    {
+        if(File.Exists(f.Destination) && HashFile(f.Destination)!=f.InstalledHash)
+        {
+            if(f.InstalledScene!=null && f.Backup!=null && File.Exists(f.Backup) && HashFile(f.Backup)==f.OriginalHash)
+            {
+                var restored=UndoCollection(File.ReadAllBytes(f.Backup),f.InstalledScene,File.ReadAllBytes(f.Destination));
+                File.WriteAllBytes(f.Destination,restored); log("Removed installer scene changes while preserving later edits: "+f.Destination);
+            }
+            else log("Preserve changed file; manual restore available: "+f.Destination);
+            return true;
+        }
+        if(f.Backup!=null)
+        {
+            if(!File.Exists(f.Backup) || HashFile(f.Backup)!=f.OriginalHash)
+            {
+                log("Missing or altered backup, restore this file by hand: "+f.Destination);
+                return false;
+            }
+            try { Directory.CreateDirectory(Path.GetDirectoryName(f.Destination)!); File.Copy(f.Backup,f.Destination,true); }
+            catch(UnauthorizedAccessException) when(IsMachinePlugin(f.Destination)) { PrivilegedPluginWrite(File.ReadAllBytes(f.Backup)); }
+            log("Restored: "+f.Destination);
+        }
+        else if(File.Exists(f.Destination)) {
+            try { File.Delete(f.Destination); }
+            catch(UnauthorizedAccessException) when(IsMachinePlugin(f.Destination)) { RunPluginHelper("remove",f.InstalledHash); }
+            log("Removed: "+f.Destination); }
+        return true;
     }
     static void Uninstall(Options o,Action<string> log,List<string> stopped)
     {
