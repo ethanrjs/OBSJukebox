@@ -255,7 +255,7 @@ std::string download(Choice c, bool retry) {
     }
     auto& request = requests[k];
     if (request.pending && Clock::now() - request.started < std::chrono::seconds(30)) return "";
-    if (request.pending) request = {false, "Download timed out. Select the song to retry."};
+    if (request.pending) request = {false, "Download timed out.\nSelect the song to retry."};
     if (!request.error.empty() && !retry) return request.error;
     request = {true, "", Clock::now()};
     log::info("OBS song cache miss: {} ({})", c.name, c.uid);
@@ -268,7 +268,7 @@ std::string download(Choice c, bool retry) {
             if (local["unique_id"].asString().unwrapOr("") == c.uid) return true;
         return false;
     }())
-        request = {false, "Local song file is unavailable. Choose an existing file in Jukebox."};
+        request = {false, "Local song file is unavailable.\nChoose an existing file in Jukebox."};
     // Jukebox makes every song it finishes downloading GD's active song, so asking it to fetch the
     // OBS song would switch the song GD plays. The user downloads it in Jukebox, which switches it
     // too, so the message says to pick the Game song again.
@@ -474,7 +474,7 @@ void refreshUI() {
         lastRequestCheck = Clock::now();
         for (auto& [key, request] : requests)
             if (request.pending && Clock::now() - request.started >= std::chrono::seconds(30))
-                request = {false, "Download timed out. Select the song to retry."};
+                request = {false, "Download timed out.\nSelect the song to retry."};
     }
     if (!deferredDownloads.empty()) {
         auto pending = std::move(deferredDownloads);

@@ -511,8 +511,9 @@ class $modify(SeparateSongPlay, PlayLayer) {
 
 static void prepareOBS(GJGameLevel* level) {
     auto result = jukebox_link::prepare(level, true);
+    // The reason says what to do; the second part says what OBS plays meanwhile.
     if (!result.ready && !result.error.empty())
-        Notification::create("OBS song unavailable; following game audio", NotificationIcon::Info)->show();
+        Notification::create(result.error + "\nOBS plays the game's song for now.", NotificationIcon::Info)->show();
 }
 
 class $modify(SeparateSongInfo, LevelInfoLayer) {
