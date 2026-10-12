@@ -601,6 +601,7 @@ class $modify(SeparateSongMenu, MenuLayer) {
         if (!MenuLayer::init()) return false;
         selectOffsetLevel(nullptr);
         publish("Ready", false);
+        jukebox_link::showVersionNotice();
         return true;
     }
 };

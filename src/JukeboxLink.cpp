@@ -451,6 +451,15 @@ void select(jukebox::NongCell* cell) {
 }
 
 void shutdown() { files().shutdown(); }
+void showVersionNotice() {
+    static bool shown = false;
+    if (shown || cellLayoutMatches() || !Mod::get()->getSettingValue<bool>("enabled")) return;
+    shown = true;
+    auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
+    auto found = dependency ? dependency->getVersion().toVString() : std::string("none");
+    Notification::create(fmt::format("OBS Jukebox doesn't support Jukebox {} yet.\nOBS plays the game's song.", found),
+                         NotificationIcon::Warning, 6.f)->show();
+}
 // No Jukebox list can be open during unpaused gameplay.
 bool inGameplay() { auto play = PlayLayer::get(); return play && !play->m_isPaused; }
 void refreshUI() {
