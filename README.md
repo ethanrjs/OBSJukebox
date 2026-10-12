@@ -7,15 +7,15 @@ Separate GD/Song output for OBS. Also keeps sound effects. No driver/audio cable
 
 ## Installation
 
-1. Go to **Releases** on the right
-2. Download the executable for your platform (.exe for Windows, for example)
-3. Run it, accept defaults.
+1. Go to **Releases** on this repository's GitHub page.
+2. Download the setup for your platform (the .exe on Windows, the .zip on macOS).
+3. Run it. On Windows, tick **Download and install Jukebox 3.8.0** if you don't have Jukebox yet, and **Add GD Sounds to my existing OBS scenes** if you want setup to add the source. Both are off by default.
 4. It will ask you to close OBS and GD if they are running.
 <img width="717" height="636" alt="image" src="https://github.com/user-attachments/assets/caaf8b6f-a84d-44ff-be6e-cb0466733efd" />
 
 Done! Change OBS/Game volume in pause menu. Other options in geode mod menu.
 
-On Windows, the installer creates a source in OBS. On macOS, add **GD Sounds** once after installation.
+If you didn't let setup add it (and always on macOS), add **GD Sounds** in OBS once after installation.
 
 <img width="111" height="233" alt="image" src="https://github.com/user-attachments/assets/3af2ad0d-5e2f-489b-814f-e33b7ae55eb9" />
 
