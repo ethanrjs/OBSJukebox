@@ -1,5 +1,6 @@
 #include "JukeboxLink.hpp"
 #include "PlaybackIdentity.hpp"
+#include "Utf8.hpp"
 #include <Geode/utils/Keyboard.hpp>
 #include <jukebox/ui/list/nong_cell.hpp>
 #include <jukebox/ui/list/nong_list.hpp>
@@ -62,7 +63,10 @@ bool gameButtonShown(jukebox::NongCellUI* ui) {
     auto gameCheck = UIAccess::selected(ui);
     return gameCheck && gameCheck->isVisible();
 }
-std::filesystem::path utf8Path(std::string_view path) {
+// GD and Jukebox hand over UTF-8 in practice, but nothing guarantees it, and on Windows building a
+// path from anything else throws. Callers treat nullopt as a missing file.
+std::optional<std::filesystem::path> utf8Path(std::string_view path) {
+    if (!validUtf8(path)) return std::nullopt;
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size()));
 }
 // Filesystem and JSON work never runs on the game/sampling thread. Results are
@@ -91,17 +95,16 @@ class FileCache {
             }
             bool present = false;
             std::optional<matjson::Value> parsed;
-            try {
-                auto path = utf8Path(job.first);
+            if (auto path = utf8Path(job.first)) {
                 if (job.second) {
-                    auto result = file::readJson(path);
+                    auto result = file::readJson(*path);
                     if (result && result.unwrap().isObject()) parsed = result.unwrap();
                 } else {
                     std::error_code error;
-                    present = std::filesystem::is_regular_file(path, error) &&
-                        std::filesystem::file_size(path, error) > 0 && !error;
+                    present = std::filesystem::is_regular_file(*path, error) &&
+                        std::filesystem::file_size(*path, error) > 0 && !error;
                 }
-            } catch (const std::exception&) { }
+            }
             std::lock_guard lock(mutex);
             auto& entry = entries[job.first];
             entry.exists = present;
@@ -193,7 +196,7 @@ std::string pathFor(const matjson::Value& song) {
     auto path = song["path"].asString().unwrapOr("");
     if (!path.empty() && (exists(path) || !files().known(path))) return path;
     auto name = song["filename"].asString().unwrapOr("");
-    if (!name.empty()) return string::pathToString(base()/"nongs"/utf8Path(name));
+    if (auto file = name.empty() ? std::nullopt : utf8Path(name)) return string::pathToString(base()/"nongs"/ *file);
     return path;
 }
 std::string originalPath(int id) {
@@ -201,8 +204,9 @@ std::string originalPath(int id) {
         auto name = LevelTools::getAudioFileName(-id-1);
         return CCFileUtils::get()->fullPathForFilename(name.c_str(), false);
     }
-    auto name = string::pathToString(utf8Path(MusicDownloadManager::sharedState()->pathForSongFolder(id).c_str()) /
-                                    fmt::format("{}.{}", id, id > 9999999 ? "ogg" : "mp3"));
+    auto folder = utf8Path(MusicDownloadManager::sharedState()->pathForSongFolder(id).c_str());
+    if (!folder) return {};
+    auto name = string::pathToString(*folder / fmt::format("{}.{}", id, id > 9999999 ? "ogg" : "mp3"));
     return CCFileUtils::get()->fullPathForFilename(name.c_str(), false);
 }
 Choice resolved(Choice c) {
@@ -225,15 +229,15 @@ std::string normalizedMusicPath(const std::string& path) {
     if (auto found = normalized.find(path); found != normalized.end()) return found->second;
     if (normalized.size() >= 4096) normalized.clear();
     auto full = CCFileUtils::get()->fullPathForFilename(path.c_str(), false);
-    try {
-        auto value = string::pathToString(utf8Path(full).lexically_normal());
-        std::replace(value.begin(), value.end(), '\\', '/');
+    auto file = utf8Path(full);
+    if (!file) return {};
+    auto value = string::pathToString(file->lexically_normal());
+    std::replace(value.begin(), value.end(), '\\', '/');
 #ifdef GEODE_IS_WINDOWS
-        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
 #endif
-        normalized[path] = value;
-        return value;
-    } catch (const std::filesystem::filesystem_error&) { return {}; }
+    normalized[path] = value;
+    return value;
 }
 std::unordered_map<std::string, std::pair<Choice, bool>> deferredDownloads;
 std::string download(Choice c, bool retry) {
