@@ -33,6 +33,7 @@ struct Tap {
     std::atomic<bool> stopping{false};
     std::counting_semaphore<capacity + 1> ready{0};
     std::thread worker;
+    SongSocket transport = BAD_SOCKET;
     ~Tap() { shutdown(); }
     void shutdown() {
         enabled = false;
@@ -58,6 +59,10 @@ struct Tap {
         ready.release();
         if (worker.joinable())
             worker.join();
+        if (transport != BAD_SOCKET) {
+            closeSocket(transport);
+            transport = BAD_SOCKET;
+        }
     }
     bool attachedTo(FMOD::ChannelGroup *current) const {
         if (!dsp || current != group)
@@ -118,6 +123,11 @@ struct Tap {
     bool attach(FMODAudioEngine *engine, FMOD::ChannelGroup *group, uint32_t id) {
         if (!group || !engine->m_system)
             return false;
+        // The socket comes first: a tap that can't send must not sit in FMOD's graph. A failed
+        // attach destroys the Tap, which closes it.
+        transport = openLoopbackSocket();
+        if (transport == BAD_SOCKET)
+            return false;
         this->group = group;
         system = engine->m_system;
         stream = id;
@@ -149,12 +159,6 @@ struct Tap {
             return false;
         }
         worker = std::thread([this] {
-            if (!socketsReady())
-                return;
-            auto socket = ::socket(AF_INET, SOCK_DGRAM, 0);
-            if (socket == BAD_SOCKET)
-                return;
-            nonblocking(socket);
             sockaddr_in target{};
             target.sin_family = AF_INET;
             target.sin_port = htons(receiverPort());
@@ -166,11 +170,10 @@ struct Tap {
                 auto r = read.load(std::memory_order_relaxed);
                 auto &p = queue[r % capacity];
                 auto size = offsetof(EffectsPacketV2, samples) + p.frames * 2 * sizeof(float);
-                sendto(socket, reinterpret_cast<const char *>(&p), static_cast<int>(size), 0,
+                sendto(transport, reinterpret_cast<const char *>(&p), static_cast<int>(size), 0,
                        reinterpret_cast<sockaddr *>(&target), sizeof(target));
                 read.store(r + 1, std::memory_order_release);
             }
-            closeSocket(socket);
         });
         return true;
     }

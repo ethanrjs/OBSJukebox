@@ -31,20 +31,9 @@ void Bridge::shutdown() {
 bool Bridge::start() {
     if (socket != BAD_SOCKET)
         return true;
-    if (!socketsReady())
-        return false;
-    socket = ::socket(AF_INET, SOCK_DGRAM, 0);
+    socket = openLoopbackSocket();
     if (socket == BAD_SOCKET)
         return false;
-    sockaddr_in local{};
-    local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(socket, reinterpret_cast<sockaddr *>(&local), sizeof(local)) != 0) {
-        closeSocket(socket);
-        socket = BAD_SOCKET;
-        return false;
-    }
-    nonblocking(socket);
     stop = false;
     worker = std::thread([this] {
         while (!stop) {

@@ -29,6 +29,25 @@ inline void closeSocket(SongSocket s) { close(s); }
 inline void nonblocking(SongSocket s) { fcntl(s, F_SETFL, O_NONBLOCK); }
 #endif
 
+// Returns a nonblocking UDP socket bound to 127.0.0.1, so it never listens on other interfaces, or
+// BAD_SOCKET on failure.
+inline SongSocket openLoopbackSocket() {
+    if (!socketsReady())
+        return BAD_SOCKET;
+    auto udp = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp == BAD_SOCKET)
+        return BAD_SOCKET;
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::bind(udp, reinterpret_cast<sockaddr *>(&local), sizeof(local)) != 0) {
+        closeSocket(udp);
+        return BAD_SOCKET;
+    }
+    nonblocking(udp);
+    return udp;
+}
+
 // POSIX poll accepts descriptors above FD_SETSIZE; Windows fd_set stores handles.
 inline bool waitSocketReadable(SongSocket socket, int milliseconds) {
 #ifdef _WIN32
