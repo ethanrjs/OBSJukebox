@@ -192,11 +192,16 @@ matjson::Value find(const matjson::Value& data, const std::string& uid, bool ori
     }
     return matjson::Value();
 }
-std::string pathFor(const matjson::Value& song) {
+// Jukebox opens local and hosted songs from nongs/<filename> when the entry has one, and uses the
+// stored absolute path only without it (nong_serialize.hpp), so a moved save folder still plays its
+// own copy. YouTube entries have no filename, and GD's original song keeps its stored path.
+std::string pathFor(const matjson::Value& song, bool original) {
     auto path = song["path"].asString().unwrapOr("");
-    if (!path.empty() && (exists(path) || !files().known(path))) return path;
     auto name = song["filename"].asString().unwrapOr("");
-    if (auto file = name.empty() ? std::nullopt : utf8Path(name)) return string::pathToString(base()/"nongs"/ *file);
+    auto inNongs = name.empty() ? std::nullopt : utf8Path(name);
+    if (!original && inNongs) return string::pathToString(base()/"nongs"/ *inNongs);
+    if (!path.empty() && (exists(path) || !files().known(path))) return path;
+    if (inNongs) return string::pathToString(base()/"nongs"/ *inNongs);
     return path;
 }
 std::string originalPath(int id) {
@@ -214,7 +219,7 @@ Choice resolved(Choice c) {
     if (meta.isObject()) {
         c.name = meta["name"].asString().unwrapOr(c.name);
         c.offset = static_cast<int>(meta["offset"].asInt().unwrapOr(c.offset));
-        auto p = pathFor(meta); if (!p.empty()) c.path = p;
+        auto p = pathFor(meta, c.original); if (!p.empty()) c.path = p;
     } else if (auto it = addedSongs.find(key(c.id,c.uid)); it != addedSongs.end()) {
         c.name = it->second.name; c.offset = it->second.offset;
         if (!it->second.path.empty()) c.path = it->second.path;
@@ -274,7 +279,7 @@ Choice active(int id) {
     auto m = manifest(id); auto uid = m["active"].asString().unwrapOr("");
     auto v = find(m, uid); bool original = uid.empty() || uid == m["default"]["unique_id"].asString().unwrapOr("");
     Choice c{id, static_cast<int>(v["offset"].asInt().unwrapOr(0)), uid,
-        v["name"].asString().unwrapOr("In-game song"), pathFor(v), original};
+        v["name"].asString().unwrapOr("In-game song"), pathFor(v, original), original};
     if (original && (c.path.empty() || (files().known(c.path) && !exists(c.path)))) c.path = originalPath(id);
     return c;
 }
