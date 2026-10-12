@@ -142,3 +142,16 @@ print user-edited > "$qa_mods/local.separate_song.geode"
 [[ "$(cat "$qa_mods/local.separate_song.geode")" == user-edited ]]
 [[ "$(cat "$qa_plugin/stale.txt")" == stale ]]
 print 'undo-restores-bundle-preserves-user-mod: pass'
+# A Mac without Geode gets Geode's resources directly in geode.loader, not one folder deeper.
+qa_fresh="$qa_root/Fresh Geometry Dash.app"
+mkdir -p "$qa_fresh/Contents/MacOS" "$qa_fresh/Contents/Frameworks"
+print 'original-fmod' > "$qa_fresh/Contents/Frameworks/libfmod.dylib"
+touch "$qa_fresh/Contents/MacOS/Geometry Dash"
+if ! /usr/bin/env HOME="$qa_home" /bin/zsh "$qa_script" "$qa_fresh" "${OBS_APP:-/Applications/OBS.app}" </dev/null > "$qa_root/fresh.log" 2>&1; then
+    print 'fresh: the installer failed. Its log:'; cat "$qa_root/fresh.log"; exit 1
+fi
+qa_resources=("$qa_payload/payload/geode/resources/geode.loader"/*(N))
+(( ${#qa_resources} > 0 ))
+[[ -f "$qa_fresh/Contents/geode/resources/geode.loader/${qa_resources[1]:t}" ]]
+[[ ! -e "$qa_fresh/Contents/geode/resources/geode.loader/geode.loader" ]]
+print 'fresh-geode-resources-at-top-level: pass'
