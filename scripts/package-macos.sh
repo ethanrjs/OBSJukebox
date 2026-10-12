@@ -34,6 +34,7 @@ cp scripts/Install.command "$song_resources/Install.command"
 cp scripts/install-state.pl "$song_resources/install-state.pl"
 cp scripts/check-geode-version.pl "$song_resources/check-geode-version.pl"
 cp logo.png "$song_resources/logo.png"
+python3 scripts/check-mod-package.py "$MOD_PACKAGE" local.separate_song.dylib
 cp "$MOD_PACKAGE" "$song_resources/payload/local.separate_song.geode"
 cp "$JUKEBOX_PACKAGE" "$song_resources/payload/fleym.nongd.geode"
 cp vendor/jukebox-*/LICENSE "$song_resources/Jukebox-LICENSE"
