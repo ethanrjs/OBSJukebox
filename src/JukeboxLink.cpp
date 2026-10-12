@@ -442,10 +442,7 @@ void select(jukebox::NongCell* cell) {
     // song. Asking it to download one fails with "already downloaded" whenever the async file
     // cache has not caught up. GD's original song is the only one that may still be missing.
     auto error = c.original ? download(c, true) : std::string();
-    if (!error.empty()) {
-        Notification::create("OBS download failed", NotificationIcon::Error)->show();
-        FLAlertLayer::create("OBS Song", error, "OK")->show();
-    }
+    if (!error.empty()) FLAlertLayer::create("OBS Song", error, "OK")->show();
     refreshUI();
 }
 }
