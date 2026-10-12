@@ -406,9 +406,11 @@ public:
         // recreates both together and only sets the Game button's visibility there.
         if (shown && !menu->getUserFlag("widened"_spr)) {
             menu->setUserFlag("widened"_spr);
-            menu->setContentWidth(menu->getContentWidth()+35.f);
+            // The checkbox plus Jukebox 3.8.0's row gap (setGap(5.f) in upstream nong_cell_ui.cpp).
+            const float widen = m_checkbox->getContentWidth() + 5.f;
+            menu->setContentWidth(menu->getContentWidth() + widen);
             if (auto info = UIAccess::songInfo(ui)) {
-                info->setContentWidth(std::max(0.f, info->getContentWidth()-35.f));
+                info->setContentWidth(std::max(0.f, info->getContentWidth() - widen));
                 info->updateLayout();
             }
             relayout = true;

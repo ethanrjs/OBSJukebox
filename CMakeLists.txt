@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(SeparateSong LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(OBS_JUKEBOX_QA "Enable test-only environment overrides" OFF)
 add_library(${PROJECT_NAME} SHARED src/main.cpp src/Bridge.cpp src/JukeboxLink.cpp src/AudioTap.cpp src/EffectsPlayback.cpp src/OffsetSetting.cpp src/PauseVolume.cpp src/LevelIdentity.cpp src/Shutdown.cpp)
