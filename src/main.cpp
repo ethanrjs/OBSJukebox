@@ -572,26 +572,33 @@ class $modify(SeparateSongLevelSelect, LevelSelectLayer) {
         selectCurrentOffset();
     }
 };
-class $modify(SeparateSongDirector, CCDirector) {
-    void drawScene() {
-        static auto last = std::chrono::steady_clock::time_point{}, lastMusic = last;
-        auto now = std::chrono::steady_clock::now();
+// Geode's guidelines flag per-frame hooks, so the service work runs from the scheduler. Unlike the
+// drawScene hook, the scheduler stops while the director is paused; levels sample from postUpdate.
+class SeparateSongService : public CCObject {
+public:
+    // A level samples its own music from postUpdate. Any other PlayLayer that still exists is
+    // only mirrored once it has quit, so a played level's song never reaches OBS as GD music
+    // in place of its OBS choice.
+    static bool outsideLevel(PlayLayer* play) { return !play || static_cast<SeparateSongPlay*>(play)->m_fields->quit; }
+    // Every 100 ms: keep the effects tap attached, refresh the Jukebox list, and report the level.
+    void poll(float) {
         auto play = PlayLayer::get();
-        // A level samples its own music from postUpdate. Any other PlayLayer that still exists is
-        // only mirrored once it has quit, so a played level's song never reaches OBS as GD music
-        // in place of its OBS choice.
-        bool outsideLevel = !play || static_cast<SeparateSongPlay*>(play)->m_fields->quit;
-        if (now-last > std::chrono::milliseconds(100)) {
-            last = now; audio_tap::install(); jukebox_link::refreshUI();
-            if (play && play == activePlayLayer) sampleMusic(play);
-            else if (!outsideLevel) publish("Ready", false);
-        }
-        if (outsideLevel && now-lastMusic >= std::chrono::milliseconds(10)) {
-            lastMusic = now; sampleMusicOutsideLevels();
-        }
-        CCDirector::drawScene();
+        audio_tap::install(); jukebox_link::refreshUI();
+        if (play && play == activePlayLayer) sampleMusic(play);
+        else if (!outsideLevel(play)) publish("Ready", false);
+    }
+    // Every 10 ms outside levels: mirror GD's menu and editor music.
+    void mirrorMenuMusic(float) {
+        if (outsideLevel(PlayLayer::get())) sampleMusicOutsideLevels();
     }
 };
+$on_mod(Loaded) {
+    // Leaked on purpose, like the bridge: nothing may run during static teardown.
+    auto service = new SeparateSongService();
+    auto scheduler = CCDirector::get()->getScheduler();
+    scheduler->scheduleSelector(schedule_selector(SeparateSongService::poll), service, .1f, false);
+    scheduler->scheduleSelector(schedule_selector(SeparateSongService::mirrorMenuMusic), service, .01f, false);
+}
 
 class $modify(SeparateSongMenu, MenuLayer) {
     void onEnter() {
