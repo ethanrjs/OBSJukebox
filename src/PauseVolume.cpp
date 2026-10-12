@@ -34,6 +34,7 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
         auto fields = m_fields.self();
+        // Node IDs (an optional dependency) names these; without it, match the English labels.
         fields->music = typeinfo_cast<Slider*>(getChildByIDRecursive("music-slider"));
         fields->effects = typeinfo_cast<Slider*>(getChildByIDRecursive("sfx-slider"));
         fields->musicLabel = typeinfo_cast<CCLabelBMFont*>(getChildByIDRecursive("music-label"));
