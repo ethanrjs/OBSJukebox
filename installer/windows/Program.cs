@@ -54,6 +54,7 @@ sealed class Options
     internal byte[]? DownloadedJukebox;
     internal string? PreviousVersion;
     internal bool AlreadyCurrent;
+    internal bool ScenesFound;
     public string? Manifest;
     public static Options Parse(string[] args)
     {
@@ -248,6 +249,9 @@ static class Engine
         catch(JsonException) { return false; }
     }
     internal static string? InstalledVersion(string gd) => FindInstalledMod(gd)?.Version;
+    internal static string ObsSetupMessage(Options o) =>
+        (o.CreateScene && o.ScenesFound ? "OBS: GD Sounds is in your existing scenes." : "OBS: add Sources > GD Sounds once in OBS.")+
+        " In GD Jukebox, use the Game and OBS checkboxes. Keep Audio Monitoring off. Existing OBS collections and unrelated mods are preserved.";
     internal static string SuccessMessage(Options o)
     {
         string result=o.AlreadyCurrent ? "OBS Jukebox " + Program.ReleaseVersion + " is already up to date." :
@@ -304,7 +308,8 @@ static class Engine
         if (o.CreateScene && !o.ModOnly)
         {
             string sceneRoot = portable ? Path.Combine(o.OBS,"config","obs-studio","basic","scenes") : o.SceneRoot;
-            if (!Directory.Exists(sceneRoot)) log("No existing OBS collections found. In OBS add Sources > GD Sounds once; setup creates no new collection.");
+            o.ScenesFound = Directory.Exists(sceneRoot);
+            if (!o.ScenesFound) log("No existing OBS collections found. In OBS add Sources > GD Sounds once; setup creates no new collection.");
             else foreach (var file in Directory.GetFiles(sceneRoot,"*.json"))
             {
                 byte[] original=File.ReadAllBytes(file);
@@ -544,7 +549,7 @@ static class Engine
             record.Status="installed"; Save();
             Log(SuccessMessage(o));
             Log("Backup and uninstall manifest: "+manifest);
-            Log(o.ModOnly ? "Game mod updated. OBS was left running. Run full setup after your stream for the OBS plugin update." : "OBS: GD Sounds is added to existing scenes. In GD Jukebox, use the Game and OBS checkboxes in Jukebox. Audio Monitoring stays off. Existing OBS collections and unrelated mods are preserved.");
+            Log(o.ModOnly ? "Game mod updated. OBS was left running. Run full setup after your stream for the OBS plugin update." : ObsSetupMessage(o));
             File.WriteAllText(Path.Combine(o.StateRoot,"latest-manifest.txt"),manifest);
 
         }

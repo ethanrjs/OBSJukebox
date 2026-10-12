@@ -172,6 +172,9 @@ static class InstallerTests
         }
         finally { Directory.Delete(rollback,true); }
         Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");
+        Check(Engine.ObsSetupMessage(new Options{CreateScene=true,ScenesFound=true}).StartsWith("OBS: GD Sounds is in your existing scenes.") &&
+              Engine.ObsSetupMessage(new Options{CreateScene=true}).StartsWith("OBS: add Sources > GD Sounds once in OBS.") &&
+              Engine.ObsSetupMessage(new Options()).StartsWith("OBS: add Sources > GD Sounds once in OBS."),"the OBS step in the success log matches what setup did to the scenes");
         var liveOptions=Options.Parse(["--mod-only"]);
         Check(liveOptions.ModOnly,"mod-only update is available from the command line");
         liveOptions.GD=Path.Combine(Path.GetTempPath(),"GD");
