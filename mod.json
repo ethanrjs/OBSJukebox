@@ -34,9 +34,6 @@
   ],
   "dependencies": {
     "fleym.nongd": ">=v3.8.0",
-    "geode.node-ids": {
-      "version": ">=v1.23.0",
-      "required": false
-    }
+    "geode.node-ids": ">=v1.23.0"
   }
 }
