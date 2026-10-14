@@ -1,5 +1,6 @@
 #include "Bridge.hpp"
 #include "MonotonicClock.hpp"
+#include "Utf8.hpp"
 #include <cstring>
 #include <algorithm>
 #if __has_include(<Geode/Geode.hpp>)
@@ -30,20 +31,9 @@ void Bridge::shutdown() {
 bool Bridge::start() {
     if (socket != BAD_SOCKET)
         return true;
-    if (!socketsReady())
-        return false;
-    socket = ::socket(AF_INET, SOCK_DGRAM, 0);
+    socket = openLoopbackSocket();
     if (socket == BAD_SOCKET)
         return false;
-    sockaddr_in local{};
-    local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(socket, reinterpret_cast<sockaddr *>(&local), sizeof(local)) != 0) {
-        closeSocket(socket);
-        socket = BAD_SOCKET;
-        return false;
-    }
-    nonblocking(socket);
     stop = false;
     worker = std::thread([this] {
         while (!stop) {
@@ -95,13 +85,15 @@ void Bridge::publish(const Snapshot &s) {
     copyText(p.level, s.level);
     copyText(p.song, s.song);
     // Paths are never shortened: a cut path names the wrong file, so a long one stops playback instead.
-    if (s.path.size() < sizeof(p.path)) {
+    // A path that isn't UTF-8 stops playback too: OBS can't open it.
+    bool tooLong = s.path.size() >= sizeof(p.path);
+    if (!tooLong && validUtf8(s.path)) {
         std::strncpy(p.path, s.path.c_str(), sizeof(p.path) - 1);
     } else {
         p.flags &= ~2u;
         std::memset(p.status, 0, sizeof(p.status));
-        copyText(p.status, std::string("Song path too long"));
-        if (!longPathLogged) {
+        copyText(p.status, std::string(tooLong ? "Song path too long" : "Song path is not UTF-8"));
+        if (tooLong && !longPathLogged) {
 #if __has_include(<Geode/Geode.hpp>)
             geode::log::warn("OBS song path exceeds the {} byte transport limit ({} bytes)",
                              sizeof(p.path) - 1, s.path.size());
@@ -111,6 +103,12 @@ void Bridge::publish(const Snapshot &s) {
 #endif
             longPathLogged = true;
         }
+#if __has_include(<Geode/Geode.hpp>)
+        if (!tooLong && !invalidPathLogged) {
+            geode::log::warn("OBS song path is not valid UTF-8, so OBS can't play it");
+            invalidPathLogged = true;
+        }
+#endif
     }
     sockaddr_in address{};
     address.sin_family = AF_INET;

@@ -8,9 +8,13 @@
   "name": "OBS Jukebox",
   "version": "v1.2.3",
   "developer": "babbur",
-  "description": "Separate GD/Song output for OBS. Requires the OBS Jukebox OBS plugin.",
+  "description": "Play a different song on your OBS stream than in game, with the OBS Jukebox plugin.",
   "links": {
     "source": "https://github.com/ethanrjs/OBSJukebox"
+  },
+  "issues": {
+    "info": "Report problems on GitHub. Include your Geode log and say whether GD Sounds shows up in OBS.",
+    "url": "https://github.com/ethanrjs/OBSJukebox/issues"
   },
   "settings": {
     "enabled": {
@@ -29,6 +33,7 @@
     "music"
   ],
   "dependencies": {
-    "fleym.nongd": ">=v3.8.0"
+    "fleym.nongd": ">=v3.8.0",
+    "geode.node-ids": ">=v1.23.0"
   }
 }

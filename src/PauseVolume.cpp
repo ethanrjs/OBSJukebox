@@ -5,20 +5,6 @@
 using namespace geode::prelude;
 using namespace separate_song;
 
-namespace {
-void findVolumeControls(CCNode* node, std::vector<Slider*>& sliders,
-                        CCLabelBMFont*& musicLabel, CCLabelBMFont*& effectsLabel) {
-    if (auto slider = typeinfo_cast<Slider*>(node)) sliders.push_back(slider);
-    if (auto label = typeinfo_cast<CCLabelBMFont*>(node)) {
-        std::string text = label->getString();
-        if (text == "Music") musicLabel = label;
-        else if (text == "SFX") effectsLabel = label;
-    }
-    for (auto child : CCArrayExt<CCNode*>(node->getChildren()))
-        findVolumeControls(child, sliders, musicLabel, effectsLabel);
-}
-}
-
 class $modify(ObsJukeboxPauseVolume, PauseLayer) {
     struct Fields {
         bool obs = false;
@@ -34,26 +20,12 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
         auto fields = m_fields.self();
+        // Node IDs (a required dependency) names these. If another mod removes or replaces them,
+        // the checks below leave the pause menu alone.
         fields->music = typeinfo_cast<Slider*>(getChildByIDRecursive("music-slider"));
         fields->effects = typeinfo_cast<Slider*>(getChildByIDRecursive("sfx-slider"));
         fields->musicLabel = typeinfo_cast<CCLabelBMFont*>(getChildByIDRecursive("music-label"));
         fields->effectsLabel = typeinfo_cast<CCLabelBMFont*>(getChildByIDRecursive("sfx-label"));
-        if (!fields->music || !fields->effects || !fields->musicLabel || !fields->effectsLabel) {
-            std::vector<Slider*> sliders;
-            CCLabelBMFont* musicLabel = nullptr;
-            CCLabelBMFont* effectsLabel = nullptr;
-            findVolumeControls(this, sliders, musicLabel, effectsLabel);
-            if (sliders.size() == 2) {
-                std::sort(sliders.begin(), sliders.end(), [](Slider* left, Slider* right) {
-                    return left->getParent()->convertToWorldSpace(left->getPosition()).x <
-                           right->getParent()->convertToWorldSpace(right->getPosition()).x;
-                });
-                if (!fields->music) fields->music = sliders[0];
-                if (!fields->effects) fields->effects = sliders[1];
-                if (!fields->musicLabel) fields->musicLabel = musicLabel;
-                if (!fields->effectsLabel) fields->effectsLabel = effectsLabel;
-            }
-        }
         if (!fields->music || !fields->effects || fields->music == fields->effects) return;
         if (fields->musicLabel) fields->gameMusicLabel = fields->musicLabel->getString();
         if (fields->effectsLabel) fields->gameEffectsLabel = fields->effectsLabel->getString();

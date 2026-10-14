@@ -6,6 +6,9 @@ void rightClick(cocos2d::CCPoint point);
 struct Readiness { bool ready = true; std::string error; };
 void initialize();
 void shutdown();
+// Warns once per session, from the main menu, when Jukebox isn't the version this mod is built for
+// and OBS follows game audio.
+void showVersionNotice();
 void refreshUI();
 struct MusicSource { std::string path; std::vector<int> extraIDs; };
 using LevelSongs = std::vector<int>;

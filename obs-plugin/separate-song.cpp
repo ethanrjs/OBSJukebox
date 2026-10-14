@@ -1,5 +1,6 @@
 #include "../src/LinkPacket.hpp"
 #include "../src/Socket.hpp"
+#include "../src/Utf8.hpp"
 #include "Decoder.hpp"
 #include "LinkClock.hpp"
 #include <algorithm>
@@ -83,6 +84,9 @@ static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, 
                           p.loopEnd <= p.loopStart || p.loopEnd > 86400))
         return std::nullopt;
     p.status[23] = p.level[95] = p.song[95] = p.path[1023] = 0;
+    // The mod only sends UTF-8. Anything else would throw when the decoder builds a path from it.
+    if (!separate_song::validUtf8(p.path))
+        return std::nullopt;
     return p;
 }
 struct EffectsInput {
@@ -129,6 +133,25 @@ static bool fromModBeforeV11(const unsigned char *data, size_t size) {
     memcpy(&version, data + offsetof(SongLinkPacket, version), sizeof(version));
     return version < 5;
 }
+// A GDSONG1 packet above version 5, a GDSFX2 packet above version 2, or a later GDSONG or GDSFX
+// magic comes from a mod newer than this plugin. handle() has checked that size >= 8.
+static bool fromNewerMod(const unsigned char *data, size_t size) {
+    uint32_t version = 0;
+    if (!memcmp(data, "GDSONG1", 8)) {
+        if (size < offsetof(SongLinkPacket, version) + sizeof(version))
+            return false;
+        memcpy(&version, data + offsetof(SongLinkPacket, version), sizeof(version));
+        return version > 5;
+    }
+    if (!memcmp(data, "GDSFX2\0", 8)) {
+        if (size < offsetof(EffectsPacketV2, version) + sizeof(version))
+            return false;
+        memcpy(&version, data + offsetof(EffectsPacketV2, version), sizeof(version));
+        return version > 2;
+    }
+    return (!memcmp(data, "GDSONG", 6) && data[6] > '1' && data[6] <= '9') ||
+           (!memcmp(data, "GDSFX", 5) && data[5] > '2' && data[5] <= '9');
+}
 // Whether an effect is within a second of now.
 static bool effectsCurrent(uint64_t timestamp, uint64_t now) {
     return timestamp <= now + 1000000000 && timestamp + 1000000000 >= now;
@@ -154,7 +177,7 @@ class Receiver {
     std::array<std::deque<PlaybackPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
     std::deque<EffectsPacket> effects, pendingEffects;
     LinkClock clock;
-    uint64_t session = 0, lastProbe = 0, lastSongReceived = 0, lastOldModPacket = 0;
+    uint64_t session = 0, lastProbe = 0, lastSongReceived = 0, lastOldModPacket = 0, lastNewModPacket = 0;
     std::array<uint64_t, 2> lastEffectsReceived{};
     std::array<uint16_t, 2> effectsPort{};
     static constexpr uint64_t sessionTimeoutNs = 2000000000ULL;
@@ -249,6 +272,11 @@ class Receiver {
             if (!lastOldModPacket)
                 blog(LOG_WARNING, "[OBS Jukebox] Ignoring packets from an OBS Jukebox mod older than v1.1");
             lastOldModPacket = now;
+        } else if (fromNewerMod(data, size)) {
+            std::lock_guard lock(mutex);
+            if (!lastNewModPacket)
+                blog(LOG_WARNING, "[OBS Jukebox] Ignoring packets from a newer OBS Jukebox mod; update the OBS plugin");
+            lastNewModPacket = now;
         } else if (!memcmp(data, "GDSFX", 5)) {
             if (auto effect = parseEffectsPacket(data, size))
                 handleEffects(*effect, from, now);
@@ -391,6 +419,11 @@ class Receiver {
         std::lock_guard lock(mutex);
         return lastOldModPacket && since(lastOldModPacket, now) <= sessionTimeoutNs;
     }
+    // Whether a mod newer than this plugin has sent packets within sessionTimeoutNs.
+    bool newModSending(uint64_t now) {
+        std::lock_guard lock(mutex);
+        return lastNewModPacket && since(lastNewModPacket, now) <= sessionTimeoutNs;
+    }
     // GD's main thread sends song packets and FMOD's mixer thread sends effects. Effects that keep
     // arriving after song packets stop mean the main thread is stalled (as while GD tears down a
     // level), and the game is still playing its music.
@@ -460,7 +493,7 @@ class Receiver {
                 for (unsigned ch = 0; ch < 2; ++ch) {
                     float from = p.samples[a * 2 + ch],
                           to = seam ? (next ? next->samples[ch] : from) : p.samples[(a + 1) * 2 + ch];
-                    output[i * 2 + ch] += gain * float(from + (to - from) * blend);
+                    output[i * 2 + ch] += gain * float(double(from) + (double(to) - double(from)) * blend);
                 }
             }
         }
@@ -512,6 +545,8 @@ struct SongSource {
     std::atomic<uint64_t> wantedTimestamp{0};
 #ifdef OBS_JUKEBOX_QA
     std::atomic<int> testOutputDelayMs{0};
+    std::atomic<unsigned> testStatCount{0};
+    std::atomic<unsigned> testVoiceCount{0};
 #endif
     explicit SongSource(obs_source_t *s)
         : source(s), linkReceiver(receiver) {}
@@ -584,11 +619,17 @@ struct SongSource {
         resolved = paths.resolve(newPath);
 #endif
         std::error_code error;
+        // Never stat a URL or network share: Decoder::open refuses them, and a stat would reach the network.
+        bool local = !resolved.empty() && localSongPath(resolved);
         auto file = std::filesystem::path(std::u8string(resolved.begin(), resolved.end()));
-        auto size = resolved.empty() ? 0 : std::filesystem::file_size(file, error);
-        auto modified = resolved.empty() || error ? std::filesystem::file_time_type{}
-                                                  : std::filesystem::last_write_time(file, error);
-        bool available = !resolved.empty() && !error;
+#ifdef OBS_JUKEBOX_QA
+        if (local)
+            ++testStatCount;
+#endif
+        auto size = local ? std::filesystem::file_size(file, error) : 0;
+        auto modified = !local || error ? std::filesystem::file_time_type{}
+                                        : std::filesystem::last_write_time(file, error);
+        bool available = local && !error;
         bool fileChanged = resolved != v.resolvedPath || available != v.fileAvailable ||
                            (available && (size != v.loadedSize || modified != v.loadedWriteTime));
         if (pathChanged || fileChanged || (!decoder.ready() && Clock::now() >= v.reopenAt)) {
@@ -706,13 +747,22 @@ struct SongSource {
         for (int channel : linkReceiver->getChannels()) {
             if (channel < 0)
                 continue;
-            if (!voices[channel])
-                voices[channel] = std::make_unique<Voice>();
-            auto &v = *voices[channel];
             // A packet goes stale 400 ms after its timestamp; that stretch is still rendered, with
             // live=false, so a playing voice fades out instead of cutting off. Nothing goes stale
             // while GD's main thread is stalled but its mixer still plays.
             auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, channel);
+            // A channel with no voice and only stale packets has nothing to play or fade out.
+            if (!voices[channel] && !stalled &&
+                std::none_of(window.begin(), window.end(),
+                             [&](const SongLinkPacket &p) { return p.timestamp + staleNs > timestamp; }))
+                continue;
+            if (!voices[channel]) {
+                voices[channel] = std::make_unique<Voice>();
+#ifdef OBS_JUKEBOX_QA
+                ++testVoiceCount;
+#endif
+            }
+            auto &v = *voices[channel];
             forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
                 size_t stale = stalled ? end : std::clamp(frameAt(timestamp, p.timestamp + staleNs), first, end);
                 if (stale > first)
@@ -727,8 +777,10 @@ struct SongSource {
             if (voice && !stalled && timestamp > voice->lastUsed + staleNs)
                 voice.reset();
         bool oldMod = !connected && linkReceiver->oldModSending(now);
+        bool newMod = !connected && linkReceiver->newModSending(now);
         std::lock_guard lock(mutex);
         detail = oldMod ? "Update the OBS Jukebox mod in Geometry Dash to v1.1 or later."
+                 : newMod ? "Update the OBS Jukebox plugin to match the mod in Geometry Dash."
                  : !linkReceiver->available() ? "Game link unavailable: local UDP port is already in use."
                  : !decoderError.empty() ? decoderError
                  : !connected            ? "Waiting for Geometry Dash"
@@ -799,6 +851,10 @@ struct SongSource {
                                              p.effectsVolume);
             });
         }
+        // A corrupt float WAV or a hostile packet must not put NaN or Inf into OBS's mix.
+        for (auto &sample : audio)
+            if (!std::isfinite(sample))
+                sample = 0;
         return audio;
     }
     void run() {

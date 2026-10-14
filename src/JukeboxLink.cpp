@@ -1,9 +1,9 @@
 #include "JukeboxLink.hpp"
 #include "PlaybackIdentity.hpp"
+#include "Utf8.hpp"
 #include <Geode/utils/Keyboard.hpp>
 #include <jukebox/ui/list/nong_cell.hpp>
 #include <jukebox/ui/list/nong_list.hpp>
-#include <jukebox/events/start_download.hpp>
 #include <jukebox/events/song_download_finished.hpp>
 #include <jukebox/events/song_download_failed.hpp>
 #include <jukebox/events/nong_deleted.hpp>
@@ -63,7 +63,10 @@ bool gameButtonShown(jukebox::NongCellUI* ui) {
     auto gameCheck = UIAccess::selected(ui);
     return gameCheck && gameCheck->isVisible();
 }
-std::filesystem::path utf8Path(std::string_view path) {
+// GD and Jukebox hand over UTF-8 in practice, but nothing guarantees it, and on Windows building a
+// path from anything else throws. Callers treat nullopt as a missing file.
+std::optional<std::filesystem::path> utf8Path(std::string_view path) {
+    if (!validUtf8(path)) return std::nullopt;
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size()));
 }
 // Filesystem and JSON work never runs on the game/sampling thread. Results are
@@ -92,17 +95,16 @@ class FileCache {
             }
             bool present = false;
             std::optional<matjson::Value> parsed;
-            try {
-                auto path = utf8Path(job.first);
+            if (auto path = utf8Path(job.first)) {
                 if (job.second) {
-                    auto result = file::readJson(path);
+                    auto result = file::readJson(*path);
                     if (result && result.unwrap().isObject()) parsed = result.unwrap();
                 } else {
                     std::error_code error;
-                    present = std::filesystem::is_regular_file(path, error) &&
-                        std::filesystem::file_size(path, error) > 0 && !error;
+                    present = std::filesystem::is_regular_file(*path, error) &&
+                        std::filesystem::file_size(*path, error) > 0 && !error;
                 }
-            } catch (const std::exception&) { }
+            }
             std::lock_guard lock(mutex);
             auto& entry = entries[job.first];
             entry.exists = present;
@@ -139,15 +141,17 @@ public:
 FileCache& files() { static auto cache = new FileCache(); return *cache; }
 bool exists(const std::string& path) { return files().get(path).first; }
 std::filesystem::path base() { return Loader::get()->getLoadedMod("fleym.nongd")->getSaveDir(); }
-// CellAccess and UIAccess read Jukebox's protected fields using the vendored 3.8.0 headers.
-// Geode lets the dependency update to any newer 3.x, so skip the row UI on other builds.
+// CellAccess and UIAccess read Jukebox's protected fields using the vendored headers for
+// JUKEBOX_VERSION (set in CMakeLists.txt). Geode lets the dependency update to any newer 3.x, so
+// skip the row UI on other builds.
 bool cellLayoutMatches() {
     static const bool matches = [] {
         auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
         if (!dependency) return false;
         auto version = dependency->getVersion();
-        bool ok = version.getMajor() == 3 && version.getMinor() == 8 && version.getPatch() == 0 && !version.getTag();
-        if (!ok) log::warn("Jukebox {} is not 3.8.0; OBS Jukebox integration is disabled; following game audio", version.toVString());
+        bool ok = version.toNonVString() == JUKEBOX_VERSION;
+        if (!ok) log::warn("Jukebox {} is not {}; OBS Jukebox integration is disabled; following game audio",
+                           version.toVString(), JUKEBOX_VERSION);
         return ok;
     }();
     return matches;
@@ -190,11 +194,16 @@ matjson::Value find(const matjson::Value& data, const std::string& uid, bool ori
     }
     return matjson::Value();
 }
-std::string pathFor(const matjson::Value& song) {
+// Jukebox opens local and hosted songs from nongs/<filename> when the entry has one, and uses the
+// stored absolute path only without it (nong_serialize.hpp), so a moved save folder still plays its
+// own copy. YouTube entries have no filename, and GD's original song keeps its stored path.
+std::string pathFor(const matjson::Value& song, bool original) {
     auto path = song["path"].asString().unwrapOr("");
-    if (!path.empty() && (exists(path) || !files().known(path))) return path;
     auto name = song["filename"].asString().unwrapOr("");
-    if (!name.empty()) return string::pathToString(base()/"nongs"/utf8Path(name));
+    auto inNongs = name.empty() ? std::nullopt : utf8Path(name);
+    if (!original && inNongs) return string::pathToString(base()/"nongs"/ *inNongs);
+    if (!path.empty() && (exists(path) || !files().known(path))) return path;
+    if (inNongs) return string::pathToString(base()/"nongs"/ *inNongs);
     return path;
 }
 std::string originalPath(int id) {
@@ -202,8 +211,9 @@ std::string originalPath(int id) {
         auto name = LevelTools::getAudioFileName(-id-1);
         return CCFileUtils::get()->fullPathForFilename(name.c_str(), false);
     }
-    auto name = string::pathToString(utf8Path(MusicDownloadManager::sharedState()->pathForSongFolder(id).c_str()) /
-                                    fmt::format("{}.{}", id, id > 9999999 ? "ogg" : "mp3"));
+    auto folder = utf8Path(MusicDownloadManager::sharedState()->pathForSongFolder(id).c_str());
+    if (!folder) return {};
+    auto name = string::pathToString(*folder / fmt::format("{}.{}", id, id > 9999999 ? "ogg" : "mp3"));
     return CCFileUtils::get()->fullPathForFilename(name.c_str(), false);
 }
 Choice resolved(Choice c) {
@@ -211,7 +221,7 @@ Choice resolved(Choice c) {
     if (meta.isObject()) {
         c.name = meta["name"].asString().unwrapOr(c.name);
         c.offset = static_cast<int>(meta["offset"].asInt().unwrapOr(c.offset));
-        auto p = pathFor(meta); if (!p.empty()) c.path = p;
+        auto p = pathFor(meta, c.original); if (!p.empty()) c.path = p;
     } else if (auto it = addedSongs.find(key(c.id,c.uid)); it != addedSongs.end()) {
         c.name = it->second.name; c.offset = it->second.offset;
         if (!it->second.path.empty()) c.path = it->second.path;
@@ -226,15 +236,15 @@ std::string normalizedMusicPath(const std::string& path) {
     if (auto found = normalized.find(path); found != normalized.end()) return found->second;
     if (normalized.size() >= 4096) normalized.clear();
     auto full = CCFileUtils::get()->fullPathForFilename(path.c_str(), false);
-    try {
-        auto value = string::pathToString(utf8Path(full).lexically_normal());
-        std::replace(value.begin(), value.end(), '\\', '/');
+    auto file = utf8Path(full);
+    if (!file) return {};
+    auto value = string::pathToString(file->lexically_normal());
+    std::replace(value.begin(), value.end(), '\\', '/');
 #ifdef GEODE_IS_WINDOWS
-        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
 #endif
-        normalized[path] = value;
-        return value;
-    } catch (const std::filesystem::filesystem_error&) { return {}; }
+    normalized[path] = value;
+    return value;
 }
 std::unordered_map<std::string, std::pair<Choice, bool>> deferredDownloads;
 std::string download(Choice c, bool retry) {
@@ -247,7 +257,7 @@ std::string download(Choice c, bool retry) {
     }
     auto& request = requests[k];
     if (request.pending && Clock::now() - request.started < std::chrono::seconds(30)) return "";
-    if (request.pending) request = {false, "Download timed out. Select the song to retry."};
+    if (request.pending) request = {false, "Download timed out.\nSelect the song to retry."};
     if (!request.error.empty() && !retry) return request.error;
     request = {true, "", Clock::now()};
     log::info("OBS song cache miss: {} ({})", c.name, c.uid);
@@ -260,15 +270,18 @@ std::string download(Choice c, bool retry) {
             if (local["unique_id"].asString().unwrapOr("") == c.uid) return true;
         return false;
     }())
-        request = {false, "Local song file is unavailable. Choose an existing file in Jukebox."};
-    else jukebox::event::StartDownload().send({c.id, c.uid});
+        request = {false, "Local song file is unavailable.\nChoose an existing file in Jukebox."};
+    // Jukebox makes every song it finishes downloading GD's active song, so asking it to fetch the
+    // OBS song would switch the song GD plays. The user downloads it in Jukebox, which switches it
+    // too, so the message says to pick the Game song again.
+    else request = {false, "OBS song audio is missing.\nDownload it in Jukebox, then pick your Game song again."};
     return requests[k].error;
 }
 Choice active(int id) {
     auto m = manifest(id); auto uid = m["active"].asString().unwrapOr("");
     auto v = find(m, uid); bool original = uid.empty() || uid == m["default"]["unique_id"].asString().unwrapOr("");
     Choice c{id, static_cast<int>(v["offset"].asInt().unwrapOr(0)), uid,
-        v["name"].asString().unwrapOr("In-game song"), pathFor(v), original};
+        v["name"].asString().unwrapOr("In-game song"), pathFor(v, original), original};
     if (original && (c.path.empty() || (files().known(c.path) && !exists(c.path)))) c.path = originalPath(id);
     return c;
 }
@@ -393,9 +406,11 @@ public:
         // recreates both together and only sets the Game button's visibility there.
         if (shown && !menu->getUserFlag("widened"_spr)) {
             menu->setUserFlag("widened"_spr);
-            menu->setContentWidth(menu->getContentWidth()+35.f);
+            // The checkbox plus Jukebox 3.8.0's row gap (setGap(5.f) in upstream nong_cell_ui.cpp).
+            const float widen = m_checkbox->getContentWidth() + 5.f;
+            menu->setContentWidth(menu->getContentWidth() + widen);
             if (auto info = UIAccess::songInfo(ui)) {
-                info->setContentWidth(std::max(0.f, info->getContentWidth()-35.f));
+                info->setContentWidth(std::max(0.f, info->getContentWidth() - widen));
                 info->updateLayout();
             }
             relayout = true;
@@ -440,15 +455,21 @@ void select(jukebox::NongCell* cell) {
     // song. Asking it to download one fails with "already downloaded" whenever the async file
     // cache has not caught up. GD's original song is the only one that may still be missing.
     auto error = c.original ? download(c, true) : std::string();
-    if (!error.empty()) {
-        Notification::create("OBS download failed", NotificationIcon::Error)->show();
-        FLAlertLayer::create("OBS Song", error, "OK")->show();
-    }
+    if (!error.empty()) FLAlertLayer::create("OBS Song", error, "OK")->show();
     refreshUI();
 }
 }
 
 void shutdown() { files().shutdown(); }
+void showVersionNotice() {
+    static bool shown = false;
+    if (shown || cellLayoutMatches() || !Mod::get()->getSettingValue<bool>("enabled")) return;
+    shown = true;
+    auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
+    auto found = dependency ? dependency->getVersion().toVString() : std::string("none");
+    Notification::create(fmt::format("OBS Jukebox doesn't support Jukebox {} yet.\nOBS plays the game's song.", found),
+                         NotificationIcon::Warning, 6.f)->show();
+}
 // No Jukebox list can be open during unpaused gameplay.
 bool inGameplay() { auto play = PlayLayer::get(); return play && !play->m_isPaused; }
 void refreshUI() {
@@ -457,7 +478,7 @@ void refreshUI() {
         lastRequestCheck = Clock::now();
         for (auto& [key, request] : requests)
             if (request.pending && Clock::now() - request.started >= std::chrono::seconds(30))
-                request = {false, "Download timed out. Select the song to retry."};
+                request = {false, "Download timed out.\nSelect the song to retry."};
     }
     if (!deferredDownloads.empty()) {
         auto pending = std::move(deferredDownloads);

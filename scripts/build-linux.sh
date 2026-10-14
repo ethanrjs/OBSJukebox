@@ -13,9 +13,10 @@ done
 [[ "$(uname -s)" == Linux ]] || { printf 'Run this build on Linux.\n' >&2; exit 1; }
 [[ "$(uname -m)" == x86_64 ]] || { printf 'The Proton package requires x86_64 Linux.\n' >&2; exit 1; }
 [[ -f "$song_mod" ]] || { printf 'Build the Windows Geode mod first, then pass its path with --mod.\n' >&2; exit 1; }
-for song_tool in cmake pkg-config c++; do
+for song_tool in cmake pkg-config c++ python3; do
     command -v "$song_tool" >/dev/null || { printf 'Missing build tool: %s\n' "$song_tool" >&2; exit 1; }
 done
+python3 "$song_root/scripts/check-mod-package.py" "$song_mod" local.separate_song.dll
 pkg-config --exists libobs || { printf 'Install the OBS development package (libobs-dev on Ubuntu).\n' >&2; exit 1; }
 mkdir -p "$song_output"
 song_output="$(cd -- "$song_output" && pwd)"

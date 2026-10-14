@@ -42,7 +42,7 @@ if [[ ! -f "$song_frameworks/Geode.dylib" ]]; then
     for song_file in Geode.dylib GeodeBootstrapper.dylib libfmod.dylib; do
         [[ -s "$song_root/payload/geode/$song_file" ]] || fail "The installer is missing Geode's $song_file."
     done
-    [[ -d "$song_root/payload/geode/resources" ]] || fail 'The installer is missing Geode resources.'
+    [[ -d "$song_root/payload/geode/resources/geode.loader" ]] || fail 'The installer is missing Geode resources.'
     song_geode_library="$song_root/payload/geode/Geode.dylib"
 else
     song_geode_library="$song_frameworks/Geode.dylib"
@@ -140,7 +140,7 @@ if (( song_install_geode )); then
     copy_item "$song_frameworks/libfmod.dylib" "$song_frameworks/restore_fmod.dylib"
     copy_item "$song_root/payload/geode/Geode.dylib" "$song_frameworks/Geode.dylib"
     copy_item "$song_root/payload/geode/GeodeBootstrapper.dylib" "$song_frameworks/GeodeBootstrapper.dylib"
-    copy_item "$song_root/payload/geode/resources" "$song_app/Contents/geode/resources/geode.loader"
+    copy_item "$song_root/payload/geode/resources/geode.loader" "$song_app/Contents/geode/resources/geode.loader"
     copy_item "$song_root/payload/geode/libfmod.dylib" "$song_frameworks/libfmod.dylib"
     print -r -- "Installed Geode $song_geode_version."
 else

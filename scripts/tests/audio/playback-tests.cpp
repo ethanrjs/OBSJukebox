@@ -5,6 +5,7 @@
 #include "../../../src/MonotonicClock.hpp"
 #include "../../../src/Bridge.hpp"
 #include "../../../src/TapClock.hpp"
+#include "../../../src/Utf8.hpp"
 
 static SongLinkPacket published;
 static int captureSend(SongSocket,const char* data,int size,int,const sockaddr*,
@@ -275,6 +276,16 @@ static void staleVoiceTest() {
     sim.start();sim.advance(150000000);
     check(Decoder::testOpenCount.load()==opens,"a stale packet does not reopen the song for a dropped voice");
 }
+// A channel that played once keeps its packets until GD restarts. Once they are all stale, rendering
+// must not allocate and free a voice for it every block.
+static void staleChannelTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=3;p.position=1;p.channelID=7;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.send(p,sim.now);sim.start();sim.advance(1000000000);
+    auto voices=sim.source->testVoiceCount.load();
+    sim.advance(500000000);
+    check(voices>0 && sim.source->testVoiceCount.load()==voices,"a channel whose packets have all gone stale allocates no voice");
+}
 // SFX audio comes from FMOD's mixer thread and keeps arriving while GD's main thread stalls,
 // so a stale status packet must not mute it.
 static void staleStatusEffectsTest() {
@@ -295,6 +306,42 @@ static void staleStatusEffectsTest() {
         correct&=std::abs(b.samples[i*2]-.25f)<.00001;++count;
     }
     check(correct && count>3000,"effects keep playing when the latest status packet is over 400 ms old");
+}
+// FLT_MAX next to -FLT_MAX overflows a float subtraction to Inf, and Inf * 0 is NaN. One NaN in
+// OBS's mix silences every source on the track for that sample.
+static void finiteOutputTest() {
+    Simulation sim;
+    auto base=sim.now;
+    SongLinkPacket p;p.flags=1;sim.send(p,base);
+    for(int i=0;i<12;++i){
+        EffectsPacketV2 e;e.frames=480;e.sampleRate=48000;e.sequence=i;e.timestamp=base+i*10000000ULL;
+        for(unsigned s=0;s<960;++s)e.samples[s]=(s/2)%2?std::numeric_limits<float>::max():-std::numeric_limits<float>::max();
+        sim.sendEffects(e);
+    }
+    sim.advance(5000000);
+    sim.start();sim.advance(180000000);
+    bool finite=true;unsigned loud=0;
+    for(const auto& b:sim.output)for(float s:b.samples){finite&=std::isfinite(s);loud+=s!=0;}
+    check(finite && loud>1000,"extreme effects samples reach OBS as finite, audible samples");
+}
+// A one-second stereo IEEE float WAV whose every sample is `value`.
+static void writeFloatWav(const char* path,float value) {
+    std::ofstream out(path,std::ios::binary);
+    auto word=[&](uint32_t n,int bytes){for(int i=0;i<bytes;++i)out.put(char(n>>(i*8)));};
+    constexpr uint32_t frames=48000,bytes=frames*8;
+    out.write("RIFF",4);word(36+bytes,4);out.write("WAVEfmt ",8);word(16,4);
+    word(3,2);word(2,2);word(48000,4);word(48000*8,4);word(8,2);word(32,2);
+    out.write("data",4);word(bytes,4);
+    for(uint32_t i=0;i<frames*2;++i)out.write(reinterpret_cast<const char*>(&value),4);
+}
+// The decoder passes a float WAV's samples through as they are, so a corrupt file can carry NaN.
+static void nanSongTest() {
+    writeFloatWav("artifacts/audio-tests/nan.wav",std::numeric_limits<float>::quiet_NaN());
+    Simulation sim;sim.start();
+    SongLinkPacket p;p.flags=3;p.position=0;std::strcpy(p.path,"artifacts/audio-tests/nan.wav");
+    sim.send(p,sim.now);sim.advance(300000000);
+    bool finite=true;for(const auto& b:sim.output)for(float s:b.samples)finite&=std::isfinite(s);
+    check(finite && !sim.output.empty(),"a song file full of NaN samples reaches OBS as finite audio");
 }
 // One probe delayed on its way back can suggest an offset several ms off; it must neither move
 // the clock nor clear buffered audio. A real clock jump (suspend) still recalibrates.
@@ -353,6 +400,29 @@ static void protocolTest() {
     auto initial=receiver->playbackWindow(1,2);
     check(initial.size()==1 && initial.front().flags==0,"future state cannot start music before its timestamp");
 }
+// MSVC throws building a path from invalid UTF-8, and the decoder thread has no handler, so OBS
+// would exit. Such a packet must never reach the decoder.
+static void invalidPathTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    auto at=sim.now;sim.send(p,at);sim.advance(15000000);
+    auto bad=p;bad.epoch=5;std::strcpy(bad.path,"C:/s\xFF.mp3");sim.send(bad,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==0 && std::string(receiver->get().packet.path)=="artifacts/audio-tests/ramp.wav",
+        "a song packet whose path is not UTF-8 is dropped");
+}
+// OBS must not ask Windows about a URL or network share before refusing it: a stat of a share
+// opens an SMB connection and can hang the decoder thread. A URL keeps a failing run quick.
+static void networkPathTest() {
+    Simulation sim;sim.start();
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"https://example.com/song.mp3");
+    auto before=sim.source->testStatCount.load();
+    // Output runs bufferingNs (40 ms) behind, so wait long enough for each packet to be rendered.
+    sim.send(p,sim.now);sim.advance(100000000);
+    auto afterNetwork=sim.source->testStatCount.load();
+    p.epoch=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");sim.send(p,sim.now);sim.advance(100000000);
+    check(afterNetwork==before && sim.source->testStatCount.load()>afterNetwork,
+        "a network path is refused before OBS reads its file information");
+}
 // The v1.0 mod sends v3 song packets and GDSFX1 effects. OBS plays neither and asks for a newer mod,
 // whichever of the two arrives.
 static void oldModTest(bool songs,bool effects) {
@@ -370,6 +440,26 @@ static void oldModTest(bool songs,bool effects) {
     check(!receiver->get().connected && silent && detail.find("v1.1")!=std::string::npos,
         songs?"v3 song packets play nothing and ask for a mod of v1.1 or later":
         "GDSFX1 effects play nothing and ask for a mod of v1.1 or later");
+}
+// Geode updates the mod by itself, while the plugin is installed by hand. Packets from a newer
+// protocol play nothing and ask for a newer plugin, instead of "Waiting for Geometry Dash".
+static void newModTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=3;p.position=1;p.sessionID=sim.local.session;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.start();
+    for(int i=0;i<10;++i){sim.sendRaw(p,sim.now,6,50001);sim.advance(10000000);}
+    bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
+    std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
+    check(!receiver->get().connected && silent && detail.find("Update the OBS Jukebox plugin")!=std::string::npos,
+        "packets from a newer mod play nothing and ask for a newer plugin");
+    // A later protocol might rename the song magic instead of bumping its version.
+    Simulation renamed;
+    std::memcpy(p.magic,"GDSONG2",8);p.sessionID=renamed.local.session;
+    renamed.start();
+    for(int i=0;i<10;++i){renamed.sendRaw(p,renamed.now,5,50001);renamed.advance(10000000);}
+    {std::lock_guard lock(renamed.source->mutex);detail=renamed.source->detail;}
+    check(!receiver->get().connected && detail.find("Update the OBS Jukebox plugin")!=std::string::npos,
+        "a renamed song packet from a newer mod asks for a newer plugin");
 }
 
 struct SyncedSender {
@@ -779,12 +869,27 @@ static void localFilesOnlyTest() {
         refused&=!decoder.open(path) && decoder.error=="Only local song files can be played.";
     check(refused && decoder.open("artifacts/audio-tests/ramp.wav"),"decoder plays local files and refuses URLs and network shares");
 }
+static void utf8Test() {
+    using separate_song::validUtf8;
+    check(validUtf8("C:/Users/Jos\xC3\xA9/song.mp3") && validUtf8("\xE6\x9B\xB2.ogg") && validUtf8("\xF0\x9F\x8E\xB5.mp3") && validUtf8(""),
+        "valid UTF-8 paths are accepted");
+    bool refused=true;
+    for(const char* bad:{"C:/s\xFF.mp3","C:/Jos\xE9/song.mp3","\xC0\xAF","\xED\xA0\x80","\xF4\x90\x80\x80","\xE6\x9B"})
+        refused&=!validUtf8(bad);
+    check(refused,"malformed, overlong, surrogate, out-of-range and truncated UTF-8 is refused");
+}
 static void senderTest() {
     separate_song::Snapshot s;s.timestamp=monotonicNowNs();s.position=1.25;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     separate_song::Bridge b;check(b.start(),"sender opens its socket");b.publish(s);
     check(published.version==5 && published.timestamp==s.timestamp && published.position==s.position,
         "sender preserves sampling time through publication delay");
+}
+static void senderInvalidPathTest() {
+    separate_song::Snapshot s;s.playing=true;s.path="C:/s\xFF.mp3";s.timestamp=monotonicNowNs();
+    separate_song::Bridge b;check(b.start(),"sender opens its socket");b.publish(s);
+    check(published.path[0]==0 && !(published.flags&2) && std::string(published.status)=="Song path is not UTF-8",
+        "the sender stops playback instead of sending a path that is not UTF-8");
 }
 #include "receiver-tests.inc"
 #include "deadline-tests.inc"
@@ -806,11 +911,11 @@ int main(int argc,char** argv){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleStatusEffectsTest();clockNoiseTest();clockSlewTest();protocolTest();oldModTest(true,false);oldModTest(false,true);
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);newModTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
-    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();
+    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();senderInvalidPathTest();utf8Test();
     receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();

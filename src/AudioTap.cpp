@@ -33,6 +33,7 @@ struct Tap {
     std::atomic<bool> stopping{false};
     std::counting_semaphore<capacity + 1> ready{0};
     std::thread worker;
+    SongSocket transport = BAD_SOCKET;
     ~Tap() { shutdown(); }
     void shutdown() {
         enabled = false;
@@ -43,13 +44,15 @@ struct Tap {
             auto engine = FMODAudioEngine::get();
             auto current = engine ? (stream == 1 ? engine->m_backgroundMusicChannel
                                                 : engine->m_globalChannel) : nullptr;
+            // A late render callback then passes audio through without touching this Tap.
+            dsp->setUserData(nullptr);
             // removeDSP reconnects a live group's neighboring DSPs. Only fall
             // back to disconnecting the obsolete graph when its group changed.
-            if (current && current == group)
-                current->removeDSP(dsp);
-            else
-                dsp->disconnectAll(true, true);
-            dsp->release();
+            auto removed = current && current == group ? current->removeDSP(dsp) : dsp->disconnectAll(true, true);
+            auto released = dsp->release();
+            if (removed != FMOD_OK || released != FMOD_OK)
+                log::warn("OBS effects tap teardown: remove returned {}, release returned {}", int(removed),
+                          int(released));
             dsp = nullptr;
             if (locked)
                 system->unlockDSP();
@@ -58,6 +61,10 @@ struct Tap {
         ready.release();
         if (worker.joinable())
             worker.join();
+        if (transport != BAD_SOCKET) {
+            closeSocket(transport);
+            transport = BAD_SOCKET;
+        }
     }
     bool attachedTo(FMOD::ChannelGroup *current) const {
         if (!dsp || current != group)
@@ -118,6 +125,11 @@ struct Tap {
     bool attach(FMODAudioEngine *engine, FMOD::ChannelGroup *group, uint32_t id) {
         if (!group || !engine->m_system)
             return false;
+        // The socket comes first: a tap that can't send must not sit in FMOD's graph. A failed
+        // attach destroys the Tap, which closes it.
+        transport = openLoopbackSocket();
+        if (transport == BAD_SOCKET)
+            return false;
         this->group = group;
         system = engine->m_system;
         stream = id;
@@ -149,12 +161,6 @@ struct Tap {
             return false;
         }
         worker = std::thread([this] {
-            if (!socketsReady())
-                return;
-            auto socket = ::socket(AF_INET, SOCK_DGRAM, 0);
-            if (socket == BAD_SOCKET)
-                return;
-            nonblocking(socket);
             sockaddr_in target{};
             target.sin_family = AF_INET;
             target.sin_port = htons(receiverPort());
@@ -166,11 +172,10 @@ struct Tap {
                 auto r = read.load(std::memory_order_relaxed);
                 auto &p = queue[r % capacity];
                 auto size = offsetof(EffectsPacketV2, samples) + p.frames * 2 * sizeof(float);
-                sendto(socket, reinterpret_cast<const char *>(&p), static_cast<int>(size), 0,
+                sendto(transport, reinterpret_cast<const char *>(&p), static_cast<int>(size), 0,
                        reinterpret_cast<sockaddr *>(&target), sizeof(target));
                 read.store(r + 1, std::memory_order_release);
             }
-            closeSocket(socket);
         });
         return true;
     }

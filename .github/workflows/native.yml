@@ -84,6 +84,11 @@ jobs:
           name: macOS-installer
           path: artifacts/macos
           if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macOS-mod
+          path: artifacts/macos/local.separate_song.geode
+          if-no-files-found: error
   linux-package:
     needs: windows
     runs-on: ubuntu-24.04
@@ -100,4 +105,27 @@ jobs:
         with:
           name: Linux-installer
           path: artifacts/linux/OBS-Jukebox-Linux-x86_64.tar.gz
+          if-no-files-found: error
+  geode-package:
+    needs: [windows, macos]
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Fetch locked inputs
+        run: python scripts/fetch-dependencies.py windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Windows-mod
+          path: artifacts/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: macOS-mod
+          path: artifacts/macos
+      - name: Merge the Windows and macOS packages
+        run: ./scripts/merge-geode.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Geode-mod
+          path: artifacts/geode
           if-no-files-found: error

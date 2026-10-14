@@ -24,6 +24,12 @@
 #ifdef _WIN32
 #include <memory>
 #endif
+// Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares.
+// Windows reads a path that starts with two separators of either kind as a network share.
+inline bool localSongPath(const std::string &path) {
+    auto separator = [](char c) { return c == '/' || c == '\\'; };
+    return path.find("://") == std::string::npos && !(path.size() >= 2 && separator(path[0]) && separator(path[1]));
+}
 class Decoder {
     ma_decoder decoder{};
     bool opened = false, seekValid = false;
@@ -87,10 +93,7 @@ class Decoder {
             error = "Choose an OBS song in Jukebox.";
             return false;
         }
-        // Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares.
-        // Windows reads a path that starts with two separators of either kind as a network share.
-        auto separator = [](char c) { return c == '/' || c == '\\'; };
-        if (path.find("://") != std::string::npos || (path.size() >= 2 && separator(path[0]) && separator(path[1]))) {
+        if (!localSongPath(path)) {
             error = "Only local song files can be played.";
             return false;
         }
@@ -231,7 +234,7 @@ class Decoder {
             for (size_t ch = 0; ch < 2; ++ch) {
                 float a = at < count ? cache[at * 2 + ch] : 0,
                       b = at + 1 < count ? cache[(at + 1) * 2 + ch] : a;
-                output[i * 2 + ch] = float(a + (b - a) * blend);
+                output[i * 2 + ch] = float(double(a) + (double(b) - double(a)) * blend);
             }
             phase += rate;
         }

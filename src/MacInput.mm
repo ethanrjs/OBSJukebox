@@ -8,17 +8,20 @@ static void rightMouse(NSView* view, SEL original, NSEvent* event) {
     auto bounds = view.bounds;
     if (bounds.size.width > 0 && bounds.size.height > 0) {
         if (view.isFlipped) p.y = bounds.size.height - p.y;
-        auto size = CCDirector::get()->getWinSize();
-        CCPoint point{float(p.x / bounds.size.width * size.width), float(p.y / bounds.size.height * size.height)};
-        Loader::get()->queueInMainThread([point] { separate_song::jukebox_link::rightClick(point); });
+        // This runs in AppKit's event handler; only the queued callback reads the director.
+        float x = float(p.x / bounds.size.width), y = float(p.y / bounds.size.height);
+        Loader::get()->queueInMainThread([x, y] {
+            auto size = CCDirector::get()->getWinSize();
+            separate_song::jukebox_link::rightClick({x * size.width, y * size.height});
+        });
     }
     [view performSelector:original withObject:event];
 }
 $on_mod(Loaded) {
     auto result = ObjcHook::create("EAGLView", "rightMouseDown:", &rightMouse);
     if (result) {
-        auto hook = std::move(result).unwrap();
-        (void)Mod::get()->claimHook(std::move(hook));
+        auto claimed = Mod::get()->claimHook(std::move(result).unwrap());
+        if (!claimed) log::error("Could not claim Jukebox right-click input: {}", claimed.unwrapErr());
     } else {
         log::error("Could not install Jukebox right-click input: {}", result.unwrapErr());
     }
