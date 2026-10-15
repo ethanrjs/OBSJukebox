@@ -138,12 +138,41 @@ static class InstallerTests
         {
             string modFile=Path.Combine(interrupted,"mod.geode"),saved=Path.Combine(session,"0000.bak");
             File.WriteAllText(saved,"previous mod");File.WriteAllText(modFile,"half-installed mod");
+            File.WriteAllText(Path.Combine(interrupted,"GeometryDash.exe"),"");
             var stranded=new InstallRecord { GD=interrupted,OBS=interrupted,Files=[
                 new ChangedFile { Destination=modFile,Backup=saved,OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("half-installed mod")),Applied=true }] };
             string manifest=Path.Combine(session,"manifest.json");
             File.WriteAllText(manifest,System.Text.Json.JsonSerializer.Serialize(stranded));
             Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
             Check(File.ReadAllText(modFile)=="previous mod" && File.ReadAllText(manifest).Contains("rolled-back"),"a transaction left installing by a killed setup is restored on the next run");
+            // Any program running as this user can edit a manifest. Undo must not delete or overwrite
+            // files outside the folders setup installs to.
+            string victim=Path.Combine(Path.GetTempPath(),"obs-jukebox-victim-"+Guid.NewGuid().ToString("N")+".txt");
+            File.WriteAllText(victim,"user document");
+            try
+            {
+                var forged=new InstallRecord { GD=interrupted,OBS=interrupted,Status="installed",Files=[
+                    new ChangedFile { Destination=victim,InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("user document")),Applied=true }] };
+                string forgedManifest=Path.Combine(session,"forged.json");
+                File.WriteAllText(forgedManifest,System.Text.Json.JsonSerializer.Serialize(forged));
+                bool refused=false;
+                try { Engine.Execute(new Options { Uninstall=true,Manifest=forgedManifest,StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{}); }
+                catch(IOException) { refused=true; }
+                Check(refused && File.ReadAllText(victim)=="user document","undo refuses a manifest naming a file outside the Geometry Dash and OBS folders");
+                var outsideBackup=new InstallRecord { GD=interrupted,OBS=interrupted,Status="installed",Files=[
+                    new ChangedFile { Destination=modFile,Backup=victim,OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("user document")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),Applied=true }] };
+                File.WriteAllText(forgedManifest,System.Text.Json.JsonSerializer.Serialize(outsideBackup));
+                refused=false;
+                try { Engine.Execute(new Options { Uninstall=true,Manifest=forgedManifest,StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{}); }
+                catch(IOException) { refused=true; }
+                Check(refused && File.ReadAllText(modFile)=="previous mod","undo refuses a backup outside setup's backup folder");
+                string forgedSession=Path.Combine(interrupted,"20260102-000000-abcdef");Directory.CreateDirectory(forgedSession);
+                forged.Status="installing";
+                File.WriteAllText(Path.Combine(forgedSession,"manifest.json"),System.Text.Json.JsonSerializer.Serialize(forged));
+                Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
+                Check(File.ReadAllText(victim)=="user document","recovery skips an interrupted manifest naming files outside the install folders");
+            }
+            finally { File.Delete(victim); }
         }
         finally { Directory.Delete(interrupted,true); }
         string gd=Path.Combine(Path.GetTempPath(),"obs-jukebox-mods-"+Guid.NewGuid().ToString("N"));
