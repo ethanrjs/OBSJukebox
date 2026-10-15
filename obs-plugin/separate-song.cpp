@@ -360,12 +360,13 @@ class Receiver {
         pendingEffects.clear();
     }
     void handleEffects(const EffectsInput &input, const sockaddr_in &from, uint64_t now) {
-        // Checked before taking the lock that OBS's audio thread also takes.
-        if (!session || !signedWith(sessionKey, input.wire, input.size))
+        // Checked before taking the lock that OBS's audio thread also takes. The session check is cheap,
+        // so a packet for another session costs no HMAC over its 4 KB.
+        if (!session || input.session != session || !signedWith(sessionKey, input.wire, input.size))
             return;
         auto effect = input.packet;
         std::lock_guard lock(mutex);
-        if (input.session != session || !pinEffectsPort(effect.stream, from.sin_port, now))
+        if (!pinEffectsPort(effect.stream, from.sin_port, now))
             return;
         if (!clock.valid()) {
             if (effect.stream == 0) {
