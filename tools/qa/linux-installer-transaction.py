@@ -163,6 +163,15 @@ class InstallerTransactionTests(unittest.TestCase):
         self.run_installer()
         self.assertEqual((self.local / "OBS Jukebox").stat().st_mode & 0o777, 0o700)
 
+    def test_key_folder_is_owner_only_before_the_game_first_runs(self):
+        # Wine would create the folder with default permissions when the game first writes its key.
+        fresh = self.prefix / "drive_c/users/other/AppData/Local"
+        fresh.mkdir(parents=True)
+        (self.prefix / "drive_c/users/Public").mkdir()
+        self.run_installer()
+        self.assertEqual((fresh / "OBS Jukebox").stat().st_mode & 0o777, 0o700)
+        self.assertFalse((self.prefix / "drive_c/users/Public/AppData").exists())
+
     def test_fresh_install_failure_removes_partial_files(self):
         for path in self.targets:
             path.unlink()

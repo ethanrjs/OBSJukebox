@@ -181,8 +181,9 @@ for song_i in 0 1 2; do
     mv -f -- "${song_staged[song_i]}" "${song_targets[song_i]}"
 done
 # The mod writes its link key here with Wine's default permissions. An owner-only folder keeps other
-# users on this PC from reading it.
-for song_local in "${song_locals[@]}"; do
+# users on this PC from reading it. Every Windows user gets one, since the game may not have run yet.
+for song_local in "$song_prefix"/drive_c/users/*/AppData/Local; do
+    [[ -d "$song_local" && ! -L "$song_local" ]] || continue
     mkdir -p -- "$song_local/OBS Jukebox"
     chmod 700 -- "$song_local/OBS Jukebox"
 done
