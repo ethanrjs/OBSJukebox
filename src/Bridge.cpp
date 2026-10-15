@@ -20,6 +20,18 @@ template <size_t N> void copyText(char (&out)[N], const std::string &text) {
     std::memcpy(out, text.data(), length);
 }
 } // namespace
+// Lets at most 32 datagrams through per 50 ms, so a flood can't keep the clock thread spinning.
+struct DatagramBudget {
+    unsigned used = 0;
+    uint64_t window = 0;
+    bool spend(uint64_t now) {
+        if (now - window >= 50000000) {
+            window = now;
+            used = 0;
+        }
+        return used++ < 32;
+    }
+};
 bool answersProbe(const ClockSyncPacket &p, long size, const sockaddr_in &peer) {
     return size == sizeof(p) && !std::memcmp(p.magic, "GDCLK1\0", 8) && p.version == 2 && p.kind == 1 &&
            p.sessionID == processSessionID() && peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK) &&
@@ -49,9 +61,15 @@ bool Bridge::start() {
     }
     stop = false;
     worker = std::thread([this] {
+        DatagramBudget budget;
         while (!stop) {
             if (!waitSocketReadable(socket, 50))
                 continue;
+            // Over budget, the rest wait in the socket buffer, and the system drops what doesn't fit.
+            if (!budget.spend(monotonicNowNs())) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
             ClockSyncPacket p{};
             sockaddr_in peer{};
 #ifdef _WIN32

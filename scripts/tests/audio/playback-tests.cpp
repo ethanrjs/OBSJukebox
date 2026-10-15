@@ -971,6 +971,13 @@ static void senderTest() {
     check(signedWith(processLinkKey(),published),"sender signs song packets with its link key");
     check(readLinkKey(linkKeyFile())==processLinkKey(),"sender writes its link key for OBS when it starts");
 }
+// A flood of datagrams at the game's clock socket would keep its thread spinning. The plugin sends 4
+// probes a second, far under the budget.
+static void senderFloodBudgetTest() {
+    separate_song::DatagramBudget budget;unsigned allowed=0;
+    for(int i=0;i<1000;++i)allowed+=budget.spend(1000);
+    check(allowed==32 && budget.spend(1000+50000000),"the game handles at most 32 datagrams per 50 ms");
+}
 // The game answers only clock probes signed with its key, so nothing else can time its clock.
 static void senderProbeTest() {
     ClockSyncPacket probe;probe.sessionID=processSessionID();probe.t1=5;signPacket(processLinkKey(),probe);
@@ -1010,7 +1017,7 @@ int main(int argc,char** argv){
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
     pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();
     oldModTest(OldMod::V3Songs);oldModTest(OldMod::V1Effects);oldModTest(OldMod::V5Songs);oldModTest(OldMod::V2Effects);newModTest();
-    forgedSenderTest();forgedClockTest();forgedEffectsTest();newKeyTest();senderProbeTest();
+    forgedSenderTest();forgedClockTest();forgedEffectsTest();newKeyTest();senderProbeTest();senderFloodBudgetTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();sharedFadeTimeTest();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();

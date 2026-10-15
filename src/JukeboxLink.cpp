@@ -459,9 +459,11 @@ void select(jukebox::NongCell* cell) {
     if (auto old = choice(c.id); old && (old->uid == c.uid || (old->original && c.original))) {
         clear(c.id); return;
     }
-    if (auto index = CellAccess::index(cell)) {
+    // Jukebox's index serializer can leave parentID null; without it the path falls back to the manifest.
+    if (auto index = CellAccess::index(cell); index && *index) {
         c.offset = (*index)->startOffset;
-        c.path = string::pathToString(base()/"nongs"/fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid));
+        if ((*index)->parentID)
+            c.path = string::pathToString(base()/"nongs"/fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid));
     }
     c = resolved(c); store(c);
     // Only rows with a Game button can be picked, and Jukebox lists those because it stores the
