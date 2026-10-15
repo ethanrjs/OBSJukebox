@@ -131,6 +131,21 @@ static class InstallerTests
             Check(!Engine.CanUndo(new Options { Manifest=noProduct }),"a manifest with no product name is not undone");
         }
         finally { Directory.Delete(manifests,true); }
+        string interrupted=Path.Combine(Path.GetTempPath(),"obs-jukebox-interrupted-"+Guid.NewGuid().ToString("N"));
+        string session=Path.Combine(interrupted,"20260101-000000-abcdef");
+        Directory.CreateDirectory(session);
+        try
+        {
+            string modFile=Path.Combine(interrupted,"mod.geode"),saved=Path.Combine(session,"0000.bak");
+            File.WriteAllText(saved,"previous mod");File.WriteAllText(modFile,"half-installed mod");
+            var stranded=new InstallRecord { GD=interrupted,OBS=interrupted,Files=[
+                new ChangedFile { Destination=modFile,Backup=saved,OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("half-installed mod")),Applied=true }] };
+            string manifest=Path.Combine(session,"manifest.json");
+            File.WriteAllText(manifest,System.Text.Json.JsonSerializer.Serialize(stranded));
+            Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
+            Check(File.ReadAllText(modFile)=="previous mod" && File.ReadAllText(manifest).Contains("rolled-back"),"a transaction left installing by a killed setup is restored on the next run");
+        }
+        finally { Directory.Delete(interrupted,true); }
         string gd=Path.Combine(Path.GetTempPath(),"obs-jukebox-mods-"+Guid.NewGuid().ToString("N"));
         string mods=Path.Combine(gd,"geode","mods");
         Directory.CreateDirectory(mods);

@@ -509,11 +509,33 @@ static class Engine
             stopped.Add(exe);
         }
     }
+    // A setup killed mid-transaction leaves its session at "installing", with backups that neither
+    // undo nor a new install reach. Each run restores such sessions before doing anything else.
+    internal static void RecoverInterrupted(Options o,Action<string> log,List<string> stopped)
+    {
+        if(!Directory.Exists(o.StateRoot)) return;
+        foreach(var session in Directory.GetDirectories(o.StateRoot))
+        {
+            string manifest=Path.Combine(session,"manifest.json");
+            if(!File.Exists(manifest)) continue;
+            InstallRecord? record;
+            try { record=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(manifest)); }
+            catch(JsonException) { continue; }
+            if(record is not { Status: "installing" } || !IsKnownProduct(record.Product)) continue;
+            log("Restoring an installation that was interrupted: "+manifest);
+            string gd=o.GD,obs=o.OBS;
+            try { o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination)); }
+            finally { o.GD=gd; o.OBS=obs; }
+            Restore(record,log);
+            record.Status="rolled-back"; File.WriteAllText(manifest,JsonSerializer.Serialize(record,JsonOptions));
+        }
+    }
     public static void Execute(Options o,Action<string> output,List<string>? closedApps=null)
     {
         var logLines = new List<string>(); string? logPath=null;
         void Log(string s) { string line=DateTimeOffset.Now.ToString("O") + " " + s; logLines.Add(line); output(s); if(logPath!=null) File.AppendAllText(logPath,line+Environment.NewLine); }
         var stopped=closedApps??new List<string>();
+        if (!o.DryRun) RecoverInterrupted(o,Log,stopped);
         if (o.Uninstall) { Uninstall(o,Log,stopped); if(closedApps==null && o.Restart) RestartApps(stopped,Log); return; }
         o.PreviousVersion=InstalledVersion(o.GD); o.AlreadyCurrent=false;
         var plan=Plan(o,Log);
@@ -650,6 +672,13 @@ sealed class SetupForm : Form
     readonly Button install=new(){Text="Install",AutoSize=true},undo=new(){Text="Undo last install",AutoSize=true};
     readonly object logLock=new();
     string? attemptLog;
+    bool working;
+    // Closing mid-transaction would end the process before its rollback could run.
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if(working){e.Cancel=true;SetStatus("Wait for setup to finish before closing it.");}
+        base.OnFormClosing(e);
+    }
     public SetupForm(Options o)
     {
         options=o; Text="OBS Jukebox - Windows Setup"; Width=730;Height=650;MinimumSize=new(730,650);AutoSize=true;AutoSizeMode=AutoSizeMode.GrowOnly;StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",10);
@@ -726,6 +755,7 @@ sealed class SetupForm : Form
         Control[] inputs=[gd.Parent!,obs.Parent!,scene,modOnly,close,restart,jukebox,install,undo];
         foreach(var input in inputs)input.Enabled=false;
         bool success=false;
+        working=true;
         try
         {
             Collect();options.Uninstall=restoring;
@@ -742,7 +772,7 @@ sealed class SetupForm : Form
             try{Detail(ex.ToString());}catch(IOException){}
             SetStatus(ex is UnauthorizedAccessException ? "Setup cannot write this folder. Choose a writable installation or grant your account access, then retry. User files are never edited by an elevated installer." : ex.Message,true);
         }
-        finally{foreach(var input in inputs)input.Enabled=true;scene.Enabled=!modOnly.Checked;options.Uninstall=false;undo.Enabled=Engine.CanUndo(options);}
+        finally{working=false;foreach(var input in inputs)input.Enabled=true;scene.Enabled=!modOnly.Checked;options.Uninstall=false;undo.Enabled=Engine.CanUndo(options);}
         if(success)SetStatus(restoring?"Undo complete. Later user changes were preserved. You may close setup.":Engine.SuccessMessage(options));
     }
 }
