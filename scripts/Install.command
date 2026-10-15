@@ -10,7 +10,7 @@ song_app="${song_app:A}"
 song_obs="${song_obs:A}"
 finish() { print -r -- "$1"; if [[ -t 0 ]]; then read 'song_reply?Press Return to close. '; fi; }
 fail() { finish "$1"; exit 1; }
-[[ "$(uname -s)" == Darwin ]] || fail 'Run this installer on macOS.'
+[[ "$(/usr/bin/uname -s)" == Darwin ]] || fail 'Run this installer on macOS.'
 if (( song_uninstall )); then
     if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x obs >/dev/null; then fail 'Close Geometry Dash and OBS before undoing installation.'; fi
     /usr/bin/perl "$song_root/install-state.pl" undo-latest "$HOME/Library/Application Support/OBS Jukebox/Install Logs"
@@ -25,7 +25,7 @@ song_plugin="$song_root/payload/separate-song.plugin/Contents/MacOS/separate-son
 for song_file in "$song_root/payload/local.separate_song.geode" "$song_root/payload/fleym.nongd.geode" "$song_root/payload/separate-song.plugin/Contents/Info.plist" "$song_plugin"; do
     [[ -s "$song_file" ]] || fail "The installer is incomplete: $song_file"
 done
-song_arch=$(uname -m)
+song_arch=$(/usr/bin/uname -m)
 /usr/bin/lipo "$song_plugin" -verify_arch "$song_arch" >/dev/null 2>&1 || fail "This installer does not include a plugin for $song_arch."
 /usr/bin/lipo "$song_obs/Contents/MacOS/$song_obs_executable" -verify_arch "$song_arch" >/dev/null 2>&1 || fail 'Install the native OBS Studio build for this Mac before continuing.'
 if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x "$song_obs_executable" >/dev/null; then
@@ -94,9 +94,9 @@ PERL
 ) || fail 'Installed mod compatibility could not be verified. No installation files have been changed.'
 song_jukebox=${song_packages%%$'\n'*}
 song_mod_destination=${song_packages#*$'\n'}
-song_audit="$HOME/Library/Application Support/OBS Jukebox/Install Logs/$(date +%Y%m%d-%H%M%S)-$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f",time')-$(uuidgen)"
-mkdir -p "$song_audit/Backups" "$song_audit/Failed"
-exec > >(tee "$song_audit/install.log") 2>&1
+song_audit="$HOME/Library/Application Support/OBS Jukebox/Install Logs/$(/bin/date +%Y%m%d-%H%M%S)-$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f",time')-$(/usr/bin/uuidgen)"
+/bin/mkdir -p "$song_audit/Backups" "$song_audit/Failed"
+exec > >(/usr/bin/tee "$song_audit/install.log") 2>&1
 song_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$song_root/payload/separate-song.plugin/Contents/Info.plist")
 print -r -- "OBS Jukebox $song_version" "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
 typeset -a song_targets song_previous
@@ -119,9 +119,20 @@ rollback() {
     exit "$song_result"
 }
 trap rollback EXIT
+# Refuses a symbolic link at the target or in any folder between it and the top it belongs to, so a
+# linked Contents, geode or plugins folder can't send a copy somewhere else.
+refuse_links() {
+    local song_path="$1" song_top="$2"
+    while [[ "$song_path" == "$song_top"/* ]]; do
+        [[ ! -L "$song_path" ]] || fail "Refusing to write through a symbolic link: $song_path"
+        song_path="${song_path:h}"
+    done
+}
 copy_item() {
     local song_source="$1" song_destination="$2" song_index=$(( ${#song_targets} + 1 )) song_existed=0
-    [[ ! -L "$song_destination" ]] || fail "Refusing to replace a symbolic link: $song_destination"
+    local song_top="$song_app"
+    [[ "$song_destination" == "$song_app"/* ]] || song_top="$HOME/Library/Application Support"
+    refuse_links "$song_destination" "$song_top"
     if [[ -e "$song_destination" ]]; then
         /usr/bin/ditto "$song_destination" "$song_audit/Backups/$song_index"
         song_existed=1
@@ -131,6 +142,8 @@ copy_item() {
     /bin/mkdir -p "${song_destination:h}"
     # Replace complete bundles rather than merging stale files into new payloads.
     if [[ -e "$song_destination" ]]; then /bin/mv "$song_destination" "$song_audit/Failed/replaced-$song_index"; fi
+    # Again right before the copy: a link could have appeared since the first check.
+    refuse_links "$song_destination" "$song_top"
     /usr/bin/ditto --noextattr --noqtn "$song_source" "$song_destination"
     /usr/bin/perl "$song_root/install-state.pl" record "$song_audit" "$song_destination" "$song_audit/Backups/$song_index"
     print -r -- "Installed: $song_destination"
@@ -154,7 +167,7 @@ fi
 copy_item "$song_root/payload/local.separate_song.geode" "$song_mod_destination"
 copy_item "$song_root/payload/separate-song.plugin" "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
 /usr/bin/shasum -a 256 "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin/Contents/MacOS/separate-song"
-touch "$song_audit/complete"
+/usr/bin/touch "$song_audit/complete"
 song_success=1
 print -r -- 'Undo this installation with Install.command --uninstall.'
 finish $'Installed!\n\n1. Open Geometry Dash and OBS.\n2. In OBS, add Sources > GD Sounds once. Keep Audio Monitoring off.\n3. In Jukebox, use the Game and OBS checkboxes to choose each song.\n4. In the pause menu, switch Game / OBS to adjust their volumes.\n\nGD Sounds includes game sound effects. Disable any duplicate GD audio capture in OBS.'
