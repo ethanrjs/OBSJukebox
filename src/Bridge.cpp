@@ -1,4 +1,5 @@
 #include "Bridge.hpp"
+#include "LinkKey.hpp"
 #include "MonotonicClock.hpp"
 #include "Utf8.hpp"
 #include <cstring>
@@ -19,6 +20,11 @@ template <size_t N> void copyText(char (&out)[N], const std::string &text) {
     std::memcpy(out, text.data(), length);
 }
 } // namespace
+bool answersProbe(const ClockSyncPacket &p, long size, const sockaddr_in &peer) {
+    return size == sizeof(p) && !std::memcmp(p.magic, "GDCLK1\0", 8) && p.version == 2 && p.kind == 1 &&
+           p.sessionID == processSessionID() && peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK) &&
+           signedWith(processLinkKey(), p);
+}
 Bridge::~Bridge() { shutdown(); }
 void Bridge::shutdown() {
     stop = true;
@@ -34,6 +40,13 @@ bool Bridge::start() {
     socket = openLoopbackSocket();
     if (socket == BAD_SOCKET)
         return false;
+    if (!writeLinkKey(processLinkKey())) {
+#if __has_include(<Geode/Geode.hpp>)
+        geode::log::error("OBS Jukebox could not write its link key, so OBS will ignore the game");
+#else
+        std::fprintf(stderr, "OBS Jukebox could not write its link key, so OBS will ignore the game\n");
+#endif
+    }
     stop = false;
     worker = std::thread([this] {
         while (!stop) {
@@ -49,11 +62,11 @@ bool Bridge::start() {
             auto size = recvfrom(socket, reinterpret_cast<char *>(&p), sizeof(p), 0,
                                  reinterpret_cast<sockaddr *>(&peer), &length);
             auto received = monotonicNowNs();
-            if (size == sizeof(p) && !std::memcmp(p.magic, "GDCLK1\0", 8) && p.version == 1 && p.kind == 1 &&
-                p.sessionID == processSessionID() && peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK)) {
+            if (answersProbe(p, long(size), peer)) {
                 p.kind = 2;
                 p.t2 = received;
                 p.t3 = monotonicNowNs();
+                signPacket(processLinkKey(), p);
                 sendto(socket, reinterpret_cast<const char *>(&p), sizeof(p), 0,
                        reinterpret_cast<sockaddr *>(&peer), length);
             }
@@ -114,6 +127,7 @@ void Bridge::publish(const Snapshot &s) {
     address.sin_family = AF_INET;
     address.sin_port = htons(receiverPort());
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    signPacket(processLinkKey(), p);
     sendto(socket, reinterpret_cast<const char *>(&p), sizeof(p), 0, reinterpret_cast<sockaddr *>(&address),
            sizeof(address));
 }

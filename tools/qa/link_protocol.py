@@ -1,12 +1,44 @@
 import ctypes
+import hashlib
+import hmac
 import math
+import os
+from pathlib import Path
 import struct
 import sys
 import time
 
 SONG = struct.Struct("<8sIIIiddd24s96s96s1024s")
 CLOCK = struct.Struct("<8sIIQQQQ")
-SONG_SIZES = {2: 1288, 3: 1296, 4: 1304, 5: 1436}
+SONG_SIZES = {2: 1288, 3: 1296, 4: 1304, 5: 1436, 6: 1452}
+# Where each signed packet keeps its 16-byte tag (LinkKey.hpp).
+SONG_TAG, EFFECTS_TAG, CLOCK_TAG = 1436, 44, 48
+EFFECTS_HEADERS = {1: 36, 2: 44, 3: 60}
+
+
+def tag(key, packet, at):
+    """The first 16 bytes of the HMAC-SHA256 of the packet, leaving out its tag field."""
+    return hmac.new(key, bytes(packet[:at]) + bytes(packet[at + 16:]), hashlib.sha256).digest()[:16]
+
+
+def sign(key, packet, at):
+    return bytes(packet[:at]) + tag(key, packet, at) + bytes(packet[at + 16:])
+
+
+def default_key_file():
+    """The link key file the mod writes on Windows and macOS; Linux has it inside the Wine prefix."""
+    if sys.platform == "win32":
+        return Path(os.environ["LOCALAPPDATA"]) / "OBS Jukebox" / "link-key"
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Application Support/OBS Jukebox/link-key"
+    return None
+
+
+def read_key(path):
+    text = Path(path).read_text().strip()
+    if len(text) != 64 or text != text.lower():
+        raise ValueError("a link key file holds 64 lowercase hex digits")
+    return bytes.fromhex(text)
 
 
 if sys.platform == "win32":
@@ -40,7 +72,7 @@ def parse_packet(packet):
         timestamp = struct.unpack_from("<Q", packet, 1296)[0] if version >= 4 else None
         session, channel, gain, fades = 0, 0, 1., []
         loop_start, loop_end = 0., 0.
-        if version == 5:
+        if version >= 5:
             session, channel, gain, count = struct.unpack_from("<QifI", packet, 1304)
             if not session or not -1 <= channel < 64 or not math.isfinite(gain) or not 0 <= gain <= 16 or count > 8:
                 raise ValueError("invalid song channel/session/gain/fade count")
@@ -65,32 +97,37 @@ def parse_packet(packet):
                             level=text(level), song=text(song), song_path_present=bool(text(path)),
                             obs_music_volume=volumes[0], obs_effects_volume=volumes[1],
                             timestamp_ns=timestamp, session_id=session, channel_id=channel,
-                            trigger_gain=gain, fades=fades, loop_start=loop_start, loop_end=loop_end)
-    if magic in (b"GDSFX1\0\0", b"GDSFX2\0\0"):
-        modern = magic == b"GDSFX2\0\0"
-        size = 44 if modern else 36
+                            trigger_gain=gain, fades=fades, loop_start=loop_start, loop_end=loop_end,
+                            tag=packet[SONG_TAG:].hex() if version == 6 else None)
+    if magic in (b"GDSFX1\0\0", b"GDSFX2\0\0", b"GDSFX3\0\0"):
+        declared = magic[5] - ord("0")
+        size = EFFECTS_HEADERS[declared]
         if len(packet) < size:
             raise ValueError("truncated effects packet")
         _, version, sequence, rate, frames, timestamp, stream = struct.unpack_from("<8sIIIIQI", packet)
-        session = struct.unpack_from("<Q", packet, 36)[0] if modern else 0
-        if (version != (2 if modern else 1) or not 1 <= frames <= 512 or
+        session = struct.unpack_from("<Q", packet, 36)[0] if declared >= 2 else 0
+        if (version != declared or not 1 <= frames <= 512 or
                 len(packet) != size + frames * 8 or not 8000 <= rate <= 192000 or
-                stream > 1 or (modern and not session)):
+                stream > 1 or (declared >= 2 and not session)):
             raise ValueError("invalid effects header/length")
         samples = struct.unpack_from(f"<{frames * 2}f", packet, size)
         if not all(map(math.isfinite, samples)):
             raise ValueError("nonfinite effects sample")
         return "effects", dict(version=version, sequence=sequence, rate=rate, frames=frames,
-                               timestamp_ns=timestamp, stream=stream, session_id=session, samples=samples)
+                               timestamp_ns=timestamp, stream=stream, session_id=session, samples=samples,
+                               tag=packet[EFFECTS_TAG:size].hex() if declared == 3 else None)
     if magic == b"GDCLK1\0\0":
-        if len(packet) != CLOCK.size:
+        if len(packet) < CLOCK.size:
             raise ValueError("invalid clock packet length")
-        _, version, kind, session, t1, t2, t3 = CLOCK.unpack(packet)
-        if version != 1 or kind not in (1, 2) or not session or not t1:
+        _, version, kind, session, t1, t2, t3 = CLOCK.unpack_from(packet)
+        if len(packet) != (CLOCK.size + 16 if version == 2 else CLOCK.size):
+            raise ValueError("invalid clock packet length")
+        if version not in (1, 2) or kind not in (1, 2) or not session or not t1:
             raise ValueError("invalid clock packet")
         if (kind == 1 and (t2 or t3)) or (kind == 2 and (not t2 or t3 < t2)):
             raise ValueError("invalid clock timestamps")
-        return "clock", dict(kind=kind, session_id=session, t1=t1, t2=t2, t3=t3)
+        return "clock", dict(kind=kind, session_id=session, t1=t1, t2=t2, t3=t3,
+                             tag=packet[CLOCK_TAG:].hex() if version == 2 else None)
     raise ValueError("unknown packet magic")
 
 
@@ -103,7 +140,7 @@ class RelayRoutes:
 
     def route(self, kind, fields, peer):
         session = fields.get("session_id")
-        if kind == "song" and fields["version"] == 5:
+        if kind == "song" and fields["version"] >= 5:
             if peer == self.destination:
                 return None
             if session != self.session:
@@ -124,6 +161,6 @@ class RelayRoutes:
                 self.probes.remove(key)
                 return self.destination
             return None
-        if peer == self.destination or (kind == "effects" and fields["version"] == 2 and session != self.session):
+        if peer == self.destination or (kind == "effects" and fields["version"] >= 2 and session != self.session):
             return None
         return self.destination

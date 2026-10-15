@@ -2,6 +2,7 @@
 #include "AudioTap.hpp"
 #include "AudioDownmix.hpp"
 #include "Bridge.hpp"
+#include "LinkKey.hpp"
 #include "LinkPacket.hpp"
 #include "MonotonicClock.hpp"
 #include "TapClock.hpp"
@@ -20,7 +21,7 @@ namespace separate_song::audio_tap {
 namespace {
 struct Tap {
     static constexpr unsigned capacity = 64;
-    std::array<EffectsPacketV2, capacity> queue;
+    std::array<EffectsPacketV3, capacity> queue;
     std::atomic<unsigned> read{0}, write{0};
     std::atomic<bool> enabled{true};
     // Wall time of DSP clock 0 on the effects timeline, for dating music positions.
@@ -171,7 +172,9 @@ struct Tap {
                     break;
                 auto r = read.load(std::memory_order_relaxed);
                 auto &p = queue[r % capacity];
-                auto size = offsetof(EffectsPacketV2, samples) + p.frames * 2 * sizeof(float);
+                auto size = offsetof(EffectsPacketV3, samples) + p.frames * 2 * sizeof(float);
+                // Signed here rather than in FMOD's mixer callback, which must stay short.
+                signPacket(processLinkKey(), p, size);
                 sendto(transport, reinterpret_cast<const char *>(&p), static_cast<int>(size), 0,
                        reinterpret_cast<sockaddr *>(&target), sizeof(target));
                 read.store(r + 1, std::memory_order_release);

@@ -1,3 +1,4 @@
+#include "../src/LinkKey.hpp"
 #include "../src/LinkPacket.hpp"
 #include "../src/Socket.hpp"
 #include "../src/Utf8.hpp"
@@ -56,13 +57,13 @@ struct LinkState {
     Clock::time_point received{};
     bool connected = false;
 };
-// Checks a v5 song packet's size and fields. Returns nothing if any of them is invalid.
+// Checks a v6 song packet's size and fields, but not its tag. Returns nothing if any of them is invalid.
 static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, size_t size) {
     SongLinkPacket p{};
     if (size != sizeof(p))
         return std::nullopt;
     memcpy(&p, data, size);
-    if (p.version != 5 || memcmp(p.magic, "GDSONG1", 8) || !p.sessionID)
+    if (p.version != 6 || memcmp(p.magic, "GDSONG1", 8) || !p.sessionID)
         return std::nullopt;
     if (!std::isfinite(p.musicVolume) || p.musicVolume < 0 || p.musicVolume > 1 ||
         !std::isfinite(p.effectsVolume) || p.effectsVolume < 0 || p.effectsVolume > 1 ||
@@ -92,17 +93,20 @@ static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, 
 struct EffectsInput {
     EffectsPacket packet;
     uint64_t session = 0;
+    EffectsPacketV3 wire; // as received, for checking its tag
+    size_t size = 0;
 };
-// Checks a GDSFX2 effects packet and converts it to the type the receiver stores.
+// Checks a GDSFX3 effects packet, but not its tag, and converts it to the type the receiver stores.
 static std::optional<EffectsInput> parseEffectsPacket(const unsigned char *data, size_t size) {
-    constexpr size_t header = offsetof(EffectsPacketV2, samples);
-    if (size < header || size > sizeof(EffectsPacketV2) || memcmp(data, "GDSFX2\0", 8))
-        return std::nullopt;
-    EffectsPacketV2 p;
-    memcpy(&p, data, size);
-    if (p.version != 2 || p.frames > 512 || size != header + p.frames * 2 * sizeof(float))
+    constexpr size_t header = offsetof(EffectsPacketV3, samples);
+    if (size < header || size > sizeof(EffectsPacketV3) || memcmp(data, "GDSFX3\0", 8))
         return std::nullopt;
     EffectsInput input;
+    auto &p = input.wire;
+    memcpy(&p, data, size);
+    input.size = size;
+    if (p.version != 3 || p.frames > 512 || size != header + p.frames * 2 * sizeof(float))
+        return std::nullopt;
     auto &effect = input.packet;
     effect.sequence = p.sequence;
     effect.sampleRate = p.sampleRate;
@@ -122,18 +126,18 @@ static std::optional<EffectsInput> parseEffectsPacket(const unsigned char *data,
             return std::nullopt;
     return input;
 }
-// A GDSONG1 packet below version 5, or any GDSFX1 packet, comes from a mod older than v1.1: v1.0 sent
-// v3 song packets and GDSFX1 effects, before clock sync. handle() has checked that size >= 8.
-static bool fromModBeforeV11(const unsigned char *data, size_t size) {
-    if (!memcmp(data, "GDSFX1\0", 8))
+// Mods up to v1.2.3 sent unsigned packets: GDSONG1 below version 6, GDSFX1 and GDSFX2. handle() has
+// checked that size >= 8.
+static bool fromOlderMod(const unsigned char *data, size_t size) {
+    if (!memcmp(data, "GDSFX1\0", 8) || !memcmp(data, "GDSFX2\0", 8))
         return true;
     uint32_t version = 0;
     if (size < offsetof(SongLinkPacket, version) + sizeof(version) || memcmp(data, "GDSONG1", 8))
         return false;
     memcpy(&version, data + offsetof(SongLinkPacket, version), sizeof(version));
-    return version < 5;
+    return version < 6;
 }
-// A GDSONG1 packet above version 5, a GDSFX2 packet above version 2, or a later GDSONG or GDSFX
+// A GDSONG1 packet above version 6, a GDSFX3 packet above version 3, or a later GDSONG or GDSFX
 // magic comes from a mod newer than this plugin. handle() has checked that size >= 8.
 static bool fromNewerMod(const unsigned char *data, size_t size) {
     uint32_t version = 0;
@@ -141,16 +145,16 @@ static bool fromNewerMod(const unsigned char *data, size_t size) {
         if (size < offsetof(SongLinkPacket, version) + sizeof(version))
             return false;
         memcpy(&version, data + offsetof(SongLinkPacket, version), sizeof(version));
-        return version > 5;
+        return version > 6;
     }
-    if (!memcmp(data, "GDSFX2\0", 8)) {
-        if (size < offsetof(EffectsPacketV2, version) + sizeof(version))
+    if (!memcmp(data, "GDSFX3\0", 8)) {
+        if (size < offsetof(EffectsPacketV3, version) + sizeof(version))
             return false;
-        memcpy(&version, data + offsetof(EffectsPacketV2, version), sizeof(version));
-        return version > 2;
+        memcpy(&version, data + offsetof(EffectsPacketV3, version), sizeof(version));
+        return version > 3;
     }
     return (!memcmp(data, "GDSONG", 6) && data[6] > '1' && data[6] <= '9') ||
-           (!memcmp(data, "GDSFX", 5) && data[5] > '2' && data[5] <= '9');
+           (!memcmp(data, "GDSFX", 5) && data[5] > '3' && data[5] <= '9');
 }
 // Whether an effect is within a second of now.
 static bool effectsCurrent(uint64_t timestamp, uint64_t now) {
@@ -177,7 +181,8 @@ class Receiver {
     std::array<std::deque<PlaybackPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
     std::deque<EffectsPacket> effects, pendingEffects;
     LinkClock clock;
-    uint64_t session = 0, lastProbe = 0, lastSongReceived = 0, lastOldModPacket = 0, lastNewModPacket = 0;
+    uint64_t session = 0, lastProbe = 0, lastSongReceived = 0, lastOldModPacket = 0, lastNewModPacket = 0,
+             lastUnverifiedPacket = 0;
     std::array<uint64_t, 2> lastEffectsReceived{};
     std::array<uint16_t, 2> effectsPort{};
     static constexpr uint64_t sessionTimeoutNs = 2000000000ULL;
@@ -185,6 +190,44 @@ class Receiver {
     sockaddr_in peer{};
     std::deque<SongLinkPacket> pending;
     FILE *reference = nullptr;
+    // Only the receiver thread touches these. The followed game signs with sessionKey; keyFileKeys
+    // are the keys in the mod's key files, read again at most once a second when no known key fits.
+    LinkKey sessionKey{};
+    std::vector<LinkKey> keyFileKeys;
+    uint64_t keysRead = 0;
+#if defined(__linux__)
+    LinuxPaths paths;
+#endif
+    std::vector<std::filesystem::path> keyFiles() const {
+#if defined(__linux__)
+        if (auto file = linkKeyFile(); !file.empty())
+            return {file};
+        return paths.keyFiles();
+#else
+        return {linkKeyFile()};
+#endif
+    }
+    // The key that signed a song packet, if it is the followed game's or one in a key file.
+    std::optional<LinkKey> signingKey(const SongLinkPacket &p, uint64_t now) {
+        auto known = [&]() -> std::optional<LinkKey> {
+            if (session && signedWith(sessionKey, p))
+                return sessionKey;
+            for (const auto &key : keyFileKeys)
+                if (signedWith(key, p))
+                    return key;
+            return std::nullopt;
+        };
+        if (auto key = known())
+            return key;
+        if (keysRead && now - keysRead < 1000000000)
+            return std::nullopt;
+        keysRead = now;
+        keyFileKeys.clear();
+        for (const auto &file : keyFiles())
+            if (auto key = readLinkKey(file))
+                keyFileKeys.push_back(*key);
+        return known();
+    }
     void queueEffects(const EffectsPacket &effect) {
         auto next = std::lower_bound(effects.begin(), effects.end(), effect.timestamp,
                                      [](const auto &a, uint64_t t) { return a.timestamp < t; });
@@ -254,6 +297,7 @@ class Receiver {
         ClockSyncPacket p;
         p.sessionID = session;
         p.t1 = now;
+        signPacket(sessionKey, p);
         probes.push_back(now);
         while (probes.size() > 8)
             probes.pop_front();
@@ -267,10 +311,10 @@ class Receiver {
             return;
         if (!memcmp(data, "GDCLK1\0", 8))
             handleClockReply(data, size, from, now);
-        else if (fromModBeforeV11(data, size)) {
+        else if (fromOlderMod(data, size)) {
             std::lock_guard lock(mutex);
             if (!lastOldModPacket)
-                blog(LOG_WARNING, "[OBS Jukebox] Ignoring packets from an OBS Jukebox mod older than v1.1");
+                blog(LOG_WARNING, "[OBS Jukebox] Ignoring unsigned packets from an older OBS Jukebox mod; update the mod");
             lastOldModPacket = now;
         } else if (fromNewerMod(data, size)) {
             std::lock_guard lock(mutex);
@@ -280,8 +324,16 @@ class Receiver {
         } else if (!memcmp(data, "GDSFX", 5)) {
             if (auto effect = parseEffectsPacket(data, size))
                 handleEffects(*effect, from, now);
-        } else if (auto song = parseSongPacket(data, size))
-            handleSong(*song, from, now);
+        } else if (auto song = parseSongPacket(data, size)) {
+            if (auto key = signingKey(*song, now)) {
+                handleSong(*song, *key, from, now);
+                return;
+            }
+            std::lock_guard lock(mutex);
+            if (!lastUnverifiedPacket)
+                blog(LOG_WARNING, "[OBS Jukebox] Ignoring song packets not signed with this user's OBS Jukebox link key");
+            lastUnverifiedPacket = now;
+        }
     }
     void handleClockReply(const unsigned char *data, size_t size, const sockaddr_in &from, uint64_t now) {
         if (size != sizeof(ClockSyncPacket))
@@ -289,8 +341,8 @@ class Receiver {
         ClockSyncPacket p;
         memcpy(&p, data, sizeof(p));
         auto found = std::find(probes.begin(), probes.end(), p.t1);
-        if (p.version != 1 || p.kind != 2 || p.sessionID != session || found == probes.end() ||
-            from.sin_port != peer.sin_port)
+        if (p.version != 2 || p.kind != 2 || p.sessionID != session || found == probes.end() ||
+            from.sin_port != peer.sin_port || !signedWith(sessionKey, p))
             return;
         probes.erase(found);
         bool changed = false;
@@ -308,9 +360,12 @@ class Receiver {
         pendingEffects.clear();
     }
     void handleEffects(const EffectsInput &input, const sockaddr_in &from, uint64_t now) {
+        // Checked before taking the lock that OBS's audio thread also takes.
+        if (!session || !signedWith(sessionKey, input.wire, input.size))
+            return;
         auto effect = input.packet;
         std::lock_guard lock(mutex);
-        if (!session || input.session != session || !pinEffectsPort(effect.stream, from.sin_port, now))
+        if (input.session != session || !pinEffectsPort(effect.stream, from.sin_port, now))
             return;
         if (!clock.valid()) {
             if (effect.stream == 0) {
@@ -331,13 +386,14 @@ class Receiver {
         }
         queueEffects(effect);
     }
-    void handleSong(const SongLinkPacket &p, const sockaddr_in &from, uint64_t now) {
+    void handleSong(const SongLinkPacket &p, const LinkKey &key, const sockaddr_in &from, uint64_t now) {
         std::lock_guard lock(mutex);
-        if (session != p.sessionID || from.sin_port != peer.sin_port) {
+        if (session != p.sessionID || from.sin_port != peer.sin_port || key != sessionKey) {
             if (lastSongReceived && now - lastSongReceived <= sessionTimeoutNs)
                 return;
             blog(LOG_INFO, "[OBS Jukebox] Adopting game session %llu", static_cast<unsigned long long>(p.sessionID));
             resetSession(p.sessionID);
+            sessionKey = key;
             peer = from;
         }
         lastSongReceived = now;
@@ -384,7 +440,7 @@ class Receiver {
 #endif
         worker = std::thread([this] {
             while (!stop) {
-                std::array<unsigned char, sizeof(EffectsPacketV2) + 1> buffer{};
+                std::array<unsigned char, sizeof(EffectsPacketV3) + 1> buffer{};
                 sockaddr_in from{};
 #ifdef _WIN32
                 int length = sizeof(from);
@@ -414,7 +470,7 @@ class Receiver {
             closeSocket(sock);
     }
     bool available() const { return sock != BAD_SOCKET; }
-    // Whether a mod older than v1.1 has sent packets within sessionTimeoutNs.
+    // Whether a mod that doesn't sign its packets has sent some within sessionTimeoutNs.
     bool oldModSending(uint64_t now) {
         std::lock_guard lock(mutex);
         return lastOldModPacket && since(lastOldModPacket, now) <= sessionTimeoutNs;
@@ -423,6 +479,11 @@ class Receiver {
     bool newModSending(uint64_t now) {
         std::lock_guard lock(mutex);
         return lastNewModPacket && since(lastNewModPacket, now) <= sessionTimeoutNs;
+    }
+    // Whether song packets no known link key signed have arrived within sessionTimeoutNs.
+    bool unverifiedSending(uint64_t now) {
+        std::lock_guard lock(mutex);
+        return lastUnverifiedPacket && since(lastUnverifiedPacket, now) <= sessionTimeoutNs;
     }
     // GD's main thread sends song packets and FMOD's mixer thread sends effects. Effects that keep
     // arriving after song packets stop mean the main thread is stalled (as while GD tears down a
@@ -778,9 +839,11 @@ struct SongSource {
                 voice.reset();
         bool oldMod = !connected && linkReceiver->oldModSending(now);
         bool newMod = !connected && linkReceiver->newModSending(now);
+        bool unverified = !connected && linkReceiver->unverifiedSending(now);
         std::lock_guard lock(mutex);
-        detail = oldMod ? "Update the OBS Jukebox mod in Geometry Dash to v1.1 or later."
+        detail = oldMod ? "Update the OBS Jukebox mod in Geometry Dash to match this plugin."
                  : newMod ? "Update the OBS Jukebox plugin to match the mod in Geometry Dash."
+                 : unverified ? "Can't verify Geometry Dash: its packets don't match the OBS Jukebox link key. Restart Geometry Dash."
                  : !linkReceiver->available() ? "Game link unavailable: local UDP port is already in use."
                  : !decoderError.empty() ? decoderError
                  : !connected            ? "Waiting for Geometry Dash"

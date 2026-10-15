@@ -20,7 +20,7 @@ This mod works only together with the OBS Jukebox plugin for OBS Studio, which a
 
 - Windows, or a Mac with Apple Silicon (macOS 13 or later). Linux works only through Proton, with the experimental installer on the releases page.
 - Jukebox 3.8.0. With any other Jukebox version, OBS plays the same song as the game until OBS Jukebox supports that version.
-- 64-bit OBS Studio. The plugin is built against OBS 32.
+- 64-bit OBS Studio. The plugin is built against OBS 32. Run OBS as your normal user, not as administrator.
 
 ## Credits
 

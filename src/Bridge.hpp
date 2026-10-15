@@ -34,4 +34,6 @@ class Bridge {
     void publish(const Snapshot &snapshot);
 };
 Bridge &bridge();
+// Whether a datagram is a clock probe the game should answer.
+bool answersProbe(const ClockSyncPacket &probe, long size, const sockaddr_in &peer);
 } // namespace separate_song

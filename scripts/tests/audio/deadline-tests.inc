@@ -20,9 +20,10 @@ static void musicDeadlineTest(bool delayedOpen) {
             p.flags=i%10==4?1:3;
             if(i>40){p.flags=7;p.loopStart=190;p.loopEnd=190.02;p.position=190;}
             sender.send(p,now);
-            EffectsPacketV2 effect;effect.sessionID=sender.session;effect.frames=480;effect.timestamp=now;
+            EffectsPacketV3 effect;effect.sessionID=sender.session;effect.frames=480;effect.timestamp=now;
             std::fill_n(effect.samples,960,.02f);
-            sendto(effects,reinterpret_cast<const char*>(&effect),44+effect.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+            auto size=offsetof(EffectsPacketV3,samples)+effect.frames*8;signPacket(processLinkKey(),effect,size);
+            sendto(effects,reinterpret_cast<const char*>(&effect),int(size),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
