@@ -749,6 +749,16 @@ static void malformedV5Test() {
     check(receiver->get().packet.epoch==720,"v5 accepts fade points that share a time");
 }
 
+// Points that share a time are a step. A zero-width segment never reaches the division in songGainAt.
+static void sharedFadeTimeTest() {
+    SongLinkPacket p;p.timestamp=1000;p.fadeCount=2;p.fades[0]={1000000,.5f};p.fades[1]={1000000,0};
+    bool finite=true;
+    for(uint64_t t:{0ull,1000ull,501000ull,1000999ull,1001000ull,1001001ull,9000000ull})finite&=std::isfinite(songGainAt(p,t));
+    p.fades[0].offsetNs=0;finite&=std::isfinite(songGainAt(p,1000));
+    p.fades[0].offsetNs=1000000;
+    check(finite && std::abs(songGainAt(p,501000)-.75f)<1e-6f && songGainAt(p,1001000)==0,
+        "fade points that share a time give a finite step");
+}
 static void shortLoopTest() {
     Simulation sim;
     auto game=sim.game(3600000000000LL);
@@ -1003,7 +1013,7 @@ int main(int argc,char** argv){
     forgedSenderTest();forgedClockTest();forgedEffectsTest();newKeyTest();senderProbeTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
-    multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
+    multipleVoiceFadeTest();malformedV5Test();sharedFadeTimeTest();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
     tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();senderInvalidPathTest();utf8Test();
     receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
