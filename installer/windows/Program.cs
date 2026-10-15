@@ -545,16 +545,23 @@ static class Engine
             if(!File.Exists(manifest)) continue;
             InstallRecord? record;
             try { record=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(manifest)); }
-            catch(JsonException) { continue; }
+            catch(Exception ex) when(ex is JsonException or IOException or UnauthorizedAccessException) { continue; }
             if(record is not { Status: "installing" } || !IsKnownProduct(record.Product)) continue;
+            // An edited manifest can hold nulls as well as outside paths; either way it is skipped.
             try { CheckRecordPaths(record,o); }
-            catch(IOException ex) { log("Skipping an interrupted installation: "+ex.Message); continue; }
+            catch(Exception ex) { log("Skipping an interrupted installation: "+manifest+" ("+ex.Message+")"); continue; }
             log("Restoring an installation that was interrupted: "+manifest);
-            string gd=o.GD,obs=o.OBS;
-            try { o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination)); }
-            finally { o.GD=gd; o.OBS=obs; }
-            Restore(record,log);
-            record.Status="rolled-back"; File.WriteAllText(manifest,JsonSerializer.Serialize(record,JsonOptions));
+            // A session left at "installing" would be retried, and fail, on every later run.
+            try
+            {
+                string gd=o.GD,obs=o.OBS;
+                try { o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination)); }
+                finally { o.GD=gd; o.OBS=obs; }
+                Restore(record,log);
+                record.Status="rolled-back";
+            }
+            catch(Exception ex) { log("Rollback incomplete: "+ex.Message); record.Status="rollback-incomplete"; }
+            File.WriteAllText(manifest,JsonSerializer.Serialize(record,JsonOptions));
         }
     }
     public static void Execute(Options o,Action<string> output,List<string>? closedApps=null)

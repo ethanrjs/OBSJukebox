@@ -171,6 +171,18 @@ static class InstallerTests
                 File.WriteAllText(Path.Combine(forgedSession,"manifest.json"),System.Text.Json.JsonSerializer.Serialize(forged));
                 Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
                 Check(File.ReadAllText(victim)=="user document","recovery skips an interrupted manifest naming files outside the install folders");
+                // A recovery that fails, or a manifest it can't read, must not stop every later install.
+                var recover=()=>Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
+                string lostSession=Path.Combine(interrupted,"20260103-000000-abcdef");Directory.CreateDirectory(lostSession);
+                string lostManifest=Path.Combine(lostSession,"manifest.json");
+                File.WriteAllText(lostManifest,System.Text.Json.JsonSerializer.Serialize(new InstallRecord { GD=interrupted,OBS=interrupted,Files=[
+                    new ChangedFile { Destination=modFile,Backup=Path.Combine(lostSession,"missing.bak"),OriginalHash="00",InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),Applied=true }] }));
+                string nullSession=Path.Combine(interrupted,"20260104-000000-abcdef");Directory.CreateDirectory(nullSession);
+                File.WriteAllText(Path.Combine(nullSession,"manifest.json"),System.Text.Json.JsonSerializer.Serialize(new InstallRecord { GD=null!,OBS=null!,Files=[] }));
+                bool recovered=true;
+                try { recover(); recover(); }
+                catch(Exception) { recovered=false; }
+                Check(recovered && File.ReadAllText(lostManifest).Contains("rollback-incomplete"),"a recovery that can't finish, or a manifest with missing fields, doesn't block later installs");
             }
             finally { File.Delete(victim); }
         }
