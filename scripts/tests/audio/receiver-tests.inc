@@ -7,7 +7,7 @@ static void receiverIsolationTest() {
     for(int i=0;i<5;++i){sim.send(second,packet,sim.now);sim.advance(10000000);}
     check(receiver->get().packet.sessionID==first.session,"fresh session rejects a competing game sender");
     packet.sessionID=first.session;
-    sim.sendRaw(packet,first.stamp(sim.now),5,50005);
+    sim.sendRaw(packet,first.stamp(sim.now),6,50005,&first.key);
     sim.advance(20000000);
     check(receiver->get().packet.epoch!=811,"same session from another song port is rejected");
     sim.advance(2050000000);
@@ -23,7 +23,7 @@ static void receiverEffectsBoundaryTest() {
     auto native=sim.now;sim.send(game,song,native);
     sim.advance(15000000);
     auto mapped=receiver->get().packet.timestamp;
-    EffectsPacketV2 a;a.sessionID=game.session;a.timestamp=game.stamp(native);a.sampleRate=44100;a.frames=2;a.sequence=10;
+    EffectsPacketV3 a;a.sessionID=game.session;a.timestamp=game.stamp(native);a.sampleRate=44100;a.frames=2;a.sequence=10;
     a.samples[0]=a.samples[1]=0;a.samples[2]=a.samples[3]=1;
     auto b=a;b.timestamp=a.timestamp+2*1000000000ULL/44100;b.sequence=11;b.samples[0]=b.samples[1]=2;b.samples[2]=b.samples[3]=3;
     sim.sendEffects(a,game.effectsPort);sim.sendEffects(b,game.effectsPort);

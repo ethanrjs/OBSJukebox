@@ -1,4 +1,5 @@
 #include "../../src/Socket.hpp"
+#include "../../src/LinkKey.hpp"
 #include "../../src/LinkPacket.hpp"
 #include <obs.h>
 #include <util/platform.h>
@@ -69,6 +70,16 @@ int main(int argc,char** argv){
     closeSocket(preflight);
     std::filesystem::path output=std::filesystem::u8path(argv[2]);std::filesystem::create_directories(output);
     auto wav=output/std::filesystem::path(u8"runtime-曲-é.wav");if(!live)wave(wav);auto utf8=wav.u8string();
+    // Synthetic packets are signed with this process's key; live capture uses the key the real mod wrote.
+    if(!live){
+        auto keyFile=(output/"link-key").string();
+#ifdef _WIN32
+        _putenv_s("OBS_JUKEBOX_TEST_KEY_FILE",keyFile.c_str());
+#else
+        setenv("OBS_JUKEBOX_TEST_KEY_FILE",keyFile.c_str(),1);
+#endif
+        if(!writeLinkKey(processLinkKey(),keyFile)){fprintf(stderr,"could not write the test link key\n");return 2;}
+    }
     if(!obs_startup("en-US",nullptr,nullptr)){fprintf(stderr,"obs_startup failed\n");return 2;}
 
 #ifdef _WIN32
@@ -128,7 +139,7 @@ int main(int argc,char** argv){
 #endif
             auto size=recvfrom(sock,reinterpret_cast<char*>(&reply),sizeof(reply),0,reinterpret_cast<sockaddr*>(&from),&length);
             if(size==sizeof(reply)&&!memcmp(reply.magic,"GDCLK1\0",8)&&reply.kind==1){
-                reply.kind=2;reply.t2=os_gettime_ns();reply.t3=os_gettime_ns();
+                reply.kind=2;reply.t2=os_gettime_ns();reply.t3=os_gettime_ns();signPacket(processLinkKey(),reply);
                 sendto(sock,reinterpret_cast<const char*>(&reply),sizeof(reply),0,reinterpret_cast<sockaddr*>(&from),length);
             } else { waitSocketReadable(sock, 50); }
         }
@@ -141,14 +152,15 @@ int main(int argc,char** argv){
         auto start=Clock::now(),end=start+std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));uint64_t cpu=cpuTicks();capture.reset();bool reset=false;
         uint64_t effectClock=os_gettime_ns(),effectFrames=0;uint32_t sequence=0;
         while(Clock::now()<end){double elapsed=std::chrono::duration<double>(Clock::now()-start).count();packet.position=pos+((flags&2)?elapsed*rate:0);
-            packet.timestamp=os_gettime_ns();
+            packet.timestamp=os_gettime_ns();signPacket(processLinkKey(),packet);
             if(transmit)sendto(sock,reinterpret_cast<const char*>(&packet),sizeof(packet),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-            if(effects==1){EffectsPacketV2 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),44+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
+            auto sendEffects=[&](EffectsPacketV3& e){auto size=offsetof(EffectsPacketV3,samples)+e.frames*8;signPacket(processLinkKey(),e,size);sendto(sock,reinterpret_cast<const char*>(&e),int(size),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));};
+            if(effects==1){EffectsPacketV3 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendEffects(e);}
             if(effects==2){
 
                 double jitter=(effectFrames/1024)%2?.006:0;
                 while(elapsed>=double(effectFrames)/44100+jitter){
-                    for(unsigned part=0;part<2;++part){EffectsPacketV2 e;e.sessionID=packet.sessionID;e.frames=512;e.sampleRate=44100;e.sequence=sequence++;e.timestamp=effectClock+effectFrames*1000000000/44100;effectFrames+=512;for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),44+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
+                    for(unsigned part=0;part<2;++part){EffectsPacketV3 e;e.sessionID=packet.sessionID;e.frames=512;e.sampleRate=44100;e.sequence=sequence++;e.timestamp=effectClock+effectFrames*1000000000/44100;effectFrames+=512;for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendEffects(e);}
                     jitter=(effectFrames/1024)%2?.006:0;
                 }
             }

@@ -6,9 +6,11 @@ struct SongFadePoint {
     uint64_t offsetNs = 0;
     float gain = 1.f;
 };
+// SongLinkPacket, ClockSyncPacket and EffectsPacketV3 carry a tag made with the mod's link key
+// (LinkKey.hpp).
 struct SongLinkPacket {
     char magic[8] = {'G', 'D', 'S', 'O', 'N', 'G', '1', 0};
-    uint32_t version = 5;
+    uint32_t version = 6;
     uint32_t flags = 0;
     uint32_t epoch = 0;
     int32_t attempt = 0;
@@ -28,11 +30,13 @@ struct SongLinkPacket {
     uint32_t fadeCount = 0;
     SongFadePoint fades[8]{};
     double loopStart = 0, loopEnd = 0;
+    uint8_t tag[16]{};
 };
 struct ClockSyncPacket {
     char magic[8] = {'G', 'D', 'C', 'L', 'K', '1', 0, 0};
-    uint32_t version = 1, kind = 1;
+    uint32_t version = 2, kind = 1;
     uint64_t sessionID = 0, t1 = 0, t2 = 0, t3 = 0;
+    uint8_t tag[16]{};
 };
 struct EffectsPacket {
     char magic[8] = {'G', 'D', 'S', 'F', 'X', '1', 0, 0};
@@ -41,20 +45,24 @@ struct EffectsPacket {
     uint32_t stream = 0;
     float samples[512 * 2]{};
 };
-struct EffectsPacketV2 {
-    char magic[8] = {'G', 'D', 'S', 'F', 'X', '2', 0, 0};
-    uint32_t version = 2, sequence = 0, sampleRate = 44100, frames = 0;
+struct EffectsPacketV3 {
+    char magic[8] = {'G', 'D', 'S', 'F', 'X', '3', 0, 0};
+    uint32_t version = 3, sequence = 0, sampleRate = 44100, frames = 0;
     uint64_t timestamp = 0;
     uint32_t stream = 0;
     uint64_t sessionID = 0;
+    uint8_t tag[16]{};
     float samples[512 * 2]{};
 };
 #pragma pack(pop)
-inline constexpr unsigned SONG_LINK_V2_SIZE = 1288, SONG_LINK_V3_SIZE = 1296, SONG_LINK_V4_SIZE = 1304;
+// Sizes of older song packets. Version 5, the version 6 layout without its tag, came from v1.1 to v1.2.3.
+inline constexpr unsigned SONG_LINK_V2_SIZE = 1288, SONG_LINK_V3_SIZE = 1296, SONG_LINK_V4_SIZE = 1304,
+                          SONG_LINK_V5_SIZE = 1436;
 inline constexpr int SONG_LINK_MAX_CHANNELS = 64;
-static_assert(sizeof(SongLinkPacket) == 1436);
+static_assert(sizeof(SongLinkPacket) == 1452);
+static_assert(sizeof(ClockSyncPacket) == 64);
 static_assert(sizeof(EffectsPacket) == 4132);
-static_assert(sizeof(EffectsPacketV2) == 4140);
+static_assert(sizeof(EffectsPacketV3) == 4156);
 inline constexpr int SONG_LINK_PORT = 39022;
 inline int receiverPort() {
 #ifdef OBS_JUKEBOX_QA

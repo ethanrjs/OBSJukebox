@@ -371,8 +371,12 @@ static class Engine
     {
         if(args.Length<3 || args[1] is not ("write" or "remove"))throw new IOException("Invalid plugin helper request.");
         string destination=MachinePlugin;
-        for(string? path=destination;path!=null;path=Path.GetDirectoryName(path))
-            if((File.Exists(path)||Directory.Exists(path)) && (File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new IOException("Plugin installation path contains a link or junction: "+path);
+        void RefuseLinks()
+        {
+            for(string? path=destination;path!=null;path=Path.GetDirectoryName(path))
+                if((File.Exists(path)||Directory.Exists(path)) && (File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new IOException("Plugin installation path contains a link or junction: "+path);
+        }
+        RefuseLinks();
         if(args[1]=="remove")
         {
             if(args.Length!=3)throw new IOException("Invalid plugin removal request.");
@@ -386,6 +390,8 @@ static class Engine
             using var buffer=new MemoryStream();input.CopyTo(buffer);byte[] bytes=buffer.ToArray();
             if(Hash(bytes)!=args[3])throw new IOException("Plugin copy verification failed.");
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            // Folders created above didn't exist at the first check, and a junction could appear meanwhile.
+            RefuseLinks();
             string temporary=destination+"."+Guid.NewGuid().ToString("N")+".tmp";
             try { File.WriteAllBytes(temporary,bytes);File.Move(temporary,destination,true); }
             finally { if(File.Exists(temporary))File.Delete(temporary); }
@@ -509,11 +515,61 @@ static class Engine
             stopped.Add(exe);
         }
     }
+    static bool Inside(string path,IEnumerable<string> roots)
+    {
+        string full=Path.GetFullPath(path);
+        return roots.Any(root=>full.StartsWith(Path.GetFullPath(root).TrimEnd('\\','/')+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase));
+    }
+    // Undo and recovery copy and delete the paths a manifest names, and any program running as this
+    // user can edit a manifest. So every file must be inside a real Geometry Dash or OBS folder or
+    // the plugin and scene folders, and every backup inside setup's own backup folder.
+    static void CheckRecordPaths(InstallRecord record,Options o)
+    {
+        var roots=new List<string>{o.PluginRoot,o.SceneRoot};
+        if(File.Exists(Path.Combine(record.GD,"GeometryDash.exe"))) roots.Add(record.GD);
+        if(File.Exists(Path.Combine(record.OBS,"bin","64bit","obs64.exe"))) roots.Add(record.OBS);
+        foreach(var f in record.Files)
+        {
+            if(!Inside(f.Destination,roots)) throw new IOException("The undo manifest names a file outside the Geometry Dash and OBS folders, so nothing was changed: "+f.Destination);
+            if(f.Backup!=null && !Inside(f.Backup,[o.StateRoot])) throw new IOException("The undo manifest names a backup outside setup's backup folder, so nothing was changed: "+f.Backup);
+        }
+    }
+    // A setup killed mid-transaction leaves its session at "installing", with backups that neither
+    // undo nor a new install reach. Each run restores such sessions before doing anything else.
+    internal static void RecoverInterrupted(Options o,Action<string> log,List<string> stopped)
+    {
+        if(!Directory.Exists(o.StateRoot)) return;
+        foreach(var session in Directory.GetDirectories(o.StateRoot))
+        {
+            string manifest=Path.Combine(session,"manifest.json");
+            if(!File.Exists(manifest)) continue;
+            InstallRecord? record;
+            try { record=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(manifest)); }
+            catch(Exception ex) when(ex is JsonException or IOException or UnauthorizedAccessException) { continue; }
+            if(record is not { Status: "installing" } || !IsKnownProduct(record.Product)) continue;
+            // An edited manifest can hold nulls as well as outside paths; either way it is skipped.
+            try { CheckRecordPaths(record,o); }
+            catch(Exception ex) { log("Skipping an interrupted installation: "+manifest+" ("+ex.Message+")"); continue; }
+            log("Restoring an installation that was interrupted: "+manifest);
+            // A session left at "installing" would be retried, and fail, on every later run.
+            try
+            {
+                string gd=o.GD,obs=o.OBS;
+                try { o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination)); }
+                finally { o.GD=gd; o.OBS=obs; }
+                Restore(record,log);
+                record.Status="rolled-back";
+            }
+            catch(Exception ex) { log("Rollback incomplete: "+ex.Message); record.Status="rollback-incomplete"; }
+            File.WriteAllText(manifest,JsonSerializer.Serialize(record,JsonOptions));
+        }
+    }
     public static void Execute(Options o,Action<string> output,List<string>? closedApps=null)
     {
         var logLines = new List<string>(); string? logPath=null;
         void Log(string s) { string line=DateTimeOffset.Now.ToString("O") + " " + s; logLines.Add(line); output(s); if(logPath!=null) File.AppendAllText(logPath,line+Environment.NewLine); }
         var stopped=closedApps??new List<string>();
+        if (!o.DryRun) RecoverInterrupted(o,Log,stopped);
         if (o.Uninstall) { Uninstall(o,Log,stopped); if(closedApps==null && o.Restart) RestartApps(stopped,Log); return; }
         o.PreviousVersion=InstalledVersion(o.GD); o.AlreadyCurrent=false;
         var plan=Plan(o,Log);
@@ -632,6 +688,7 @@ static class Engine
         var record=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(path))??throw new IOException("Invalid manifest.");
         if(!IsKnownProduct(record.Product)) throw new IOException("Not an OBS Jukebox installation manifest.");
         if(record.Status!="installed") throw new IOException("This transaction is not installed: "+record.Status);
+        CheckRecordPaths(record,o);
         if(o.DryRun) { foreach(var f in record.Files) log("Would restore/remove if unchanged: "+f.Destination); return; }
         o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination));
         Restore(record,log); record.Status="uninstalled"; File.WriteAllText(path,JsonSerializer.Serialize(record,JsonOptions));
@@ -650,6 +707,13 @@ sealed class SetupForm : Form
     readonly Button install=new(){Text="Install",AutoSize=true},undo=new(){Text="Undo last install",AutoSize=true};
     readonly object logLock=new();
     string? attemptLog;
+    bool working;
+    // Closing mid-transaction would end the process before its rollback could run.
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if(working){e.Cancel=true;SetStatus("Wait for setup to finish before closing it.");}
+        base.OnFormClosing(e);
+    }
     public SetupForm(Options o)
     {
         options=o; Text="OBS Jukebox - Windows Setup"; Width=730;Height=650;MinimumSize=new(730,650);AutoSize=true;AutoSizeMode=AutoSizeMode.GrowOnly;StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",10);
@@ -726,6 +790,7 @@ sealed class SetupForm : Form
         Control[] inputs=[gd.Parent!,obs.Parent!,scene,modOnly,close,restart,jukebox,install,undo];
         foreach(var input in inputs)input.Enabled=false;
         bool success=false;
+        working=true;
         try
         {
             Collect();options.Uninstall=restoring;
@@ -742,7 +807,7 @@ sealed class SetupForm : Form
             try{Detail(ex.ToString());}catch(IOException){}
             SetStatus(ex is UnauthorizedAccessException ? "Setup cannot write this folder. Choose a writable installation or grant your account access, then retry. User files are never edited by an elevated installer." : ex.Message,true);
         }
-        finally{foreach(var input in inputs)input.Enabled=true;scene.Enabled=!modOnly.Checked;options.Uninstall=false;undo.Enabled=Engine.CanUndo(options);}
+        finally{working=false;foreach(var input in inputs)input.Enabled=true;scene.Enabled=!modOnly.Checked;options.Uninstall=false;undo.Enabled=Engine.CanUndo(options);}
         if(success)SetStatus(restoring?"Undo complete. Later user changes were preserved. You may close setup.":Engine.SuccessMessage(options));
     }
 }

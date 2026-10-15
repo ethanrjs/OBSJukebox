@@ -97,6 +97,12 @@ fi
 [[ -d "$song_prefix/drive_c" ]] || fail 'The Proton prefix was not found. Run Geometry Dash once or pass its Wine prefix with --wine-prefix.'
 song_prefix="$(cd -- "$song_prefix" && pwd -P)"
 [[ "$song_game" != *$'\n'* && "$song_prefix" != *$'\n'* ]] || fail 'Installation paths cannot contain newlines.'
+# Each Windows user's AppData/Local in the prefix that holds GD's saves and songs.
+song_locals=()
+for song_saves in "$song_prefix"/drive_c/users/*/AppData/Local/GeometryDash; do
+    [[ -d "$song_saves" ]] && song_locals+=("${song_saves%/GeometryDash}")
+done
+((${#song_locals[@]} || !song_flatpak)) || fail 'Run Geometry Dash once through Proton, then run the installer again.'
 song_config="${XDG_CONFIG_HOME:-$HOME/.config}"
 if ((song_flatpak)); then
     command -v flatpak >/dev/null || fail 'Flatpak is not installed.'
@@ -174,9 +180,25 @@ for song_i in 0 1 2; do
     song_changed[song_i]=1
     mv -f -- "${song_staged[song_i]}" "${song_targets[song_i]}"
 done
+# The mod writes its link key here with Wine's default permissions. An owner-only folder keeps other
+# users on this PC from reading it. Every Windows user gets one, since the game may not have run yet.
+for song_local in "$song_prefix"/drive_c/users/*/AppData/Local; do
+    [[ -d "$song_local" && ! -L "$song_local" ]] || continue
+    mkdir -p -- "$song_local/OBS Jukebox"
+    chmod 700 -- "$song_local/OBS Jukebox"
+done
+song_grants=()
 if ((song_flatpak)); then
     song_changed[3]=1
-    flatpak override --user --filesystem="$song_prefix:ro" --filesystem="$song_game:ro" com.obsproject.Studio
+    # Earlier installers granted the whole prefix and game folder.
+    perl "$song_root/install-state.pl" revoke "${song_targets[3]}" "$song_prefix:ro" "$song_game:ro"
+    # Only what the plugin reads: songs, GD's saves folder (where Jukebox and GD keep songs), the
+    # link key, and the drive links it resolves paths through.
+    song_grants=("$song_game/Resources:ro" "$song_prefix/dosdevices:ro")
+    for song_local in "${song_locals[@]}"; do
+        song_grants+=("$song_local/GeometryDash:ro" "$song_local/OBS Jukebox:ro")
+    done
+    flatpak override --user "${song_grants[@]/#/--filesystem=}" com.obsproject.Studio
 fi
 for song_i in "${!song_targets[@]}"; do
     perl "$song_root/install-state.pl" record "$song_backup" "${song_targets[song_i]}" "$song_backup/$(basename -- "${song_targets[song_i]}")"
@@ -184,3 +206,7 @@ done
 touch "$song_backup/complete"
 song_committed=1
 printf 'Installed OBS Jukebox with Geode %s. Backups: %s\nUndo this installation with Install.sh --uninstall.\nIn OBS, add the GD Sounds source once. Keep monitoring off and exclude GD audio from your other recording sources.\n' "$song_geode_version" "$song_backup"
+if ((${#song_grants[@]})); then
+    printf 'Flatpak OBS can now read these folders, and nothing else of Geometry Dash or its Wine prefix:\n'
+    printf '  %s\n' "${song_grants[@]%:ro}"
+fi

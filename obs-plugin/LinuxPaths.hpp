@@ -6,6 +6,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include "../src/LinkKey.hpp"
 
 class LinuxPaths {
     using Path = std::filesystem::path;
@@ -66,6 +67,24 @@ public:
                 add(Path(home)/".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/322170/pfx");
             }
         }
+    }
+    // The mod's link key files in the game's Wine prefixes, one per Windows user found. Wine creates
+    // them with this user's default permissions, so each folder and file is made owner-only first.
+    std::vector<Path> keyFiles() const {
+        namespace fs=std::filesystem;
+        std::vector<Path> files;
+        for(const auto& prefix:prefixes){
+            std::error_code listing;
+            for(fs::directory_iterator it(prefix/"drive_c/users",listing),end;!listing && it!=end;it.increment(listing)){
+                auto file=it->path()/"AppData/Local/OBS Jukebox"/LINK_KEY_NAME;
+                std::error_code ec;
+                if(!fs::is_regular_file(file,ec))continue;
+                fs::permissions(file.parent_path(),fs::perms::owner_all,ec);
+                fs::permissions(file,fs::perms::owner_read|fs::perms::owner_write,ec);
+                files.push_back(file);
+            }
+        }
+        return files;
     }
     std::string resolve(std::string path) const {
         if(path.empty())return path;
