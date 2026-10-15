@@ -13,9 +13,12 @@ std::string claimLevelIdentity(std::string value, Claim claim, Generate generate
     return value;
 }
 
+// Any downloaded level can declare as many songs as it likes, and each ID costs a manifest read a
+// second, so the list stops at a size no real level comes close to.
+inline constexpr size_t MAX_LEVEL_SONGS = 128;
 inline std::vector<int> levelSongIDs(int initial, std::string_view declared) {
     std::vector<int> ids{initial};
-    while (!declared.empty()) {
+    while (!declared.empty() && ids.size() < MAX_LEVEL_SONGS) {
         auto end = declared.find(',');
         auto token = declared.substr(0, end);
         int id = 0;

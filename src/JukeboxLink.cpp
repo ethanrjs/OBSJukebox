@@ -76,14 +76,24 @@ class FileCache {
         bool exists = false;
         matjson::Value json;
         bool pending = false;
-        Clock::time_point checked{};
+        Clock::time_point checked{}, used{};
     };
     std::mutex mutex;
     std::condition_variable wake;
     std::unordered_map<std::string, Entry> entries;
     std::deque<std::pair<std::string, bool>> jobs;
     bool stopping = false;
+    Clock::time_point lastPrune{};
     std::thread worker;
+    // Once there are many entries, drops those nobody asked for in a minute, so a long session over
+    // many levels doesn't keep every path it ever saw. Runs at most every 10 s.
+    void prune(Clock::time_point now) {
+        if (entries.size() <= 1024 || now - lastPrune < std::chrono::seconds(10)) return;
+        lastPrune = now;
+        std::erase_if(entries, [&](const auto& item) {
+            return !item.second.pending && now - item.second.used > std::chrono::minutes(1);
+        });
+    }
     void run() {
         for (;;) {
             std::pair<std::string, bool> job;
@@ -128,8 +138,11 @@ public:
     std::pair<bool, matjson::Value> get(const std::string& path, bool json = false) {
         if (path.empty()) return {};
         std::lock_guard lock(mutex);
+        auto now = Clock::now();
+        prune(now);
         auto& entry = entries[path];
-        if (!stopping && !entry.pending && Clock::now() - entry.checked >= std::chrono::seconds(1)) {
+        entry.used = now;
+        if (!stopping && !entry.pending && now - entry.checked >= std::chrono::seconds(1)) {
             entry.pending = true;
             jobs.emplace_back(path, json);
             wake.notify_one();
