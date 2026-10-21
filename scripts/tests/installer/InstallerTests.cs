@@ -143,8 +143,29 @@ static class InstallerTests
                 new ChangedFile { Destination=modFile,Backup=saved,OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("half-installed mod")),Applied=true }] };
             string manifest=Path.Combine(session,"manifest.json");
             File.WriteAllText(manifest,System.Text.Json.JsonSerializer.Serialize(stranded));
+            // Recovery may need to close OBS, which a mod-only update promises not to do.
+            Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted,ModOnly=true },_=>{},[]);
+            Check(File.ReadAllText(modFile)=="half-installed mod","a mod-only update leaves an interrupted install for full setup");
             Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
             Check(File.ReadAllText(modFile)=="previous mod" && File.ReadAllText(manifest).Contains("rolled-back"),"a transaction left installing by a killed setup is restored on the next run");
+            // Setup can be killed after replacing a file but before recording that it did.
+            string unrecorded=Path.Combine(interrupted,"20260101-000001-abcdef");Directory.CreateDirectory(unrecorded);
+            File.WriteAllText(Path.Combine(unrecorded,"0000.bak"),"previous mod");File.WriteAllText(modFile,"half-installed mod");
+            File.WriteAllText(Path.Combine(unrecorded,"manifest.json"),System.Text.Json.JsonSerializer.Serialize(new InstallRecord { GD=interrupted,OBS=interrupted,Files=[
+                new ChangedFile { Destination=modFile,Backup=Path.Combine(unrecorded,"0000.bak"),OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("half-installed mod")) }] }));
+            Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
+            Check(File.ReadAllText(modFile)=="previous mod","recovery restores a file replaced just before setup was killed");
+            // Recovery would roll back another setup's live transaction, so only one setup runs at a time.
+            using(var held=new ManualResetEventSlim()) using(var release=new ManualResetEventSlim())
+            {
+                var other=new Thread(()=>{ using var running=new Mutex(false,Engine.SetupLockName); running.WaitOne(); held.Set(); release.Wait(); running.ReleaseMutex(); });
+                other.Start(); held.Wait();
+                bool refused=false;
+                try { Engine.Execute(new Options { DryRun=true,StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{}); }
+                catch(IOException ex) when(ex.Message.Contains("Another OBS Jukebox setup")) { refused=true; }
+                release.Set(); other.Join();
+                Check(refused,"setup refuses to run while another setup is running");
+            }
             // Any program running as this user can edit a manifest. Undo must not delete or overwrite
             // files outside the folders setup installs to.
             string victim=Path.Combine(Path.GetTempPath(),"obs-jukebox-victim-"+Guid.NewGuid().ToString("N")+".txt");

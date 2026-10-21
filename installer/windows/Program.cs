@@ -538,7 +538,8 @@ static class Engine
     // undo nor a new install reach. Each run restores such sessions before doing anything else.
     internal static void RecoverInterrupted(Options o,Action<string> log,List<string> stopped)
     {
-        if(!Directory.Exists(o.StateRoot)) return;
+        // Recovery may have to close OBS, which a mod-only update promises not to do.
+        if(o.ModOnly || !Directory.Exists(o.StateRoot)) return;
         foreach(var session in Directory.GetDirectories(o.StateRoot))
         {
             string manifest=Path.Combine(session,"manifest.json");
@@ -555,16 +556,33 @@ static class Engine
             try
             {
                 string gd=o.GD,obs=o.OBS;
-                try { o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination)); }
+                try { o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(Replaced).Select(f=>f.Destination)); }
                 finally { o.GD=gd; o.OBS=obs; }
                 Restore(record,log);
                 record.Status="rolled-back";
             }
             catch(Exception ex) { log("Rollback incomplete: "+ex.Message); record.Status="rollback-incomplete"; }
-            File.WriteAllText(manifest,JsonSerializer.Serialize(record,JsonOptions));
+            WriteManifest(manifest,record);
         }
     }
+    // Through a temporary file, so a setup killed mid-write leaves the previous manifest, not half of one.
+    static void WriteManifest(string path,InstallRecord record)
+    {
+        File.WriteAllText(path+".tmp",JsonSerializer.Serialize(record,JsonOptions));
+        File.Move(path+".tmp",path,true);
+    }
+    internal const string SetupLockName=@"Local\OBS Jukebox Setup";
+    // One setup at a time: recovery treats every session left at "installing" as abandoned, so it would
+    // roll back a second window's live transaction.
     public static void Execute(Options o,Action<string> output,List<string>? closedApps=null)
+    {
+        using var running=new Mutex(false,SetupLockName);
+        try { if(!running.WaitOne(0)) throw new IOException("Another OBS Jukebox setup is running. Let it finish, then try again."); }
+        catch(AbandonedMutexException) { } // a killed setup held it; recovery handles what it left
+        try { ExecuteAlone(o,output,closedApps); }
+        finally { running.ReleaseMutex(); }
+    }
+    static void ExecuteAlone(Options o,Action<string> output,List<string>? closedApps)
     {
         var logLines = new List<string>(); string? logPath=null;
         void Log(string s) { string line=DateTimeOffset.Now.ToString("O") + " " + s; logLines.Add(line); output(s); if(logPath!=null) File.AppendAllText(logPath,line+Environment.NewLine); }
@@ -581,7 +599,7 @@ static class Engine
         string session=Path.Combine(o.StateRoot,DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(session); logPath=Path.Combine(session,"install.log"); File.WriteAllLines(logPath,logLines);
         var record=new InstallRecord{GD=o.GD,OBS=o.OBS}; string manifest=Path.Combine(session,"manifest.json");
-        void Save() => File.WriteAllText(manifest,JsonSerializer.Serialize(record,JsonOptions));
+        void Save() => WriteManifest(manifest,record);
         Save();
         try
         {
@@ -635,13 +653,16 @@ static class Engine
             log("Restarted: "+exe);
         }
     }
+    // Setup saves Applied only after replacing a file, so a setup killed in between leaves the new file
+    // unrecorded; its hash still shows it was replaced.
+    static bool Replaced(ChangedFile f) => f.Applied || File.Exists(f.Destination) && HashFile(f.Destination)==f.InstalledHash;
     // Restores every file it can, then reports the ones it couldn't.
     internal static void Restore(InstallRecord record,Action<string> log)
     {
         var failed=new List<string>();
         foreach(var f in record.Files.AsEnumerable().Reverse())
         {
-            if(!f.Applied) continue;
+            if(!Replaced(f)) continue;
             try { if(!RestoreFile(f,log)) failed.Add(f.Destination); }
             catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
             {
@@ -691,7 +712,7 @@ static class Engine
         CheckRecordPaths(record,o);
         if(o.DryRun) { foreach(var f in record.Files) log("Would restore/remove if unchanged: "+f.Destination); return; }
         o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination));
-        Restore(record,log); record.Status="uninstalled"; File.WriteAllText(path,JsonSerializer.Serialize(record,JsonOptions));
+        Restore(record,log); record.Status="uninstalled"; WriteManifest(path,record);
         log("Removed this install transaction. Later user changes were preserved. To restore an earlier installer update, repeat with that earlier manifest. Geode/Jukebox already present before this transaction were retained.");
     }
 }
