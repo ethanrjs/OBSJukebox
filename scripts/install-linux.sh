@@ -207,6 +207,6 @@ touch "$song_backup/complete"
 song_committed=1
 printf 'Installed OBS Jukebox with Geode %s. Backups: %s\nUndo this installation with Install.sh --uninstall.\nIn OBS, add the GD Sounds source once. Keep monitoring off and exclude GD audio from your other recording sources.\n' "$song_geode_version" "$song_backup"
 if ((${#song_grants[@]})); then
-    printf 'Flatpak OBS can now read these folders, and nothing else of Geometry Dash or its Wine prefix:\n'
+    printf 'Setup gave Flatpak OBS read access to these folders:\n'
     printf '  %s\n' "${song_grants[@]%:ro}"
 fi

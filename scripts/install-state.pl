@@ -70,10 +70,7 @@ sub undo_grants {
     my $line = 'filesystems=' . join(';', @remaining) . ';';
     # If the user removed the complete key/section, leave that decision intact.
     $text =~ s/^filesystems=[^\r\n]*/$line/m;
-    open my $out, '>', "$entry->{target}.obs-jukebox-undo" or die "$!\n";
-    print $out $text; close $out or die "$!\n";
-    chmod((stat($entry->{target}))[2] & 07777, "$entry->{target}.obs-jukebox-undo");
-    rename "$entry->{target}.obs-jukebox-undo", $entry->{target} or die "$!\n";
+    write_text($entry->{target}, $text);
     return 1;
 }
 sub save {
@@ -85,10 +82,10 @@ sub save {
 }
 sub write_text {
     my ($path, $text) = @_;
-    open my $out, '>', "$path.obs-jukebox-revoke" or die "$!\n";
+    open my $out, '>', "$path.obs-jukebox-new" or die "$!\n";
     print $out $text; close $out or die "$!\n";
-    chmod((stat($path))[2] & 07777, "$path.obs-jukebox-revoke");
-    rename "$path.obs-jukebox-revoke", $path or die "$!\n";
+    chmod((stat($path))[2] & 07777, "$path.obs-jukebox-new");
+    rename "$path.obs-jukebox-new", $path or die "$!\n";
 }
 # Removes exact entries from a Flatpak override's filesystems line. The receipt recorded afterwards
 # lists them as removed grants, so undo puts them back.
