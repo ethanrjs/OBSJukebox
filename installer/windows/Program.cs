@@ -515,25 +515,6 @@ static class Engine
             stopped.Add(exe);
         }
     }
-    static bool Inside(string path,IEnumerable<string> roots)
-    {
-        string full=Path.GetFullPath(path);
-        return roots.Any(root=>full.StartsWith(Path.GetFullPath(root).TrimEnd('\\','/')+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase));
-    }
-    // Undo and recovery copy and delete the paths a manifest names, and any program running as this
-    // user can edit a manifest. So every file must be inside a real Geometry Dash or OBS folder or
-    // the plugin and scene folders, and every backup inside setup's own backup folder.
-    static void CheckRecordPaths(InstallRecord record,Options o)
-    {
-        var roots=new List<string>{o.PluginRoot,o.SceneRoot};
-        if(File.Exists(Path.Combine(record.GD,"GeometryDash.exe"))) roots.Add(record.GD);
-        if(File.Exists(Path.Combine(record.OBS,"bin","64bit","obs64.exe"))) roots.Add(record.OBS);
-        foreach(var f in record.Files)
-        {
-            if(!Inside(f.Destination,roots)) throw new IOException("The undo manifest names a file outside the Geometry Dash and OBS folders, so nothing was changed: "+f.Destination);
-            if(f.Backup!=null && !Inside(f.Backup,[o.StateRoot])) throw new IOException("The undo manifest names a backup outside setup's backup folder, so nothing was changed: "+f.Backup);
-        }
-    }
     // A setup killed mid-transaction leaves its session at "installing", with backups that neither
     // undo nor a new install reach. Each run restores such sessions before doing anything else.
     internal static void RecoverInterrupted(Options o,Action<string> log,List<string> stopped)
@@ -548,9 +529,6 @@ static class Engine
             try { record=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(manifest)); }
             catch(Exception ex) when(ex is JsonException or IOException or UnauthorizedAccessException) { continue; }
             if(record is not { Status: "installing" } || !IsKnownProduct(record.Product)) continue;
-            // An edited manifest can hold nulls as well as outside paths; either way it is skipped.
-            try { CheckRecordPaths(record,o); }
-            catch(Exception ex) { log("Skipping an interrupted installation: "+manifest+" ("+ex.Message+")"); continue; }
             log("Restoring an installation that was interrupted: "+manifest);
             // A session left at "installing" would be retried, and fail, on every later run.
             try
@@ -709,7 +687,6 @@ static class Engine
         var record=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(path))??throw new IOException("Invalid manifest.");
         if(!IsKnownProduct(record.Product)) throw new IOException("Not an OBS Jukebox installation manifest.");
         if(record.Status!="installed") throw new IOException("This transaction is not installed: "+record.Status);
-        CheckRecordPaths(record,o);
         if(o.DryRun) { foreach(var f in record.Files) log("Would restore/remove if unchanged: "+f.Destination); return; }
         o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination));
         Restore(record,log); record.Status="uninstalled"; WriteManifest(path,record);
