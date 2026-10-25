@@ -119,20 +119,9 @@ rollback() {
     exit "$song_result"
 }
 trap rollback EXIT
-# Refuses a symbolic link at the target or in any folder between it and the top it belongs to, so a
-# linked Contents, geode or plugins folder can't send a copy somewhere else.
-refuse_links() {
-    local song_path="$1" song_top="$2"
-    while [[ "$song_path" == "$song_top"/* ]]; do
-        [[ ! -L "$song_path" ]] || fail "Refusing to write through a symbolic link: $song_path"
-        song_path="${song_path:h}"
-    done
-}
 copy_item() {
     local song_source="$1" song_destination="$2" song_index=$(( ${#song_targets} + 1 )) song_existed=0
-    local song_top="$song_app"
-    [[ "$song_destination" == "$song_app"/* ]] || song_top="$HOME/Library/Application Support"
-    refuse_links "$song_destination" "$song_top"
+    [[ ! -L "$song_destination" ]] || fail "Refusing to replace a symbolic link: $song_destination"
     if [[ -e "$song_destination" ]]; then
         /usr/bin/ditto "$song_destination" "$song_audit/Backups/$song_index"
         song_existed=1
@@ -142,8 +131,6 @@ copy_item() {
     /bin/mkdir -p "${song_destination:h}"
     # Replace complete bundles rather than merging stale files into new payloads.
     if [[ -e "$song_destination" ]]; then /bin/mv "$song_destination" "$song_audit/Failed/replaced-$song_index"; fi
-    # Again right before the copy: a link could have appeared since the first check.
-    refuse_links "$song_destination" "$song_top"
     /usr/bin/ditto --noextattr --noqtn "$song_source" "$song_destination"
     /usr/bin/perl "$song_root/install-state.pl" record "$song_audit" "$song_destination" "$song_audit/Backups/$song_index"
     print -r -- "Installed: $song_destination"

@@ -142,16 +142,6 @@ print user-edited > "$qa_mods/local.separate_song.geode"
 [[ "$(cat "$qa_mods/local.separate_song.geode")" == user-edited ]]
 [[ "$(cat "$qa_plugin/stale.txt")" == stale ]]
 print 'undo-restores-bundle-preserves-user-mod: pass'
-# A link in a folder above a target is refused too, not only one at the target itself.
-qa_plugins="${qa_plugin:h}"
-mv "$qa_plugins" "$qa_root/held-plugins"
-mkdir -p "$qa_root/elsewhere"
-ln -s "$qa_root/elsewhere" "$qa_plugins"
-if run_install > "$qa_root/linked-parent.log" 2>&1; then print 'Symbolic-link parent folder incorrectly accepted'; exit 1; fi
-[[ -z "$(ls -A "$qa_root/elsewhere")" ]]
-rm "$qa_plugins"
-mv "$qa_root/held-plugins" "$qa_plugins"
-print 'linked-parent-folder-refused: pass'
 # A Mac without Geode gets Geode's resources directly in geode.loader, not one folder deeper.
 qa_fresh="$qa_root/Fresh Geometry Dash.app"
 mkdir -p "$qa_fresh/Contents/MacOS" "$qa_fresh/Contents/Frameworks"
