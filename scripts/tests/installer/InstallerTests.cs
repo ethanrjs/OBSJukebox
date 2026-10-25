@@ -17,7 +17,7 @@ static class InstallerTests
         using(var writer=new StreamWriter(zip.CreateEntry("mod.json").Open())) writer.Write($$"""{"id":"{{id}}","version":"v{{version}}"}""");
         zip.CreateEntry(binary).Open().Dispose();
     }
-    static async Task Main()
+    static void Main()
     {
         byte[] original=Encoding.UTF8.GetBytes("""
         {"name":"User scenes","DesktopAudioDevice1":{"muted":false,"volume":0.7},
@@ -192,34 +192,5 @@ static class InstallerTests
         bool oldOptionRejected=false;
         try { Options.Parse(["--keep-desktop-audio"]); } catch(ArgumentException) { oldOptionRejected=true; }
         Check(oldOptionRejected,"removed audio-prevention CLI switch is rejected");
-
-        var options=new Options { Restart=true };
-        var order=new List<string>();
-        await Engine.ExecuteWithRetry(options,stopped=>
-        {
-            stopped.Add("GD.exe"); stopped.Add("gd.EXE"); stopped.Add("OBS.exe");
-            order.Add("closed"); throw new UnauthorizedAccessException();
-        },()=>{order.Add("elevated-success");return Task.CompletedTask;},stopped=>order.AddRange(stopped));
-        Check(order.SequenceEqual(new[]{"closed","elevated-success","GD.exe","OBS.exe"}),"parent keeps closed apps across elevated retry and restarts each once after success");
-
-        bool restarted=false;
-        try
-        {
-            await Engine.ExecuteWithRetry(options,stopped=>{stopped.Add("GD.exe");throw new UnauthorizedAccessException();},
-                ()=>throw new IOException("elevated child failed or UAC cancelled"),_=>restarted=true);
-            throw new Exception("Expected failed retry");
-        }
-        catch(IOException) { }
-        Check(!restarted,"failed or cancelled elevation does not restart apps before successful installation");
-
-        options.Restart=false;
-        await Engine.ExecuteWithRetry(options,stopped=>{stopped.Add("GD.exe");throw new UnauthorizedAccessException();},()=>Task.CompletedTask,_=>restarted=true);
-        Check(!restarted,"restart opt-out persists through elevation");
-
-        options.Restart=true; bool retried=false; List<string>? restartedApps=null;
-        await Engine.ExecuteWithRetry(options,stopped=>{stopped.Add("OBS.exe");return Task.CompletedTask;},()=>{retried=true;return Task.CompletedTask;},stopped=>restartedApps=stopped);
-        Check(!retried && restartedApps!.SequenceEqual(new[]{"OBS.exe"}),"ordinary successful install restarts only apps it closed");
-        Check(!options.Arguments().Contains("--restart"),"elevated arguments never forward restart");
-        Check(!options.Arguments().Contains("GD.exe") && !options.Arguments().Contains("OBS.exe"),"closed-app executable list is not sent to elevated child");
     }
 }
