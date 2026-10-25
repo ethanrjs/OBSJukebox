@@ -121,16 +121,6 @@ sealed class Options
         var registry = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OBS Studio", "InstallLocation", "")?.ToString();
         return !string.IsNullOrWhiteSpace(registry) ? registry : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "obs-studio");
     }
-    public IEnumerable<string> Arguments()
-    {
-        foreach (var s in new[]{"--silent", "--gd", GD, "--obs", OBS, "--plugin-root", PluginRoot, "--state-root", StateRoot, "--scene-root", SceneRoot}) yield return s;
-        if (CloseApps) yield return "--close-apps";
-        // Restart belongs exclusively to the unelevated parent.
-        if (InstallJukebox) yield return "--install-jukebox";
-        if (CreateScene) yield return "--integrate";
-        if (Uninstall) yield return "--uninstall";
-        if (Manifest != null) { yield return "--manifest"; yield return Manifest; }
-    }
 }
 
 sealed record PlannedFile(string Destination, byte[] Data, string Reason);
@@ -562,13 +552,6 @@ static class Engine
             record.Status="rolled-back"; Save(); throw;
         }
         if(closedApps==null && o.Restart) RestartApps(stopped,Log);
-    }
-    internal static async Task ExecuteWithRetry(Options o,Func<List<string>,Task> execute,Func<Task> retry,Action<List<string>> restart)
-    {
-        var stopped=new List<string>();
-        try { await execute(stopped); }
-        catch(UnauthorizedAccessException) { await retry(); }
-        if(o.Restart) restart(stopped.Distinct(StringComparer.OrdinalIgnoreCase).ToList());
     }
     internal static void RestartApps(List<string> stopped,Action<string> log)
     {
