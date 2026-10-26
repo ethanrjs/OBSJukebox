@@ -580,42 +580,53 @@ struct SongSource {
     // The output thread owns no decoder, filesystem object or pitch stage. Two workers render
     // timestamped blocks ahead of it, one for music and one for effects, each into its own bounded
     // queue; a block that is not ready in time plays as silence and the other keeps playing.
+    // Four fixed slots, so neither side allocates or frees memory.
     struct BlockQueue {
         struct Block {
-            uint64_t timestamp;
+            uint64_t timestamp = 0;
             AudioBlock samples{};
             uint64_t generation = 0;
         };
         std::mutex mutex;
         std::condition_variable ready;
-        std::deque<Block> blocks;
+        std::array<Block, 4> slots;
+        size_t first = 0, count = 0;
 
         void clear() {
             std::lock_guard lock(mutex);
-            blocks.clear();
+            count = 0;
         }
-        // Queues a block unless four already wait. False means the output will never play it.
+        // Queues a block unless four already wait or the output has already passed it (`wanted` is
+        // the next block it mixes). False means the output will never play this block.
         bool push(uint64_t timestamp, const AudioBlock &samples, uint64_t generation, uint64_t wanted) {
             std::lock_guard lock(mutex);
-            while (!blocks.empty() && blocks.front().timestamp < wanted)
-                blocks.pop_front();
-            if (blocks.size() >= 4)
+            dropBefore(wanted);
+            if (timestamp < wanted || count == slots.size())
                 return false;
-            blocks.push_back({timestamp, samples, generation});
+            slots[(first + count++) % slots.size()] = {timestamp, samples, generation};
             return true;
         }
         // Takes the block for `timestamp` rendered in `generation`, dropping any older one. Only
-        // fixed-size copies and at most four removals happen under the lock, and no worker holds it
-        // while rendering. A try-lock would turn harmless microsecond contention into silence.
+        // fixed-size copies happen under the lock, and no worker holds it while rendering. A
+        // try-lock would turn harmless microsecond contention into silence.
         bool take(uint64_t timestamp, uint64_t generation, AudioBlock &out) {
             std::lock_guard lock(mutex);
-            while (!blocks.empty() && (blocks.front().timestamp < timestamp || blocks.front().generation != generation))
-                blocks.pop_front();
-            if (blocks.empty() || blocks.front().timestamp != timestamp)
+            dropBefore(timestamp);
+            while (count && slots[first].generation != generation)
+                drop();
+            if (!count || slots[first].timestamp != timestamp)
                 return false;
-            out = blocks.front().samples;
-            blocks.pop_front();
+            out = slots[first].samples;
+            drop();
             return true;
+        }
+        void dropBefore(uint64_t timestamp) {
+            while (count && slots[first].timestamp < timestamp)
+                drop();
+        }
+        void drop() {
+            first = (first + 1) % slots.size();
+            --count;
         }
         // Taking the lock between storing the wanted timestamp and notifying keeps a worker that is
         // checking its wait condition from missing the change.
@@ -635,12 +646,16 @@ struct SongSource {
     std::atomic<unsigned> testVoiceCount{0};
     std::atomic<unsigned> testMusicResets{0};
     std::atomic<unsigned> testEffectsResets{0};
-    std::atomic<uint64_t> testMaxMixNs{0}, testWakeMaxNs{0};
-    std::atomic<uint64_t> testMaxQueueNs{0}, testMaxWindowNs{0}, testMaxEffectsMixNs{0}, testMaxChainNs{0};
-    std::atomic<uint64_t> testMaxResetNs{0};
+    std::atomic<uint64_t> testMaxMixNs{0}, testWakeMaxNs{0}, testLateFrames{0};
+    // The effects the worker mixed for each recent staged block, for countLateEffects.
+    struct DryBlock {
+        uint64_t timestamp = 0;
+        AudioBlock samples{};
+    };
+    std::mutex testDryMutex;
+    std::array<DryBlock, 8> testDry{};
     std::atomic<unsigned> testMusicMisses{0}, testMusicMissesRaw{0}, testEffectsMisses{0}, testEffectsMissesRaw{0};
-    std::atomic<bool> testMeasure{false}, testResetPending{false};
-    std::array<std::atomic<unsigned>, 16> testMixBuckets{};
+    std::atomic<bool> testMeasure{false};
 #endif
     explicit SongSource(obs_source_t *s)
         : source(s), linkReceiver(receiver) {}
@@ -989,51 +1004,59 @@ struct SongSource {
                 renderEffects(t, audio);
         }, [&] { resetEffectsChain(); });
     }
-    // The game's effects for the block starting at `timestamp`, through the SFX stages after the tap.
+    // Adds the game's effects for each run of the global window. Only the global packet carries the
+    // game's effects state; a voice packet never does, so with no global history nothing is mixed.
     // SFX never waits for music decoding, opening, seeking or path resolution. Effects ignore
     // staleness: they arrive from FMOD's mixer thread even while GD's main thread (which sends
     // status packets) stalls, and stop on their own when GD does.
+    void mixGameEffects(const std::vector<SongLinkPacket> &window, uint64_t timestamp, AudioBlock &effects) {
+        forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
+            if (p.flags & 1)
+                linkReceiver->mixEffects(effects.data() + first * 2, end - first, frameTime(timestamp, first),
+                                         p.effectsVolume);
+        });
+    }
+    static bool hasEffectsStages(const std::vector<SongLinkPacket> &window, uint64_t timestamp) {
+        bool staged = false;
+        forEachRun(window, timestamp,
+                   [&](const SongLinkPacket &p, size_t, size_t) { staged |= p.effectsStageCount != 0; });
+        return staged;
+    }
+    // The game's effects for a block with SFX stages, through those stages. A block without stages
+    // stays silent here, since mixBlock mixes it itself; its runs still pass through the chain, so
+    // a stage that comes back starts fresh.
     void renderEffects(uint64_t timestamp, AudioBlock &effects) {
 #ifdef OBS_JUKEBOX_QA
         std::this_thread::sleep_for(std::chrono::milliseconds(testEffectsDelayMs.exchange(0)));
-        const auto windowBegin = std::chrono::steady_clock::now();
 #endif
-        // Only the global packet carries the game's effects state; a voice packet never does.
-        // With no global history the SFX stage does not run and effects are not mixed.
-        auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
+        const auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
+        if (hasEffectsStages(window, timestamp)) {
+            mixGameEffects(window, timestamp, effects);
 #ifdef OBS_JUKEBOX_QA
-        qaMax(testMaxWindowNs, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           std::chrono::steady_clock::now() - windowBegin)
-                                           .count()));
+            std::lock_guard lock(testDryMutex);
+            testDry[timestamp / blockNs % testDry.size()] = {timestamp, effects};
 #endif
+        }
         forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
-            if (p.flags & 1) {
-#ifdef OBS_JUKEBOX_QA
-                const auto mixBegin = std::chrono::steady_clock::now();
-#endif
-                linkReceiver->mixEffects(effects.data() + first * 2, end - first, frameTime(timestamp, first),
-                                         p.effectsVolume);
-#ifdef OBS_JUKEBOX_QA
-                qaMax(testMaxEffectsMixNs, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                      std::chrono::steady_clock::now() - mixBegin)
-                                                      .count()));
-#endif
-            }
-#ifdef OBS_JUKEBOX_QA
-            const auto chainBegin = std::chrono::steady_clock::now();
-#endif
             processStages(effectsChain, effectsSession, p.sessionID, effects.data() + first * 2, end - first,
                           p.effectsStages, p.effectsStageCount);
-#ifdef OBS_JUKEBOX_QA
-            const auto chainNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                              std::chrono::steady_clock::now() - chainBegin)
-                                              .count());
-            qaMax(testMaxChainNs, chainNs);
-            if (testResetPending.exchange(false))
-                qaMax(testMaxResetNs, chainNs);
-#endif
         });
     }
+#ifdef OBS_JUKEBOX_QA
+    // Counts the frames of a staged block whose effects packets arrived after the worker rendered
+    // it: mixed again now, they differ from what the worker mixed.
+    void countLateEffects(const std::vector<SongLinkPacket> &window, uint64_t timestamp) {
+        AudioBlock now{};
+        mixGameEffects(window, timestamp, now);
+        std::lock_guard lock(testDryMutex);
+        const auto &rendered = testDry[timestamp / blockNs % testDry.size()];
+        if (rendered.timestamp != timestamp)
+            return;
+        for (size_t f = 0; f < blockFrames; ++f)
+            testLateFrames += std::abs(now[f * 2] - rendered.samples[f * 2]) > 1e-6f ||
+                              std::abs(now[f * 2 + 1] - rendered.samples[f * 2 + 1]) > 1e-6f;
+    }
+#endif
     // The output block starting at `timestamp`: the music worker's block and the effects, each
     // silent if it is not ready in time.
     AudioBlock mixBlock(uint64_t timestamp) {
@@ -1051,33 +1074,21 @@ struct SongSource {
             outputActive = nowActive;
         }
         AudioBlock audio{}, effects{};
-#ifdef OBS_JUKEBOX_QA
-        const auto queueBegin = std::chrono::steady_clock::now();
-#endif
         const auto generation = outputGeneration.load();
         // Only the QA miss counters read whether each block arrived; a missing one is silence.
         [[maybe_unused]] const bool hasMusic = musicBlocks.take(timestamp, generation, audio);
         [[maybe_unused]] const bool hasEffects = effectsBlocks.take(timestamp, generation, effects);
-#ifdef OBS_JUKEBOX_QA
-        qaMax(testMaxQueueNs, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           std::chrono::steady_clock::now() - queueBegin)
-                                           .count()));
-#endif
         if (!nowActive)
             return {};
-        // Without SFX stages the effects are only a mix, cheap enough for this thread, and mixing
-        // them here keeps the full margin for late packets. The worker's copy is the same audio.
+        // Effects without SFX stages are only a mix, cheap enough for this thread, and mixing them
+        // here keeps the full margin for late packets. Staged blocks come from the worker. The newest
+        // packets decide: a stage that appears after the worker rendered its block leaves that block
+        // silent, as a fresh FMOD shifter is, and one removed since then is gone at once.
         const auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
-        bool staged = false;
-        forEachRun(window, timestamp,
-                   [&](const SongLinkPacket &p, size_t, size_t) { staged |= p.effectsStageCount != 0; });
+        const bool staged = hasEffectsStages(window, timestamp);
         if (!staged) {
             effects = {};
-            forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
-                if (p.flags & 1)
-                    linkReceiver->mixEffects(effects.data() + first * 2, end - first, frameTime(timestamp, first),
-                                             p.effectsVolume);
-            });
+            mixGameEffects(window, timestamp, effects);
         }
 #ifdef OBS_JUKEBOX_QA
         const bool measured = testMeasure.load(std::memory_order_relaxed);
@@ -1089,6 +1100,8 @@ struct SongSource {
             ++testEffectsMissesRaw;
             testEffectsMisses += measured;
         }
+        if (staged && hasEffects)
+            countLateEffects(window, timestamp);
 #endif
         for (size_t i = 0; i < audio.size(); ++i)
             audio[i] += effects[i];
@@ -1121,8 +1134,6 @@ struct SongSource {
                                            std::chrono::steady_clock::now() - mixBegin)
                                            .count());
             qaMax(testMaxMixNs, mixNs);
-            if (mixNs > 0)
-                ++testMixBuckets[std::min<uint64_t>(mixNs / 125000, 15)];
 #endif
             obs_source_audio block{};
             block.data[0] = reinterpret_cast<const uint8_t *>(audio.data());

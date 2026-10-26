@@ -135,7 +135,7 @@ private:
         receiver->handle(static_cast<const unsigned char*>(data),size,from,now);
     }
     void renderNext() {
-        AudioBlock music{},effects{};source->renderMusic(next,music,now);source->renderEffects(next,effects);
+        AudioBlock music{},effects{};source->renderMusic(next,music,now);if(source->active)source->renderEffects(next,effects);
         const auto generation=source->outputGeneration.load();
         source->musicBlocks.push(next,music,generation,next);source->effectsBlocks.push(next,effects,generation,next);
         auto audio=source->mixBlock(next);
@@ -1000,6 +1000,22 @@ static void utf8Test() {
         refused&=!validUtf8(bad);
     check(refused,"malformed, overlong, surrogate, out-of-range and truncated UTF-8 is refused");
 }
+// A worker's queue: four blocks at most, in order, and never one the output has already passed, so
+// the worker knows to start its stages over instead of carrying audio OBS played as silence.
+static void blockQueueTest() {
+    SongSource::BlockQueue queue;
+    AudioBlock block{},out{};
+    constexpr uint64_t ns=SongSource::blockNs;
+    block[0]=1;
+    check(!queue.push(1000,block,0,1000+ns),"a block the output has already passed is refused");
+    check(!queue.take(1000,0,out),"a refused block never plays");
+    bool all=true;
+    for(uint64_t i=0;i<4;++i){block[0]=float(i);all&=queue.push(2000+i*ns,block,0,2000);}
+    check(all && !queue.push(2000+4*ns,block,0,2000),"four blocks wait at most");
+    check(queue.take(2000+ns,0,out) && out[0]==1,"taking a block drops the older ones before it");
+    check(!queue.take(2000+2*ns,1,out),"a block from an older generation never plays");
+    check(queue.push(2000+5*ns,block,0,2000+3*ns) && queue.take(2000+5*ns,0,out),"the queue keeps working after it fills");
+}
 static void senderTest() {
     separate_song::Snapshot s;s.timestamp=monotonicNowNs();s.position=1.25;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -1070,8 +1086,7 @@ int main(int argc,char** argv){
 #endif
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
-    if(std::getenv("OBS_JUKEBOX_BUDGET_ONLY")){pitchBudgetProbe();return failures?1:0;}
-    if(std::getenv("OBS_JUKEBOX_DEADLINE_ONLY")){effectsDelayTest(true);effectsDelayTest(false);musicDeadlineTest(true);pitchStressTest();return failures?1:0;}
+    if(std::getenv("OBS_JUKEBOX_DEADLINE_ONLY")){effectsDelayTest(true);effectsDelayTest(false);effectsLatenessTest();musicDeadlineTest(true);pitchStressTest();return failures?1:0;}
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();sourceToggleRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
     pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);oldModTest(true,false,5);newModTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
@@ -1079,12 +1094,12 @@ int main(int argc,char** argv){
     multipleVoiceFadeTest();malformedV6Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
     tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();
     slowSpeedhackTest();verySlowSpeedhackTest();crawlSpeedhackTest();fastSpeedhackTest();rateBoundsTest();senderTest();senderInvalidPathTest();utf8Test();
-    pitchTests();receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
+    blockQueueTest();pitchTests();receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();
     if(timing){
         sourceResyncRecoveryTest();sourceToggleRecoveryTest();decoderWatchdogBackoffTest();
-        musicDeadlineTest(false);musicDeadlineTest(true);effectsDelayTest(true);effectsDelayTest(false);pitchStressTest();
+        musicDeadlineTest(false);musicDeadlineTest(true);effectsDelayTest(true);effectsDelayTest(false);effectsLatenessTest();pitchStressTest();
     }else std::cout<<"Skipped the timing tests\n";
     return failures?1:0;
 }

@@ -1,10 +1,24 @@
 // These stress the real output thread, including a deliberately slow file open.
 // Timeline arithmetic is checked by the existing sample tests; wall time here
 // detects stalls with scheduler tolerance rather than asserting hard realtime.
+struct StressRun {
+    double rate=1;
+    bool loop=false,checkBudget=true;
+    unsigned voices=5,seconds=11,effectsStages=8;
+    bool voiceStages=true;
+    // Windows' default 15.6 ms timer, which it may give OBS while minimized despite libobs's request.
+    bool coarseTimer=false;
+    uint64_t effectsLatenessNs=0; // how long after its timestamp each effects packet is sent
+};
 // A real-worker stress run: five voices carry ten 4096 stages, the global adds a group stage, and
-// eight post-tap effects stages share the same hop grid. Measured after a 1 s warm-up.
-static void pitchStressRun(double rate,bool loop,bool checkBudget,unsigned voiceCount,unsigned seconds,
-                           unsigned effectsStages=8,bool voiceStages=true) {
+// eight post-tap effects stages share the same hop grid. Measured after a 1 s warm-up; the raw miss
+// counts include it. Returns the staged effects frames whose packets came after the worker rendered.
+static uint64_t pitchStressRun(const StressRun& run) {
+    const auto rate=run.rate;const bool loop=run.loop;
+    const unsigned voiceCount=run.voices,effectsStages=run.effectsStages;
+#ifdef _WIN32
+    if(run.coarseTimer)timeEndPeriod(1);
+#endif
     receiver=std::make_shared<Receiver>();resetOutput();
     SyncedSender sender(0);auto effects=socket(AF_INET,SOCK_DGRAM,0);
     check(sender.synchronize(),"pitch stress test synchronizes its sender");
@@ -18,13 +32,13 @@ static void pitchStressRun(double rate,bool loop,bool checkBudget,unsigned voice
         auto& p=voices[v];p.flags=3;p.channelID=int(v);p.rate=float(rate);p.epoch=1;
         std::strcpy(p.path,"artifacts/audio-tests/long.mp3");
         if(loop){p.flags|=4;p.loopStart=1;p.loopEnd=3;}
-        if(voiceStages){
+        if(run.voiceStages){
             p.stageCount=v<4?1:6;
             for(unsigned s=0;s<p.stageCount;++s)
                 p.stages[s]={.85f+float(v)*.02f+float(s)*.01f,4096,0,920+v*8+s};
         }
     }
-    uint64_t media=0,pauseAt=0;
+    uint64_t media=0,pauseAt=0,lateFrames=0;
     bool paused=false,resetEffects=false;
     {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
@@ -32,12 +46,10 @@ static void pitchStressRun(double rate,bool loop,bool checkBudget,unsigned voice
         bool measuring=false;unsigned rawBefore=0,effectsRawBefore=0;
         for(;;){
             const auto now=os_gettime_ns();const auto elapsed=now-start;
-            if(elapsed>=uint64_t(seconds)*1000000000ULL)break;
+            if(elapsed>=uint64_t(run.seconds)*1000000000ULL)break;
             if(!measuring&&elapsed>=1000000000){
                 source.testMaxMixNs=0;source.testWakeMaxNs=0;source.testMusicMisses=0;source.testEffectsMisses=0;
-                source.testMaxQueueNs=0;source.testMaxWindowNs=0;source.testMaxEffectsMixNs=0;
-                source.testMaxChainNs=0;source.testMaxResetNs=0;source.testResetPending=false;
-                for(auto&bucket:source.testMixBuckets)bucket=0;
+                source.testLateFrames=0;
                 rawBefore=source.testMusicMissesRaw.load();effectsRawBefore=source.testEffectsMissesRaw.load();
                 source.testMeasure=true;measuring=true;
             }
@@ -48,7 +60,6 @@ static void pitchStressRun(double rate,bool loop,bool checkBudget,unsigned voice
                 paused=false;for(auto&p:voices)++p.epoch;
             }
             if(!resetEffects&&elapsed>=5000000000ULL&&effectsStages){
-                source.testResetPending=true;
                 for(unsigned i=0;i<effectsStages;++i)global.effectsStages[i].instance=950+i;
                 resetEffects=true;
             }
@@ -57,7 +68,7 @@ static void pitchStressRun(double rate,bool loop,bool checkBudget,unsigned voice
             sender.send(global,now);
             for(auto&p:voices){p.position=position;p.flags=paused?1:(3|(loop?4:0));sender.send(p,now);}
             EffectsPacketV2 effect;effect.sessionID=sender.session;effect.frames=480;effect.sampleRate=48000;
-            effect.sequence=unsigned(elapsed/10000000);effect.timestamp=now;
+            effect.sequence=unsigned(elapsed/10000000);effect.timestamp=now-run.effectsLatenessNs;
             for(unsigned i=0;i<480;++i)
                 effect.samples[i*2]=effect.samples[i*2+1]=float(
                     .2*std::sin(2*3.14159265358979*440*(double(elapsed)/1e9*48000+double(i))/48000));
@@ -71,38 +82,40 @@ static void pitchStressRun(double rate,bool loop,bool checkBudget,unsigned voice
         const auto raw=source.testMusicMissesRaw.load()-rawBefore;
         const auto effectsMisses=source.testEffectsMisses.load();
         const auto effectsRaw=source.testEffectsMissesRaw.load()-effectsRawBefore;
-        std::cout<<"Pitch stress "<<rate<<"x loop="<<loop<<" voices="<<voiceCount
-                 <<" effects="<<effectsStages<<": max mix "<<double(maxMix)/1e6<<" ms"
-                 <<", queue "<<double(source.testMaxQueueNs.load())/1e6
-                 <<", window "<<double(source.testMaxWindowNs.load())/1e6
-                 <<", effectsMix "<<double(source.testMaxEffectsMixNs.load())/1e6
-                 <<", chain "<<double(source.testMaxChainNs.load())/1e6
-                 <<", reset "<<double(source.testMaxResetNs.load())/1e6
-                 <<", misses "<<misses<<"/"<<raw<<", effects misses "<<effectsMisses<<"/"<<effectsRaw<<", wake "<<double(wake)/1e6<<" ms\n";
-        std::cout<<"  mix buckets (0.125 ms):";
-        for(unsigned b=0;b<16;++b)if(auto count=source.testMixBuckets[b].load())std::cout<<" "<<b<<":"<<count;
-        std::cout<<'\n';
-        if(checkBudget){
+        lateFrames=source.testLateFrames.load();
+        std::cout<<"Pitch stress "<<rate<<"x loop="<<loop<<" voices="<<voiceCount<<" effects="<<effectsStages
+                 <<(run.coarseTimer?" coarse timer":"")<<" lateness "<<double(run.effectsLatenessNs)/1e6
+                 <<" ms: max mix "<<double(maxMix)/1e6<<" ms, misses "<<misses<<"/"<<raw
+                 <<", effects misses "<<effectsMisses<<"/"<<effectsRaw<<", late frames "<<lateFrames
+                 <<", wake "<<double(wake)/1e6<<" ms\n";
+        if(run.checkBudget){
             check(misses==0,"pitch stress has no missed music blocks");
             check(effectsMisses==0,"pitch stress has no missed effects blocks");
             check(maxMix<=2000000,"pitch stress mixBlock stays within 2 ms");
         }
     }
     closeSocket(effects);receiver.reset();
+#ifdef _WIN32
+    if(run.coarseTimer)timeBeginPeriod(1);
+#endif
+    return lateFrames;
 }
 static void pitchStressTest() {
-    pitchStressRun(1,true,true,5,11);
-    pitchStressRun(.01,false,true,5,11);
-    pitchStressRun(16,false,true,5,11);
-    pitchStressRun(1,false,false,64,3,8,false);
+    check(pitchStressRun({.loop=true})==0,"on-time effects all reach the staged worker in time");
+    pitchStressRun({.rate=.01});
+    pitchStressRun({.rate=16});
+    pitchStressRun({.loop=true,.coarseTimer=true});
+    pitchStressRun({.checkBudget=false,.voices=64,.seconds=3,.voiceStages=false});
 }
-// Matched runs for the output-budget audit: the same voices, group stage and load, with zero or
-// eight effects stages. The difference isolates the effects chain's share of mixBlock.
-static void pitchBudgetProbe() {
-    pitchStressRun(1,false,false,5,6,0,true);
-    pitchStressRun(1,false,false,5,6,8,true);
-    pitchStressRun(16,false,false,5,6,0,true);
-    pitchStressRun(16,false,false,5,6,8,true);
+// The worker renders a staged block when the output starts the block before it, 20 ms after the
+// block's timestamp, so a packet may arrive up to 10 ms after its own last frame. Later ones lose
+// frames; unstaged blocks keep the output's full margin.
+static void effectsLatenessTest() {
+    const StressRun light{.voices=0,.seconds=4,.effectsStages=1};
+    auto within=light;within.effectsLatenessNs=5000000;
+    auto beyond=light;beyond.effectsLatenessNs=20000000;
+    check(pitchStressRun(within)==0,"staged effects sent 5 ms late lose no frames");
+    check(pitchStressRun(beyond)>0,"staged effects sent 20 ms late lose frames, as the 10 ms margin says");
 }
 // Slow effects work (a burst of 4096 stages, a reset, a preempted thread) must not hold up the output
 // or the music. Once it catches up, effects play at their own timestamps: each packet carries a
