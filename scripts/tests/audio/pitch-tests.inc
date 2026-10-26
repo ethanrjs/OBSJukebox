@@ -626,7 +626,8 @@ static void pitchRenderGroupBusTest() {
                 heard |= std::abs(sample) > .01f;
         return heard;
     };
-    check(audible(first) && audible(second), "the group bus test plays audible music on both eligible voices");
+    check(audible(first), "the group bus test plays audible music on the first eligible voice");
+    check(audible(second), "the group bus test plays audible music on the second eligible voice");
     check(audible(excluded), "the group bus test plays audible music on the excluded voice");
     // One chain, fed the dry sum block by block, is what the group stage must do to the bus.
     PitchChain chain;
