@@ -1,10 +1,20 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #pragma pack(push, 1)
 struct SongFadePoint {
     uint64_t offsetNs = 0;
     float gain = 1.f;
+};
+// One FMOD pitch shifter on the path from a sound to the speakers, in signal order. `instance` is
+// the DSP address: a mod that destroys and recreates its shifter gets fresh state in OBS. `pitch`
+// and `fft` are the parameters as FMOD reads them back.
+struct PitchStage {
+    float pitch = 0;
+    uint16_t fft = 0;
+    uint16_t reserved = 0;
+    uint64_t instance = 0;
 };
 struct SongLinkPacket {
     char magic[8] = {'G', 'D', 'S', 'O', 'N', 'G', '1', 0};
@@ -69,6 +79,9 @@ struct PitchPacket {
 };
 #pragma pack(pop)
 inline constexpr unsigned SONG_LINK_V2_SIZE = 1288, SONG_LINK_V3_SIZE = 1296, SONG_LINK_V4_SIZE = 1304;
+static_assert(sizeof(PitchStage) == 16 && alignof(PitchStage) == 1);
+static_assert(offsetof(PitchStage, pitch) == 0 && offsetof(PitchStage, fft) == 4 &&
+              offsetof(PitchStage, reserved) == 6 && offsetof(PitchStage, instance) == 8);
 static_assert(sizeof(SongLinkPacket) == 1436);
 static_assert(sizeof(PitchPacket) == 32 + 8 + 64 * 12);
 static_assert(sizeof(EffectsPacket) == 4132);

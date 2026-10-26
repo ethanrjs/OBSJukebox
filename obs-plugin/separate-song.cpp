@@ -776,7 +776,10 @@ struct SongSource {
             }
         v.mixTail(voiceAudio.data(), frames);
         // The shifter keeps running while the voice is silent, so the audio it delays plays out.
-        v.shifter.process(voiceAudio.data(), frames, v.pitch.pitch, v.pitch.fftSize);
+        if (v.pitch.fftSize)
+            v.shifter.process(voiceAudio.data(), frames, v.pitch.pitch, v.pitch.fftSize);
+        else if (v.shifter.active())
+            v.shifter.clear(); // the mod removed its shifter: do not replay what OBS still held
         for (size_t j = 0; j < frames * 2; ++j)
             output[j] += voiceAudio[j];
         if (p.path[0] && !decoder.error.empty())
@@ -902,7 +905,10 @@ struct SongSource {
                                              p.effectsVolume);
             });
             auto shift = linkReceiver->pitchShift(-1, os_gettime_ns());
-            effectsShifter.process(effects.data(), blockFrames, shift.pitch, shift.fftSize);
+            if (shift.fftSize)
+                effectsShifter.process(effects.data(), blockFrames, shift.pitch, shift.fftSize);
+            else if (effectsShifter.active())
+                effectsShifter.clear();
             for (size_t i = 0; i < audio.size(); ++i)
                 audio[i] += effects[i];
         }
@@ -977,6 +983,8 @@ static obs_properties_t *properties(void *data) {
     return props;
 }
 bool obs_module_load(void) {
+    // Build the shifter tables before any source thread can process audio.
+    PitchShifter::prepareTables();
     receiver = std::make_shared<Receiver>();
     obs_source_info info{};
     info.id = "gd_alternate_song";

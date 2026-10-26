@@ -2,6 +2,7 @@
 #include <iostream>
 #include <fstream>
 #include <limits>
+#include <random>
 #include "../../../src/MonotonicClock.hpp"
 #include "../../../src/Bridge.hpp"
 #include "../../../src/TapClock.hpp"
@@ -954,46 +955,7 @@ static void senderInvalidPathTest() {
 #include "receiver-tests.inc"
 #include "deadline-tests.inc"
 #include "recovery-tests.inc"
-
-// Counts the upward zero crossings of the left channel in frames [first, end).
-static unsigned upwardCrossings(const std::vector<float>& audio,size_t first,size_t end){
-    unsigned n=0;for(size_t i=first+1;i<end;++i)if(audio[(i-1)*2]<0 && audio[i*2]>=0)++n;return n;
-}
-static void pitchShifterTest(){
-    constexpr size_t frames=48000;
-    std::vector<float> sine(frames*2);
-    for(size_t i=0;i<frames;++i)sine[i*2]=sine[i*2+1]=float(.5*std::sin(2*3.14159265358979*440*double(i)/48000));
-    auto shifted=[&](float pitch){
-        auto audio=sine;PitchShifter shifter;
-        for(size_t at=0;at<frames;at+=blockFrames)shifter.process(audio.data()+at*2,std::min(blockFrames,frames-at),pitch,1024);
-        return audio;
-    };
-    auto same=shifted(1.f);
-    check(same==sine,"a pitch of 1 leaves audio untouched");
-    // One second of 440 Hz has 440 upward crossings; skip the first 0.1 s of latency and ramp-up.
-    auto down=shifted(.5f),up=shifted(1.5f);
-    auto downCount=upwardCrossings(down,4800,frames),upCount=upwardCrossings(up,4800,frames);
-    check(downCount>=190 && downCount<=206,"a pitch of 0.5 plays a 440 Hz tone at 220 Hz");
-    check(upCount>=580 && upCount<=608,"a pitch of 1.5 plays a 440 Hz tone at 660 Hz");
-    // A chord keeps its level within 2 dB, an octave down or up.
-    std::vector<float> chord(frames*2);
-    for(size_t i=0;i<frames;++i){float v=0;for(double f:{220.,277.,330.,440.,554.,660.,880.})v+=float(.08*std::sin(2*3.14159265358979*f*double(i)/48000+f));chord[i*2]=chord[i*2+1]=v;}
-    auto energy=[](const std::vector<float>& audio){double e=0;for(size_t i=9600;i<audio.size()/2;++i)e+=double(audio[i*2])*audio[i*2];return e;};
-    bool level=true;
-    for(float pitch:{.5f,2.f}){
-        auto audio=chord;PitchShifter shifter;
-        for(size_t at=0;at<frames;at+=blockFrames)shifter.process(audio.data()+at*2,std::min(blockFrames,frames-at),pitch,1024);
-        level&=std::abs(10*std::log10(energy(audio)/energy(chord)))<2;
-    }
-    check(level,"pitch shifting keeps a chord's level");
-    PitchPacket packet;packet.count=1;packet.voices[0]={3,{.5f,1024}};
-    auto parsed=parsePitchPacket(reinterpret_cast<const unsigned char*>(&packet),sizeof(packet));
-    check(parsed && parsed->voices[0].channelID==3 && parsed->voices[0].shift.pitch==.5f,"a valid pitch packet parses");
-    packet.voices[0].shift.pitch=std::numeric_limits<float>::quiet_NaN();
-    check(!parsePitchPacket(reinterpret_cast<const unsigned char*>(&packet),sizeof(packet)),"a pitch packet with a NaN pitch is refused");
-    packet.voices[0].shift.pitch=.5f;packet.count=SONG_LINK_MAX_CHANNELS+1;
-    check(!parsePitchPacket(reinterpret_cast<const unsigned char*>(&packet),sizeof(packet)),"a pitch packet with too many voices is refused");
-}
+#include "pitch-tests.inc"
 int main(int argc,char** argv){
     // --skip-timing leaves out the tests that need the machine to meet real-time audio deadlines.
     const bool timing=!(argc>1 && std::string(argv[1])=="--skip-timing");
@@ -1016,7 +978,7 @@ int main(int argc,char** argv){
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
     tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();
     slowSpeedhackTest();verySlowSpeedhackTest();crawlSpeedhackTest();fastSpeedhackTest();rateBoundsTest();senderTest();senderInvalidPathTest();utf8Test();
-    pitchShifterTest();receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
+    pitchTests();receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();
     if(timing){
