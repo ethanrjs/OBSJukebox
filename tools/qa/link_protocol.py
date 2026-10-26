@@ -51,7 +51,9 @@ def parse_packet(packet):
             previous = 0
             for i in range(count):
                 at, volume = struct.unpack_from("<Qf", packet, 1324 + i * 12)
-                if not previous < at <= 86_400_000_000_000 or not math.isfinite(volume) or not 0 <= volume <= 16:
+                # FMOD can report two fade points at the same DSP clock, so the times only have to
+                # be nondecreasing, as the plugin accepts them.
+                if at < previous or at > 86_400_000_000_000 or not math.isfinite(volume) or not 0 <= volume <= 16:
                     raise ValueError("invalid fade point")
                 fades.append(dict(offset_ns=at, gain=volume))
                 previous = at
@@ -85,7 +87,7 @@ def parse_packet(packet):
                 raise ValueError("an excluded voice cannot carry stages")
         if (not all(map(math.isfinite, (position, rate, offset, *volumes))) or
                 not -600 <= position < 86400 or
-                (not 0 < rate <= 16 if version >= 5 else not .25 <= rate <= 4) or
+                (not 0 < rate <= 16 if version == 6 else not .25 <= rate <= 4) or
                 not all(0 <= v <= 1 for v in volumes)):
             raise ValueError("invalid song position/rate/volume")
         text = lambda value: value.split(b"\0", 1)[0].decode("utf-8", errors="replace")

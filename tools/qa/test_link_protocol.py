@@ -81,7 +81,7 @@ class PacketTests(unittest.TestCase):
     def test_song_bounds(self):
         for offset, fmt, value in ((1304, "Q", 0), (1312, "i", -2), (1312, "i", 64),
                                    (1316, "f", float("nan")), (1316, "f", 17),
-                                   (1320, "I", 9), (1324, "Q", 0), (1332, "f", -1),
+                                   (1320, "I", 9), (1332, "f", -1),
                                    (24, "d", 86400), (32, "d", -.1), (32, "d", 16.5), (1288, "f", 2)):
             data = bytearray(song())
             struct.pack_into("<" + fmt, data, offset, value)
@@ -90,6 +90,18 @@ class PacketTests(unittest.TestCase):
         data = bytearray(song())
         struct.pack_into("<i", data, 1312, -1)
         self.assertEqual(parse_packet(data)[1]["channel_id"], -1)
+
+    def test_fade_times_need_only_be_nondecreasing(self):
+        data = bytearray(song())
+        struct.pack_into("<I", data, 1320, 3)
+        struct.pack_into("<Qf", data, 1324, 0, .25)
+        struct.pack_into("<Qf", data, 1336, 1_000_000, .5)
+        struct.pack_into("<Qf", data, 1348, 1_000_000, 0.)
+        fades = parse_packet(data)[1]["fades"]
+        self.assertEqual([f["offset_ns"] for f in fades], [0, 1_000_000, 1_000_000])
+        struct.pack_into("<Qf", data, 1348, 999_998, 0.)
+        with self.assertRaises(ValueError):
+            parse_packet(data)
 
     def test_loop_bounds(self):
         data = bytearray(song())

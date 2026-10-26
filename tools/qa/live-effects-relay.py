@@ -45,7 +45,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         if kind == "song":
             packet = packet[:264] + bytes(1024) + packet[1288:]
             songs += 1
-            modern_songs += fields["version"] == 5
+            modern_songs += fields["version"] >= 5
         elif kind == "effects":
             age = (now_ns() - fields["timestamp_ns"]) / 1e6
             effects += 1

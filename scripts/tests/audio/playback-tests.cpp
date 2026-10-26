@@ -676,19 +676,24 @@ static void malformedV6Test() {
     p.channelID=0;p.flags=7;p.loopStart=2;p.loopEnd=1;rejected(p,"v6 rejects inverted loop bounds");
     p.loopStart=std::numeric_limits<double>::quiet_NaN();p.loopEnd=2;rejected(p,"v6 rejects a nonfinite loop start");
     p.loopStart=1;p.loopEnd=1;rejected(p,"v6 rejects an empty loop");
-    p=SongLinkPacket{};p.flags=1;p.epoch=720;p.fadeCount=2;p.fades[0]={1000000,.5f};p.fades[1]={1000000,0};
+    p=SongLinkPacket{};p.flags=1;p.epoch=720;p.fadeCount=3;
+    p.fades[0]={0,.5f};p.fades[1]={1000000,.5f};p.fades[2]={1000000,0};
     sim.send(game,p,sim.now);sim.advance(15000000);
-    check(receiver->get().packet.epoch==720,"v6 accepts fade points that share a time");
+    check(receiver->get().packet.epoch==720,"v6 accepts a fade at zero and points that share a time");
     // A stage in the list must be one FMOD would process, and every unused entry must be zero.
     p=SongLinkPacket{};p.flags=1;p.epoch=721;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
     sim.send(game,p,sim.now);sim.advance(15000000);
     check(receiver->get().packet.epoch==721,"v6 accepts a valid channel stage");
     p.stageCount=9;rejected(p,"v6 rejects more than eight stages");
     p.stageCount=1;p.stageReserved[0]=1;rejected(p,"v6 rejects nonzero stage reserve");
-    p.stageReserved[0]=0;p.flags=16;rejected(p,"v6 rejects unknown flag bits");
-    p.flags=8;p.stageCount=1;rejected(p,"v6 rejects an excluded voice that still lists stages");
-    p.stageCount=0;sim.send(game,p,sim.now);sim.advance(15000000);
-    check(receiver->get().packet.epoch==p.epoch,"v6 accepts an excluded replacement voice");
+    p.stageReserved[0]=0;p.stageReserved[1]=1;rejected(p,"v6 rejects nonzero stage reserve padding");
+    p.stageReserved[1]=0;p=SongLinkPacket{};p.flags=1;p.effectsStageCount=9;
+    rejected(p,"v6 rejects more than eight effects stages");
+    p=SongLinkPacket{};p.flags=1;p.epoch=722;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
+    p.flags=16;rejected(p,"v6 rejects unknown flag bits");
+    p.flags=8;rejected(p,"v6 rejects an excluded voice that still lists stages");
+    p.stageCount=0;p.stages[0]={};sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==722,"v6 accepts an excluded replacement voice");
     p.flags=1;
     {
         auto bad=p;bad.stageCount=1;bad.stages[0]={std::numeric_limits<float>::quiet_NaN(),1024,0,41};
@@ -701,7 +706,8 @@ static void malformedV6Test() {
         bad.stages[0].fft=1024;bad.stages[0].instance=0;rejected(bad,"v6 rejects a zero instance");
         bad.stages[0].instance=41;bad.stages[0].reserved=1;rejected(bad,"v6 rejects a nonzero stage reserve");
         bad.stages[0].reserved=0;bad.stages[1].pitch=.5f;rejected(bad,"v6 rejects a nonzero unused stage");
-        bad=p;bad.effectsStageCount=1;rejected(bad,"v6 rejects effects stages on a voice packet");
+        bad=p;bad.effectsStageCount=1;bad.effectsStages[0]={.5f,4096,0,43};
+        rejected(bad,"v6 rejects effects stages on a voice packet");
     }
     // The global packet carries music and effects stages; flag 8 is a voice-only rule.
     p=SongLinkPacket{};p.flags=1;p.epoch=730;p.channelID=-1;p.effectsStageCount=1;
@@ -710,11 +716,14 @@ static void malformedV6Test() {
     p.flags=8;rejected(p,"v6 rejects flag 8 on the global packet");
     p.flags=1;p.epoch=731;p.stageCount=1;p.stages[0]={1.f,256,0,44};sim.send(game,p,sim.now);sim.advance(15000000);
     check(receiver->get().packet.epoch==731,"v6 accepts music stages beside effects stages");
-    // Size is exact: a short or long v6 packet is refused whole.
-    auto shortPacket=p;shortPacket.epoch=740;
+    // Size is exact: a short or long v6 packet is refused whole. These are otherwise valid, so the
+    // size is the only thing that can reject them.
+    auto shortPacket=p;shortPacket.epoch=740;shortPacket.sessionID=game.session;
+    shortPacket.timestamp=game.stamp(sim.now);
     sim.deliver(&shortPacket,sizeof(shortPacket)-1,game.port);sim.advance(15000000);
     check(receiver->get().packet.epoch!=740,"v6 rejects a truncated extension");
-    auto longPacket=p;longPacket.epoch=741;
+    auto longPacket=p;longPacket.epoch=741;longPacket.sessionID=game.session;
+    longPacket.timestamp=game.stamp(sim.now);
     std::array<unsigned char,sizeof(longPacket)+1> longer{};std::memcpy(longer.data(),&longPacket,sizeof(longPacket));
     sim.deliver(longer.data(),longer.size(),game.port);sim.advance(15000000);
     check(receiver->get().packet.epoch!=741,"v6 rejects a trailing byte");
