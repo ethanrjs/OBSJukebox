@@ -26,12 +26,14 @@ class Bridge {
     std::atomic<bool> stop{false};
     std::thread worker;
     bool longPathLogged = false, invalidPathLogged = false;
+    void send(const void *packet, size_t size);
 
   public:
     ~Bridge();
     bool start();
     void shutdown();
     void publish(const Snapshot &snapshot);
+    void publish(PitchPacket packet);
 };
 Bridge &bridge();
 } // namespace separate_song

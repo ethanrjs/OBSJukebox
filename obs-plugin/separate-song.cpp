@@ -3,6 +3,7 @@
 #include "../src/Utf8.hpp"
 #include "Decoder.hpp"
 #include "LinkClock.hpp"
+#include "PitchShifter.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -122,6 +123,22 @@ static std::optional<EffectsInput> parseEffectsPacket(const unsigned char *data,
             return std::nullopt;
     return input;
 }
+// Checks a GDPITCH packet. Returns nothing if any of its fields is invalid.
+static std::optional<PitchPacket> parsePitchPacket(const unsigned char *data, size_t size) {
+    PitchPacket p;
+    if (size != sizeof(p))
+        return std::nullopt;
+    memcpy(&p, data, size);
+    auto valid = [](const PitchShift &shift) {
+        return std::isfinite(shift.pitch) && shift.pitch >= .25f && shift.pitch <= 4.f && shift.fftSize <= 4096;
+    };
+    if (p.version != 1 || p.count > SONG_LINK_MAX_CHANNELS || !valid(p.effects))
+        return std::nullopt;
+    for (unsigned i = 0; i < p.count; ++i)
+        if (p.voices[i].channelID < 0 || p.voices[i].channelID >= SONG_LINK_MAX_CHANNELS || !valid(p.voices[i].shift))
+            return std::nullopt;
+    return p;
+}
 // A GDSONG1 packet below version 5, or any GDSFX1 packet, comes from a mod older than v1.1: v1.0 sent
 // v3 song packets and GDSFX1 effects, before clock sync. handle() has checked that size >= 8.
 static bool fromModBeforeV11(const unsigned char *data, size_t size) {
@@ -184,6 +201,9 @@ class Receiver {
     std::deque<uint64_t> probes;
     sockaddr_in peer{};
     std::deque<SongLinkPacket> pending;
+    // The pitch shifters the game last reported, and when (OBS time). A mod without them never sends any.
+    PitchPacket pitch;
+    uint64_t lastPitchReceived = 0;
     FILE *reference = nullptr;
     void queueEffects(const EffectsPacket &effect) {
         auto next = std::lower_bound(effects.begin(), effects.end(), effect.timestamp,
@@ -210,6 +230,7 @@ class Receiver {
         lastProbe = 0;
         effectsPort.fill(0);
         lastEffectsReceived.fill(0);
+        lastPitchReceived = 0;
         clearTimeline();
     }
     // The effects tap uses its own socket. Pin its port independently and permit a replacement
@@ -277,6 +298,14 @@ class Receiver {
             if (!lastNewModPacket)
                 blog(LOG_WARNING, "[OBS Jukebox] Ignoring packets from a newer OBS Jukebox mod; update the OBS plugin");
             lastNewModPacket = now;
+        } else if (!memcmp(data, "GDPITCH", 8)) {
+            if (auto p = parsePitchPacket(data, size)) {
+                std::lock_guard lock(mutex);
+                if (session && p->sessionID == session && from.sin_port == peer.sin_port) {
+                    pitch = *p;
+                    lastPitchReceived = now;
+                }
+            }
         } else if (!memcmp(data, "GDSFX", 5)) {
             if (auto effect = parseEffectsPacket(data, size))
                 handleEffects(*effect, from, now);
@@ -432,6 +461,19 @@ class Receiver {
         return lastSongReceived && lastEffectsReceived[0] && since(lastEffectsReceived[0], now) < 100000000 &&
                since(lastSongReceived, now) > 200000000;
     }
+    // The pitch shifters on the path of the effects (channel -1) or a music channel, as last reported
+    // within a second of now. None once the game stops reporting them.
+    PitchShift pitchShift(int channel, uint64_t now) {
+        std::lock_guard lock(mutex);
+        if (!lastPitchReceived || since(lastPitchReceived, now) > 1000000000)
+            return {};
+        if (channel < 0)
+            return pitch.effects;
+        for (unsigned i = 0; i < pitch.count; ++i)
+            if (pitch.voices[i].channelID == channel)
+                return pitch.voices[i].shift;
+        return {};
+    }
     LinkState get() {
         std::lock_guard lock(mutex);
         return state;
@@ -543,6 +585,7 @@ struct SongSource {
     std::condition_variable musicReady;
     std::deque<MusicBlock> musicQueue;
     std::atomic<uint64_t> wantedTimestamp{0};
+    PitchShifter effectsShifter; // only the output thread uses it
 #ifdef OBS_JUKEBOX_QA
     std::atomic<int> testOutputDelayMs{0};
     std::atomic<unsigned> testStatCount{0};
@@ -567,6 +610,8 @@ struct SongSource {
         size_t fadeIn = declickFrames;   // frames of the current fade-in already played
         std::array<float, declickFrames * 2> tail{};
         size_t tailRead = declickFrames; // next tail frame to mix; declickFrames when empty
+        PitchShift pitch;                // pitch shifters other mods put on this channel's path in game
+        PitchShifter shifter;
 
         // Continues the audio that was playing for declickFrames while fading it to silence,
         // so the next state crossfades in instead of cutting. Call before the decoder seeks or
@@ -656,7 +701,7 @@ struct SongSource {
     void renderVoice(Voice &v, const SongLinkPacket &p, float *output, size_t frames, uint64_t time,
                      bool live, std::string &decoderError) {
         v.lastUsed = p.timestamp;
-        if (!live && !v.wasPlaying && v.tailRead >= declickFrames)
+        if (!live && !v.wasPlaying && v.tailRead >= declickFrames && !v.shifter.active())
             return;
         followFile(v, p);
         auto &decoder = v.decoder;
@@ -726,10 +771,14 @@ struct SongSource {
             for (size_t j = 0; j < frames; ++j) {
                 float gain = p.musicVolume * songGainAt(p, frameTime(time, j)) * v.nextFadeIn();
                 for (size_t ch = 0; ch < 2; ++ch)
-                    output[j * 2 + ch] += voiceAudio[j * 2 + ch] * gain;
+                    voiceAudio[j * 2 + ch] *= gain;
                 v.lastGain = gain;
             }
-        v.mixTail(output, frames);
+        v.mixTail(voiceAudio.data(), frames);
+        // The shifter keeps running while the voice is silent, so the audio it delays plays out.
+        v.shifter.process(voiceAudio.data(), frames, v.pitch.pitch, v.pitch.fftSize);
+        for (size_t j = 0; j < frames * 2; ++j)
+            output[j] += voiceAudio[j];
         if (p.path[0] && !decoder.error.empty())
             decoderError = decoder.error;
         v.wasPlaying = playing;
@@ -763,6 +812,7 @@ struct SongSource {
 #endif
             }
             auto &v = *voices[channel];
+            v.pitch = linkReceiver->pitchShift(channel, now);
             forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
                 size_t stale = stalled ? end : std::clamp(frameAt(timestamp, p.timestamp + staleNs), first, end);
                 if (stale > first)
@@ -842,14 +892,19 @@ struct SongSource {
         // ignore staleness: they arrive from FMOD's mixer thread even while GD's main thread
         // (which sends status packets) stalls, and stop on their own when GD does.
         if (active) {
+            AudioBlock effects{};
             auto channels = linkReceiver->getChannels();
             int global = std::find(channels.begin(), channels.end(), -1) != channels.end() ? -1 : 0;
             auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, global);
             forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
                 if (p.flags & 1)
-                    linkReceiver->mixEffects(audio.data() + first * 2, end - first, frameTime(timestamp, first),
+                    linkReceiver->mixEffects(effects.data() + first * 2, end - first, frameTime(timestamp, first),
                                              p.effectsVolume);
             });
+            auto shift = linkReceiver->pitchShift(-1, os_gettime_ns());
+            effectsShifter.process(effects.data(), blockFrames, shift.pitch, shift.fftSize);
+            for (size_t i = 0; i < audio.size(); ++i)
+                audio[i] += effects[i];
         }
         // A corrupt float WAV or a hostile packet must not put NaN or Inf into OBS's mix.
         for (auto &sample : audio)

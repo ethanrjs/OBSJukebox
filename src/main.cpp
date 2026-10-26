@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <optional>
+#include <climits>
 
 using namespace geode::prelude;
 using namespace separate_song;
@@ -572,6 +573,62 @@ class $modify(SeparateSongLevelSelect, LevelSelectLayer) {
         selectCurrentOffset();
     }
 };
+// Multiplies the active FMOD pitch shifters among the first `count` DSPs of `control` into `shift`.
+static void addPitchShifters(FMOD::ChannelControl* control, int count, PitchShift& shift) {
+    int total = 0;
+    if (!control || control->getNumDSPs(&total) != FMOD_OK) return;
+    for (int i = 0; i < std::min(count, total); ++i) {
+        FMOD::DSP* dsp = nullptr;
+        FMOD_DSP_TYPE type = FMOD_DSP_TYPE_UNKNOWN;
+        bool bypass = false, active = false;
+        if (control->getDSP(i, &dsp) != FMOD_OK || !dsp || dsp->getType(&type) != FMOD_OK ||
+            type != FMOD_DSP_TYPE_PITCHSHIFT || dsp->getBypass(&bypass) != FMOD_OK || bypass ||
+            dsp->getActive(&active) != FMOD_OK || !active) continue;
+        float pitch = 1.f, fftSize = 1024.f;
+        if (dsp->getParameterFloat(FMOD_DSP_PITCHSHIFT_PITCH, &pitch, nullptr, 0) != FMOD_OK ||
+            !std::isfinite(pitch)) continue;
+        if (dsp->getParameterFloat(FMOD_DSP_PITCHSHIFT_FFTSIZE, &fftSize, nullptr, 0) != FMOD_OK ||
+            !std::isfinite(fftSize)) fftSize = 1024.f;
+        shift.pitch = std::clamp(shift.pitch * std::clamp(pitch, .5f, 2.f), .25f, 4.f);
+        if (!shift.fftSize) shift.fftSize = uint32_t(std::clamp(fftSize, 256.f, 4096.f));
+    }
+}
+// Adds the pitch shifters of `group` and every group it feeds, up to GD's master group.
+static void addGroupPitchShifters(FMOD::ChannelGroup* group, PitchShift& shift) {
+    for (int depth = 0; group && depth < 16; ++depth) {
+        addPitchShifters(group, INT_MAX, shift);
+        FMOD::ChannelGroup* parent = nullptr;
+        if (group->getParentGroup(&parent) != FMOD_OK || parent == group) break;
+        group = parent;
+    }
+}
+// Tells OBS which pitch shifters other mods (Mega Hack's Pitch Shifter, for one) have put between
+// each sound and the speakers. OBS plays the music from its own decoder, and the effects tap sits
+// before those DSPs, so OBS applies them itself.
+static void publishPitchShifters() {
+    auto engine = FMODAudioEngine::get();
+    if (!engine || !engine->m_globalChannel) return;
+    PitchPacket packet;
+    if (auto tap = audio_tap::dspIndex()) {
+        addPitchShifters(engine->m_globalChannel, *tap, packet.effects);
+        FMOD::ChannelGroup* parent = nullptr;
+        if (engine->m_globalChannel->getParentGroup(&parent) == FMOD_OK && parent != engine->m_globalChannel)
+            addGroupPitchShifters(parent, packet.effects);
+    }
+    for (auto& [id, voice] : voices) {
+        if (packet.count == SONG_LINK_MAX_CHANNELS) break;
+        auto& out = packet.voices[packet.count++];
+        out.channelID = id;
+        FMOD::ChannelGroup* group = engine->m_backgroundMusicChannel;
+        if (auto channel = engine->getActiveMusicChannel(id)) {
+            addPitchShifters(channel, INT_MAX, out.shift);
+            if (channel->getChannelGroup(&group) != FMOD_OK) group = engine->m_backgroundMusicChannel;
+        }
+        addGroupPitchShifters(group, out.shift);
+    }
+    bridge().publish(packet);
+}
+
 // Geode's guidelines flag per-frame hooks, so the service work runs from the scheduler. Unlike the
 // drawScene hook, the scheduler stops while the director is paused; levels sample from postUpdate.
 class SeparateSongService : public CCObject {
@@ -583,7 +640,7 @@ public:
     // Every 100 ms: keep the effects tap attached, refresh the Jukebox list, and report the level.
     void poll(float) {
         auto play = PlayLayer::get();
-        audio_tap::install(); jukebox_link::refreshUI();
+        audio_tap::install(); jukebox_link::refreshUI(); publishPitchShifters();
         if (play && play == activePlayLayer) sampleMusic(play);
         else if (!outsideLevel(play)) publish("Ready", false);
     }
