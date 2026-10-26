@@ -46,6 +46,29 @@ static uint64_t pitchStressRun(const StressRun& run) {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         const auto start=os_gettime_ns();auto last=start;
         bool measuring=false;unsigned rawBefore=0,effectsRawBefore=0;
+        // Effects as the tap sends them: back-to-back packets at their own cadence, each sent
+        // `effectsLatenessNs` after its timestamp. The sender spins, so a coarse timer adds no lateness,
+        // and it runs at audio scheduling, as FMOD's mixer thread does in GD.
+        std::atomic<bool> stopEffects{false};
+        std::atomic<uint64_t> sendLateNs{0};
+        std::thread effectsSender([&]{
+            const AudioThreadScheduling scheduling;
+            uint64_t sent=0;unsigned sequence=0;
+            while(!stopEffects){
+                const auto stamp=start+separate_song::framesToNs(sent,run.effectsRate);
+                const auto now=os_gettime_ns();
+                if(now<stamp+run.effectsLatenessNs){std::this_thread::yield();continue;}
+                if(measuring)sendLateNs=std::max<uint64_t>(sendLateNs,now-stamp-run.effectsLatenessNs);
+                EffectsPacketV2 effect;effect.sessionID=sender.session;effect.frames=run.effectsFrames;
+                effect.sampleRate=run.effectsRate;effect.sequence=sequence++;effect.timestamp=stamp;
+                for(unsigned i=0;i<run.effectsFrames;++i)
+                    effect.samples[i*2]=effect.samples[i*2+1]=
+                        float(.2*std::sin(2*3.14159265358979*440*double(sent+i)/run.effectsRate));
+                sendto(effects,reinterpret_cast<const char*>(&effect),44+effect.frames*8,0,
+                       reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+                sent+=run.effectsFrames;
+            }
+        });
         for(;;){
             const auto now=os_gettime_ns();const auto elapsed=now-start;
             if(elapsed>=uint64_t(run.seconds)*1000000000ULL)break;
@@ -69,16 +92,9 @@ static uint64_t pitchStressRun(const StressRun& run) {
             if(loop)position=1+std::fmod(position-1,2.0);
             sender.send(global,now);
             for(auto&p:voices){p.position=position;p.flags=paused?1:(3|(loop?4:0));sender.send(p,now);}
-            EffectsPacketV2 effect;effect.sessionID=sender.session;effect.frames=run.effectsFrames;
-            effect.sampleRate=run.effectsRate;
-            effect.sequence=unsigned(elapsed/10000000);effect.timestamp=now-run.effectsLatenessNs;
-            for(unsigned i=0;i<run.effectsFrames;++i)
-                effect.samples[i*2]=effect.samples[i*2+1]=float(.2*std::sin(
-                    2*3.14159265358979*440*(double(elapsed)/1e9*run.effectsRate+double(i))/run.effectsRate));
-            sendto(effects,reinterpret_cast<const char*>(&effect),44+effect.frames*8,0,
-                   reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        stopEffects=true;effectsSender.join();
         source.testMeasure=false;
         const auto maxMix=source.testMaxMixNs.load(),wake=source.testWakeMaxNs.load();
         const auto misses=source.testMusicMisses.load();
@@ -90,7 +106,7 @@ static uint64_t pitchStressRun(const StressRun& run) {
                  <<(run.coarseTimer?" coarse timer":"")<<" lateness "<<double(run.effectsLatenessNs)/1e6
                  <<" ms: max mix "<<double(maxMix)/1e6<<" ms, misses "<<misses<<"/"<<raw
                  <<", effects misses "<<effectsMisses<<"/"<<effectsRaw<<", late frames "<<lateFrames
-                 <<", wake "<<double(wake)/1e6<<" ms\n";
+                 <<", wake "<<double(wake)/1e6<<" ms, sender late "<<double(sendLateNs.load())/1e6<<" ms\n";
         if(run.checkBudget){
             check(misses==0,"pitch stress has no missed music blocks");
             check(effectsMisses==0,"pitch stress has no missed effects blocks");

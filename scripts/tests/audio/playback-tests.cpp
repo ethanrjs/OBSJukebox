@@ -1021,10 +1021,15 @@ static void blockQueueTest() {
     for(uint64_t i=2;i<6;++i)ordered&=queue.take(2000+i*ns,0,out) && out[0]==float(i);
     check(ordered,"a wrapped ring plays its blocks in order");
     // The output asks for a block before it moves `wanted` on; a block it missed must not queue.
-    check(!queue.take(2000+6*ns,0,out) && !queue.push(2000+6*ns,block,0,2000+6*ns),
-          "a block the output just missed is refused before it moves on");
-    check(queue.push(2000+7*ns,block,0,2000+7*ns) && !queue.take(2000+7*ns,1,out),
-          "a block from an older generation never plays");
+    check(!queue.take(2000+6*ns,0,out),"the output misses a block nobody rendered");
+    check(!queue.push(2000+6*ns,block,0,2000+6*ns),"a block the output just missed is refused before it moves on");
+    // A worker clears the queue when it catches up; the missed block must stay refused after that.
+    check(!queue.take(2000+7*ns,0,out),"the output misses the next block too");
+    queue.clear();
+    check(!queue.push(2000+7*ns,block,0,2000+7*ns),"a block the output missed stays refused after a clear");
+    block[0]=8;
+    check(queue.push(2000+8*ns,block,0,2000+8*ns),"the next block queues after a miss");
+    check(!queue.take(2000+8*ns,1,out),"a block from an older generation never plays");
 }
 static void senderTest() {
     separate_song::Snapshot s;s.timestamp=monotonicNowNs();s.position=1.25;

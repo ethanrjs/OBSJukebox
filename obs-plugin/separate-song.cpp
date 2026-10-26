@@ -60,7 +60,7 @@ public:
     AudioThreadScheduling() {
 #ifdef __APPLE__
         if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) != 0)
-            blog(LOG_ERROR, "OBS Jukebox: could not configure audio thread scheduling");
+            blog(LOG_WARNING, "OBS Jukebox: could not configure audio thread scheduling");
 #elif defined(_WIN32)
         DWORD index = 0;
         task = AvSetMmThreadCharacteristicsW(L"Audio", &index);
@@ -617,13 +617,13 @@ struct SongSource {
         std::array<Block, 4> slots;
         size_t first = 0, count = 0;
         // The last block the output asked for: played or missed, it is past. The output asks before
-        // it moves `wanted` on, so this catches a block that missed by a moment.
+        // it moves `wanted` on, so this catches a block that missed by a moment. Output timestamps
+        // only move forward, so clearing the queue keeps it.
         uint64_t asked = 0;
 
         void clear() {
             std::lock_guard lock(mutex);
             count = 0;
-            asked = 0;
         }
         // Queues a block unless four already wait or the output has already passed it (`wanted` is
         // the next block it mixes). False means the output will never play this block.
@@ -1082,6 +1082,8 @@ struct SongSource {
         mixGameEffects(window, timestamp, now);
         std::lock_guard lock(testDryMutex);
         const auto &stored = testDry[timestamp / blockNs % testDry.size()];
+        if (stored.timestamp > timestamp)
+            return; // the worker has run eight blocks ahead since and reused the slot
         static const AudioBlock silence{};
         const auto &rendered = stored.timestamp == timestamp ? stored.samples : silence;
         for (size_t f = 0; f < blockFrames; ++f)
