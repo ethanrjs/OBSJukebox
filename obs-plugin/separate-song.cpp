@@ -574,8 +574,12 @@ struct SongSource {
     struct MusicBlock {
         uint64_t timestamp;
         AudioBlock samples{};
+        uint64_t generation = 0;
     };
     std::mutex musicMutex;
+    // Bumped when the source stops or starts, so a block rendered before the transition can never
+    // reach the speakers after it. The output thread bumps it; the decoder stamps every block.
+    std::atomic<uint64_t> musicGeneration{0};
     std::condition_variable musicReady;
     std::deque<MusicBlock> musicQueue;
     std::atomic<uint64_t> wantedTimestamp{0};
@@ -583,7 +587,8 @@ struct SongSource {
     std::atomic<int> testOutputDelayMs{0};
     std::atomic<unsigned> testStatCount{0};
     std::atomic<unsigned> testVoiceCount{0};
-    std::atomic<unsigned> testChainResets{0};
+    std::atomic<unsigned> testMusicResets{0};
+    std::atomic<unsigned> testEffectsResets{0};
 #endif
     explicit SongSource(obs_source_t *s)
         : source(s), linkReceiver(receiver) {}
@@ -646,6 +651,7 @@ struct SongSource {
     PitchChain effectsChain{true}; // the SFX stages after the tap; output thread only, preallocated
     uint64_t effectsSession = 0;
     bool effectsActive = false; // output thread only
+    bool outputStarted = false; // output thread only; the first block is not a reactivation
     bool decoderActive = false; // decoder thread only
 #if defined(__linux__)
     LinuxPaths paths;
@@ -784,7 +790,7 @@ struct SongSource {
     // Drops what the decoder thread's stages hold for blocks that will never reach the speakers.
     void resetMusicChains() {
 #ifdef OBS_JUKEBOX_QA
-        ++testChainResets;
+        ++testMusicResets;
 #endif
         for (auto &voice : voices)
             if (voice) {
@@ -797,7 +803,7 @@ struct SongSource {
     // Drops what the output thread's effects stage holds across a gap in its output.
     void resetEffectsChain() {
 #ifdef OBS_JUKEBOX_QA
-        ++testChainResets;
+        ++testEffectsResets;
 #endif
         effectsChain.reset();
         effectsSession = 0;
@@ -876,9 +882,11 @@ struct SongSource {
     void decodeMusic() {
         configureAudioThread();
         uint64_t timestamp = wantedTimestamp.load();
+        uint64_t decoderGeneration = musicGeneration.load();
         while (!stop) {
             const bool nowActive = active.load();
-            if (nowActive != decoderActive) {
+            const auto generation = musicGeneration.load();
+            if (nowActive != decoderActive || generation != decoderGeneration) {
                 resetMusicChains();
                 if (nowActive) {
                     // A block rendered before the source was deactivated must not play on resume.
@@ -886,6 +894,7 @@ struct SongSource {
                     musicQueue.clear();
                 }
                 decoderActive = nowActive;
+                decoderGeneration = generation;
             }
             auto wanted = wantedTimestamp.load();
             if (timestamp < wanted || (timestamp - wanted) % blockNs != 0) {
@@ -910,7 +919,7 @@ struct SongSource {
                 while (!musicQueue.empty() && musicQueue.front().timestamp < wantedTimestamp.load())
                     musicQueue.pop_front();
                 if (musicQueue.size() < 4)
-                    musicQueue.push_back({timestamp, audio});
+                    musicQueue.push_back({timestamp, audio, decoderGeneration});
                 else
                     dropped = true;
             }
@@ -927,15 +936,33 @@ struct SongSource {
     // ready in time, plus effects.
     AudioBlock mixBlock(uint64_t timestamp) {
         AudioBlock audio{};
+        const bool outputActive = active.load();
+        if (!outputStarted) {
+            effectsActive = outputActive;
+            outputStarted = true;
+        } else if (outputActive != effectsActive) {
+            // A source that was deactivated must not replay audio it held before the gap. Bumping
+            // the generation also rejects a block the decoder rendered before it saw the change.
+            if (outputActive)
+                musicGeneration.fetch_add(1);
+            resetEffectsChain();
+            {
+                std::lock_guard lock(musicMutex);
+                musicQueue.clear();
+            }
+            effectsActive = outputActive;
+        }
         {
             // Only fixed-size PCM copies and at most four queue removals occur
             // under this lock. Decoder/file operations never hold it. A try-lock
             // here would turn harmless microsecond contention into a silent block.
             std::lock_guard lock(musicMutex);
-            while (!musicQueue.empty() && musicQueue.front().timestamp < timestamp)
+            const auto generation = musicGeneration.load();
+            while (!musicQueue.empty() &&
+                   (musicQueue.front().timestamp < timestamp || musicQueue.front().generation != generation))
                 musicQueue.pop_front();
             if (!musicQueue.empty() && musicQueue.front().timestamp == timestamp) {
-                if (active)
+                if (outputActive)
                     audio = musicQueue.front().samples;
                 musicQueue.pop_front();
             }
@@ -943,17 +970,6 @@ struct SongSource {
         // SFX never waits for music decoding, opening, seeking or path resolution. Effects
         // ignore staleness: they arrive from FMOD's mixer thread even while GD's main thread
         // (which sends status packets) stalls, and stop on their own when GD does.
-        const bool outputActive = active.load();
-        if (outputActive != effectsActive) {
-            // A source that was deactivated must not replay audio it held before the gap.
-            resetEffectsChain();
-            if (outputActive) {
-                // The decoder thread's reset may not have run yet; drop any block it queued before.
-                std::lock_guard lock(musicMutex);
-                musicQueue.clear();
-            }
-            effectsActive = outputActive;
-        }
         if (outputActive) {
             AudioBlock effects{};
             // Only the global packet carries the game's effects state; a voice packet never does.
@@ -1002,8 +1018,14 @@ struct SongSource {
             if (next < now - std::chrono::milliseconds(100)) {
                 next = now;
                 timestamp = os_gettime_ns() - bufferingNs;
-                // Output blocks were skipped; the effects stage's held audio belongs to them.
+                // Output blocks were skipped; nothing staged for them may play. The decoder resets
+                // its chains when it sees the new generation.
+                musicGeneration.fetch_add(1);
                 resetEffectsChain();
+                {
+                    std::lock_guard lock(musicMutex);
+                    musicQueue.clear();
+                }
             }
             wantedTimestamp = timestamp;
             musicReady.notify_one();

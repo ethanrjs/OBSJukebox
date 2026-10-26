@@ -64,7 +64,7 @@ static void sourceResyncRecoveryTest() {
         sendFor(20);
         bool heard=false;for(const auto& block:capturedBlocks())for(float sample:block.samples)heard|=sample>.05f;
         check(heard,"output resync test starts audible music");
-        auto resets=source.testChainResets.load();
+        auto resets=source.testMusicResets.load();
         auto delayedAt=os_gettime_ns();source.testOutputDelayMs=180;
         std::strcpy(packet.path,"artifacts/audio-tests/tone-high.wav");packet.position=0;
         sendFor(70);
@@ -75,7 +75,7 @@ static void sourceResyncRecoveryTest() {
         const auto hz=capturedHz(delayedAt+300000000,delayedAt+500000000);
         std::cout<<"Resync settled audio: "<<hz<<" Hz\n";
         check(blocks>=20 && audible>=blocks-2,"music resumes after injected output stall resynchronizes timestamp grid");
-        check(source.testChainResets.load()>resets,"the resync resets the stage history");
+        check(source.testMusicResets.load()>resets,"the resync resets the stage history");
         check(hz>300 && hz<350,"the resync leaves the new stage processing");
     }
     receiver.reset();
@@ -100,7 +100,6 @@ static void sourceToggleRecoveryTest() {
         sendFor(20);
         bool heard=false;for(const auto& block:capturedBlocks())for(float sample:block.samples)heard|=sample>.05f;
         check(heard,"source toggle test starts audible music");
-        auto resets=source.testChainResets.load();
         source.active=false;
         auto offAt=os_gettime_ns();
         sendFor(20);
@@ -108,13 +107,15 @@ static void sourceToggleRecoveryTest() {
         for(const auto& block:capturedBlocks())if(block.wall>offAt+50000000)
             for(float sample:block.samples)silent&=sample==0;
         check(silent,"a deactivated source is silent");
+        // Baseline after the deactivation reset, so this only proves the reactivation reset.
+        auto resets=source.testMusicResets.load();
         std::strcpy(packet.path,"artifacts/audio-tests/tone-high.wav");packet.position=0;
         auto onAt=os_gettime_ns();
         source.active=true;
         sendFor(50);
         const auto hz=capturedHz(onAt+200000000,onAt+400000000);
         std::cout<<"Reactivation settled audio: "<<hz<<" Hz\n";
-        check(source.testChainResets.load()>resets,"reactivation resets the stage history");
+        check(source.testMusicResets.load()>resets,"reactivation resets the stage history");
         check(hz>300 && hz<350,"reactivation leaves the new stage processing");
     }
     receiver.reset();

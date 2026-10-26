@@ -967,6 +967,31 @@ static void pitchStallEffectsTest() {
     if (std::abs(hz - 220) > 18) std::cerr << "stall effects: " << hz << " Hz\n";
     check(std::abs(hz - 220) <= 18, "a main-thread stall keeps the effects stage");
 }
+// A retired voice is destroyed and rebuilt, so its chain starts fresh even for the same stage.
+static void pitchVoiceReuseTest() {
+    Simulation sim;
+    const auto base = sim.now;
+    SongLinkPacket p;
+    p.flags = 3; p.epoch = 1; p.channelID = 0; p.stageCount = 1; p.stages[0] = {.5f, 4096, 0, 95};
+    std::strcpy(p.path, "artifacts/audio-tests/tone.wav");
+    sim.start();
+    while (sim.now < base + 300000000) {
+        heartbeat(sim, p, base);
+        sim.advance(10000000);
+    }
+    sim.advance(700000000); // past 400 ms of staleness, so the voice and its chain are gone
+    p.epoch = 2; p.position = 0;
+    std::strcpy(p.path, "artifacts/audio-tests/tone-high.wav");
+    const auto restartAt = sim.now;
+    sim.send(p, sim.now);
+    while (sim.now < base + 1300000000) {
+        heartbeat(sim, p, base);
+        sim.advance(10000000);
+    }
+    const double hz = firstAudibleHz(sim, restartAt, 2880);
+    if (std::abs(hz - 330) > 25) std::cerr << "voice reuse: " << hz << " Hz\n";
+    check(std::abs(hz - 330) <= 25, "a reused voice starts its stage fresh");
+}
 static void pitchRenderTests() {
     writeTone("artifacts/audio-tests/tone.wav");
     writeTone("artifacts/audio-tests/tone-high.wav", 660);
@@ -983,6 +1008,7 @@ static void pitchRenderTests() {
     pitchStallStagesTest();
     pitchStallEffectsTest();
     pitchPauseHeldTest();
+    pitchVoiceReuseTest();
 }
 
 static void pitchTests() {
