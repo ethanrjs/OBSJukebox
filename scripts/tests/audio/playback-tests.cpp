@@ -1013,11 +1013,11 @@ static void senderTest() {
         "sender carries a voice's stages and drops effects stages");
     check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
         "the sender's voice packet is one the plugin accepts");
-    // An excluded replacement has no stages of its own.
-    s.groupExcluded=true;s.stageCount=0;s.stages[0]={};s.stages[1]={};
+    // An excluded replacement has no stages of its own, even if the snapshot still holds some.
+    s.groupExcluded=true;s.stageCount=2;
     b.publish(s);
     check((published.flags&8) && published.stageCount==0,
-        "sender marks an excluded replacement voice");
+        "sender marks an excluded replacement voice and drops its stages");
     check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
         "the sender's excluded packet is one the plugin accepts");
     // The global packet carries music and effects stages and never the voice-only flag.

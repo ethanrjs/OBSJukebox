@@ -85,7 +85,8 @@ void Bridge::publish(const Snapshot &s) {
     copyText(p.status, s.status);
     copyText(p.level, s.level);
     copyText(p.song, s.song);
-    p.stageCount = std::min<uint8_t>(s.stageCount, 8);
+    // An excluded voice has no stages of its own, as the receiver requires.
+    p.stageCount = s.channelID >= 0 && s.groupExcluded ? 0 : std::min<uint8_t>(s.stageCount, 8);
     std::copy_n(s.stages.begin(), p.stageCount, p.stages);
     // Effects stages belong to the global packet; a voice packet carries none, as the receiver
     // requires. The flag is voice-only too.
