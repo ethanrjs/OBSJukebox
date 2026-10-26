@@ -7,6 +7,9 @@
 #include "../../../src/Bridge.hpp"
 #include "../../../src/TapClock.hpp"
 #include "../../../src/Utf8.hpp"
+#ifdef _WIN32
+#include <timeapi.h>
+#endif
 
 static SongLinkPacket published;
 static int captureSend(SongSocket,const char* data,int size,int,const sockaddr*,
@@ -52,7 +55,7 @@ static void resetOutput(){std::lock_guard lock(capturedMutex);captured.clear();}
 // What it leaves out: music renders at output time, about 20 ms later than the real decoder thread
 // does, and clock probes have no round trip. Clock::now() is still real time, so the retry and
 // recovery timers and the "connected" test don't follow the simulated clock. The offline receiver
-// reports the game link as unavailable. run() and the decode queue only run in the real-thread tests.
+// reports the game link as unavailable. run() and its two workers only run in the real-thread tests.
 struct Simulation {
     // A game whose clock is `offset` ns from OBS's. Songs and effects come from separate ports.
     struct Game {
@@ -132,8 +135,9 @@ private:
         receiver->handle(static_cast<const unsigned char*>(data),size,from,now);
     }
     void renderNext() {
-        AudioBlock music{};source->renderMusic(next,music,now);
-        {std::lock_guard lock(source->musicMutex);source->musicQueue.push_back({next,music});}
+        AudioBlock music{},effects{};source->renderMusic(next,music,now);source->renderEffects(next,effects);
+        const auto generation=source->outputGeneration.load();
+        source->musicBlocks.push(next,music,generation,next);source->effectsBlocks.push(next,effects,generation,next);
         auto audio=source->mixBlock(next);
         output.push_back({next,now,{audio.begin(),audio.end()}});
         next+=SongSource::blockNs;
@@ -1058,11 +1062,16 @@ int main(int argc,char** argv){
 #endif
 #ifdef _WIN32
     _putenv_s("OBS_JUKEBOX_TEST_PORT","49177");
+    // libobs's DllMain asks for 1 ms timers (util/platform-windows.c), so in OBS the audio threads
+    // wake on time. Without it Windows wakes them on 15.6 ms ticks, which OBS never does.
+    timeBeginPeriod(1);
 #else
     setenv("OBS_JUKEBOX_TEST_PORT","49177",1);
 #endif
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
+    if(std::getenv("OBS_JUKEBOX_BUDGET_ONLY")){pitchBudgetProbe();return failures?1:0;}
+    if(std::getenv("OBS_JUKEBOX_DEADLINE_ONLY")){effectsDelayTest(true);effectsDelayTest(false);musicDeadlineTest(true);pitchStressTest();return failures?1:0;}
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();sourceToggleRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
     pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);oldModTest(true,false,5);newModTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
@@ -1075,7 +1084,7 @@ int main(int argc,char** argv){
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();
     if(timing){
         sourceResyncRecoveryTest();sourceToggleRecoveryTest();decoderWatchdogBackoffTest();
-        musicDeadlineTest(false);musicDeadlineTest(true);
+        musicDeadlineTest(false);musicDeadlineTest(true);effectsDelayTest(true);effectsDelayTest(false);pitchStressTest();
     }else std::cout<<"Skipped the timing tests\n";
     return failures?1:0;
 }

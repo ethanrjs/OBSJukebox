@@ -410,6 +410,21 @@ static void pitchAllocationTest() {
     pitchCountingAllocations = false;
     check(pitchAllocationCount == 0 && pitchFreeCount == 0,
           "pitch stages never allocate or free during processing or reset");
+    // The output thread's effects chain is built with all eight slots before it starts.
+    PitchStage eight[8];
+    for (unsigned i = 0; i < 8; ++i)
+        eight[i] = {.8f + float(i) * .02f, 4096, 0, 200 + i};
+    PitchChain effects(true, 480);
+    effects.process(audio.data(), 480, eight, 8);
+    pitchAllocationCount = pitchFreeCount = 0;
+    pitchCountingAllocations = true;
+    for (int i = 0; i < 3; ++i)
+        effects.process(audio.data(), 480, eight, 8);
+    effects.reset();
+    effects.process(audio.data(), 480, eight, 8);
+    pitchCountingAllocations = false;
+    check(pitchAllocationCount == 0 && pitchFreeCount == 0,
+          "eight preallocated effects stages never allocate during processing or reset");
 }
 
 // Invalid calls cannot be reached through the wire, but must not read or write outside the buffer or

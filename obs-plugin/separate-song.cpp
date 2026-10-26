@@ -544,6 +544,14 @@ template <class Run> static void forEachRun(const std::vector<SongLinkPacket> &w
             run(p, first, end);
     }
 }
+#ifdef OBS_JUKEBOX_QA
+// A lock-free maximum for the output thread's QA counters; no allocation or logging there.
+static void qaMax(std::atomic<uint64_t> &value, uint64_t next) {
+    auto current = value.load(std::memory_order_relaxed);
+    while (next > current && !value.compare_exchange_weak(current, next, std::memory_order_relaxed)) {
+    }
+}
+#endif
 // Applies one run's stages to a chain, starting fresh when the run belongs to a new process session.
 // Only the thread that owns the chain calls this, so a session boundary never carries FIFO state.
 static void processStages(PitchChain &chain, uint64_t &session, uint64_t id, float *audio, size_t frames,
@@ -565,30 +573,74 @@ struct SongSource {
     std::mutex mutex;
     static constexpr const char *noSongDetail = "Select the OBS checkbox beside a Jukebox song.";
     std::string detail = noSongDetail;
-    std::thread worker, decoderWorker;
+    std::thread worker, decoderWorker, effectsWorker;
     std::shared_ptr<Receiver> linkReceiver;
     static constexpr uint64_t blockNs = blockFrames * 1000000000ULL / blockRate, bufferingNs = 40000000,
                               staleNs = 400000000;
-    // The output thread owns no decoder or filesystem object. A bounded queue
-    // carries timestamped music blocks; missed deadlines produce silence while SFX continues.
-    struct MusicBlock {
-        uint64_t timestamp;
-        AudioBlock samples{};
-        uint64_t generation = 0;
+    // The output thread owns no decoder, filesystem object or pitch stage. Two workers render
+    // timestamped blocks ahead of it, one for music and one for effects, each into its own bounded
+    // queue; a block that is not ready in time plays as silence and the other keeps playing.
+    struct BlockQueue {
+        struct Block {
+            uint64_t timestamp;
+            AudioBlock samples{};
+            uint64_t generation = 0;
+        };
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::deque<Block> blocks;
+
+        void clear() {
+            std::lock_guard lock(mutex);
+            blocks.clear();
+        }
+        // Queues a block unless four already wait. False means the output will never play it.
+        bool push(uint64_t timestamp, const AudioBlock &samples, uint64_t generation, uint64_t wanted) {
+            std::lock_guard lock(mutex);
+            while (!blocks.empty() && blocks.front().timestamp < wanted)
+                blocks.pop_front();
+            if (blocks.size() >= 4)
+                return false;
+            blocks.push_back({timestamp, samples, generation});
+            return true;
+        }
+        // Takes the block for `timestamp` rendered in `generation`, dropping any older one. Only
+        // fixed-size copies and at most four removals happen under the lock, and no worker holds it
+        // while rendering. A try-lock would turn harmless microsecond contention into silence.
+        bool take(uint64_t timestamp, uint64_t generation, AudioBlock &out) {
+            std::lock_guard lock(mutex);
+            while (!blocks.empty() && (blocks.front().timestamp < timestamp || blocks.front().generation != generation))
+                blocks.pop_front();
+            if (blocks.empty() || blocks.front().timestamp != timestamp)
+                return false;
+            out = blocks.front().samples;
+            blocks.pop_front();
+            return true;
+        }
+        // Taking the lock between storing the wanted timestamp and notifying keeps a worker that is
+        // checking its wait condition from missing the change.
+        void wake() {
+            { std::lock_guard lock(mutex); }
+            ready.notify_all();
+        }
     };
-    std::mutex musicMutex;
-    // Bumped when the source stops or starts, so a block rendered before the transition can never
-    // reach the speakers after it. The output thread bumps it; the decoder stamps every block.
-    std::atomic<uint64_t> musicGeneration{0};
-    std::condition_variable musicReady;
-    std::deque<MusicBlock> musicQueue;
+    BlockQueue musicBlocks, effectsBlocks;
+    // Bumped when the source starts again or the output resynchronizes, so a block rendered before
+    // that can never reach the speakers after it. The output thread bumps it; workers stamp blocks.
+    std::atomic<uint64_t> outputGeneration{0};
     std::atomic<uint64_t> wantedTimestamp{0};
 #ifdef OBS_JUKEBOX_QA
-    std::atomic<int> testOutputDelayMs{0};
+    std::atomic<int> testOutputDelayMs{0}, testEffectsDelayMs{0};
     std::atomic<unsigned> testStatCount{0};
     std::atomic<unsigned> testVoiceCount{0};
     std::atomic<unsigned> testMusicResets{0};
     std::atomic<unsigned> testEffectsResets{0};
+    std::atomic<uint64_t> testMaxMixNs{0}, testWakeMaxNs{0};
+    std::atomic<uint64_t> testMaxQueueNs{0}, testMaxWindowNs{0}, testMaxEffectsMixNs{0}, testMaxChainNs{0};
+    std::atomic<uint64_t> testMaxResetNs{0};
+    std::atomic<unsigned> testMusicMisses{0}, testMusicMissesRaw{0}, testEffectsMisses{0}, testEffectsMissesRaw{0};
+    std::atomic<bool> testMeasure{false}, testResetPending{false};
+    std::array<std::atomic<unsigned>, 16> testMixBuckets{};
 #endif
     explicit SongSource(obs_source_t *s)
         : source(s), linkReceiver(receiver) {}
@@ -648,11 +700,10 @@ struct SongSource {
     AudioBlock voiceAudio{};
     PitchChain groupChain;         // the music group's stages; decoder thread only
     uint64_t groupSession = 0;
-    PitchChain effectsChain{true}; // the SFX stages after the tap; output thread only, preallocated
+    PitchChain effectsChain{true}; // the SFX stages after the tap; effects worker only, preallocated
     uint64_t effectsSession = 0;
-    bool effectsActive = false; // output thread only
+    bool outputActive = false;  // output thread only
     bool outputStarted = false; // output thread only; the first block is not a reactivation
-    bool decoderActive = false; // decoder thread only
 #if defined(__linux__)
     LinuxPaths paths;
 #endif
@@ -800,7 +851,7 @@ struct SongSource {
         groupChain.reset();
         groupSession = 0;
     }
-    // Drops what the output thread's effects stage holds across a gap in its output.
+    // Drops what the effects stages hold across a gap in the effects worker's blocks.
     void resetEffectsChain() {
 #ifdef OBS_JUKEBOX_QA
         ++testEffectsResets;
@@ -879,112 +930,168 @@ struct SongSource {
                                                (latest.attempt > 0 ? " | Attempt " + std::to_string(latest.attempt)
                                                                    : "");
     }
-    void decodeMusic() {
-        configureAudioThread();
-        uint64_t timestamp = wantedTimestamp.load();
-        uint64_t decoderGeneration = musicGeneration.load();
+    // A worker's loop: renders consecutive blocks into `queue`, at most `lead` blocks ahead of the
+    // block the output thread mixes next. Whenever the blocks it renders stop following each other on
+    // the output (the source stops or starts, the output resynchronizes, a block is never played),
+    // what the stages hold belongs to audio OBS will not play, so `reset` starts them over.
+    template <class Render, class Reset>
+    void produceBlocks(BlockQueue &queue, uint64_t lead, Render render, Reset reset) {
+        uint64_t timestamp = wantedTimestamp.load(), generation = outputGeneration.load();
+        bool wasActive = false;
         while (!stop) {
             const bool nowActive = active.load();
-            const auto generation = musicGeneration.load();
-            if (nowActive != decoderActive || generation != decoderGeneration) {
-                resetMusicChains();
-                if (nowActive) {
-                    // A block rendered before the source was deactivated must not play on resume.
-                    std::lock_guard lock(musicMutex);
-                    musicQueue.clear();
-                }
-                decoderActive = nowActive;
-                decoderGeneration = generation;
+            const auto current = outputGeneration.load();
+            if (nowActive != wasActive || current != generation) {
+                reset();
+                if (nowActive)
+                    queue.clear(); // a block rendered before the source was deactivated must not play
+                wasActive = nowActive;
+                generation = current;
             }
-            auto wanted = wantedTimestamp.load();
+            const auto wanted = wantedTimestamp.load();
             if (timestamp < wanted || (timestamp - wanted) % blockNs != 0) {
-                // The timeline jumped: what the stages hold belongs to blocks OBS never played.
                 timestamp = wanted;
-                resetMusicChains();
-                std::lock_guard lock(musicMutex);
-                musicQueue.clear();
+                reset();
+                queue.clear();
             }
-            if (timestamp > wanted + 2 * blockNs) {
-                std::unique_lock lock(musicMutex);
-                musicReady.wait_for(lock, std::chrono::milliseconds(50), [&] {
-                    return stop || timestamp <= wantedTimestamp.load() + 2 * blockNs;
+            if (timestamp > wanted + lead * blockNs) {
+                std::unique_lock lock(queue.mutex);
+                queue.ready.wait_for(lock, std::chrono::milliseconds(50), [&] {
+                    return stop || timestamp <= wantedTimestamp.load() + lead * blockNs;
                 });
                 continue;
             }
             AudioBlock audio{};
-            renderMusic(timestamp, audio, os_gettime_ns());
-            bool dropped = false;
-            {
-                std::lock_guard lock(musicMutex);
-                while (!musicQueue.empty() && musicQueue.front().timestamp < wantedTimestamp.load())
-                    musicQueue.pop_front();
-                if (musicQueue.size() < 4)
-                    musicQueue.push_back({timestamp, audio, decoderGeneration});
-                else
-                    dropped = true;
-            }
-            // OBS skipped this block, so the stages kept audio that belongs to it. Start fresh.
-            if (dropped)
-                resetMusicChains();
+            render(timestamp, audio);
+            if (!queue.push(timestamp, audio, generation, wantedTimestamp.load()))
+                reset();
             timestamp += blockNs;
         }
+    }
+    // Music decodes up to two blocks ahead, since opening, seeking and decoding take variable time.
+    void decodeMusic() {
+        configureAudioThread();
+        produceBlocks(musicBlocks, 2, [&](uint64_t t, AudioBlock &audio) { renderMusic(t, audio, os_gettime_ns()); },
+                      [&] { resetMusicChains(); });
         // On Windows each decoder started COM on this thread when it opened, so it has to close here too.
         for (auto &voice : voices)
             voice.reset();
     }
-    // The output block starting at `timestamp`: the decoder thread's music for it, if that is
-    // ready in time, plus effects.
+    // Effects with stages render one block ahead of the output: enough for an output thread that
+    // wakes on 15.6 ms timer ticks and mixes two blocks at once. Effects arrive over the network just
+    // in time, so that lead costs margin: the last frame of a staged block has to arrive within 10 ms
+    // of its timestamp instead of 30. A block without stages never waits for this worker; the output
+    // thread mixes it itself (mixBlock), with the full margin.
+    void renderEffectsBlocks() {
+        configureAudioThread();
+        produceBlocks(effectsBlocks, 1, [&](uint64_t t, AudioBlock &audio) {
+            if (active)
+                renderEffects(t, audio);
+        }, [&] { resetEffectsChain(); });
+    }
+    // The game's effects for the block starting at `timestamp`, through the SFX stages after the tap.
+    // SFX never waits for music decoding, opening, seeking or path resolution. Effects ignore
+    // staleness: they arrive from FMOD's mixer thread even while GD's main thread (which sends
+    // status packets) stalls, and stop on their own when GD does.
+    void renderEffects(uint64_t timestamp, AudioBlock &effects) {
+#ifdef OBS_JUKEBOX_QA
+        std::this_thread::sleep_for(std::chrono::milliseconds(testEffectsDelayMs.exchange(0)));
+        const auto windowBegin = std::chrono::steady_clock::now();
+#endif
+        // Only the global packet carries the game's effects state; a voice packet never does.
+        // With no global history the SFX stage does not run and effects are not mixed.
+        auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
+#ifdef OBS_JUKEBOX_QA
+        qaMax(testMaxWindowNs, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - windowBegin)
+                                           .count()));
+#endif
+        forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
+            if (p.flags & 1) {
+#ifdef OBS_JUKEBOX_QA
+                const auto mixBegin = std::chrono::steady_clock::now();
+#endif
+                linkReceiver->mixEffects(effects.data() + first * 2, end - first, frameTime(timestamp, first),
+                                         p.effectsVolume);
+#ifdef OBS_JUKEBOX_QA
+                qaMax(testMaxEffectsMixNs, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                      std::chrono::steady_clock::now() - mixBegin)
+                                                      .count()));
+#endif
+            }
+#ifdef OBS_JUKEBOX_QA
+            const auto chainBegin = std::chrono::steady_clock::now();
+#endif
+            processStages(effectsChain, effectsSession, p.sessionID, effects.data() + first * 2, end - first,
+                          p.effectsStages, p.effectsStageCount);
+#ifdef OBS_JUKEBOX_QA
+            const auto chainNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                              std::chrono::steady_clock::now() - chainBegin)
+                                              .count());
+            qaMax(testMaxChainNs, chainNs);
+            if (testResetPending.exchange(false))
+                qaMax(testMaxResetNs, chainNs);
+#endif
+        });
+    }
+    // The output block starting at `timestamp`: the music worker's block and the effects, each
+    // silent if it is not ready in time.
     AudioBlock mixBlock(uint64_t timestamp) {
-        AudioBlock audio{};
-        const bool outputActive = active.load();
+        const bool nowActive = active.load();
         if (!outputStarted) {
-            effectsActive = outputActive;
+            outputActive = nowActive;
             outputStarted = true;
-        } else if (outputActive != effectsActive) {
+        } else if (nowActive != outputActive) {
             // A source that was deactivated must not replay audio it held before the gap. Bumping
-            // the generation also rejects a block the decoder rendered before it saw the change.
-            if (outputActive)
-                musicGeneration.fetch_add(1);
-            resetEffectsChain();
-            {
-                std::lock_guard lock(musicMutex);
-                musicQueue.clear();
-            }
-            effectsActive = outputActive;
+            // the generation also rejects a block a worker rendered before it saw the change.
+            if (nowActive)
+                outputGeneration.fetch_add(1);
+            musicBlocks.clear();
+            effectsBlocks.clear();
+            outputActive = nowActive;
         }
-        {
-            // Only fixed-size PCM copies and at most four queue removals occur
-            // under this lock. Decoder/file operations never hold it. A try-lock
-            // here would turn harmless microsecond contention into a silent block.
-            std::lock_guard lock(musicMutex);
-            const auto generation = musicGeneration.load();
-            while (!musicQueue.empty() &&
-                   (musicQueue.front().timestamp < timestamp || musicQueue.front().generation != generation))
-                musicQueue.pop_front();
-            if (!musicQueue.empty() && musicQueue.front().timestamp == timestamp) {
-                if (outputActive)
-                    audio = musicQueue.front().samples;
-                musicQueue.pop_front();
-            }
-        }
-        // SFX never waits for music decoding, opening, seeking or path resolution. Effects
-        // ignore staleness: they arrive from FMOD's mixer thread even while GD's main thread
-        // (which sends status packets) stalls, and stop on their own when GD does.
-        if (outputActive) {
-            AudioBlock effects{};
-            // Only the global packet carries the game's effects state; a voice packet never does.
-            // With no global history the SFX stage does not run and effects are not mixed.
-            auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
+        AudioBlock audio{}, effects{};
+#ifdef OBS_JUKEBOX_QA
+        const auto queueBegin = std::chrono::steady_clock::now();
+#endif
+        const auto generation = outputGeneration.load();
+        // Only the QA miss counters read whether each block arrived; a missing one is silence.
+        [[maybe_unused]] const bool hasMusic = musicBlocks.take(timestamp, generation, audio);
+        [[maybe_unused]] const bool hasEffects = effectsBlocks.take(timestamp, generation, effects);
+#ifdef OBS_JUKEBOX_QA
+        qaMax(testMaxQueueNs, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - queueBegin)
+                                           .count()));
+#endif
+        if (!nowActive)
+            return {};
+        // Without SFX stages the effects are only a mix, cheap enough for this thread, and mixing
+        // them here keeps the full margin for late packets. The worker's copy is the same audio.
+        const auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
+        bool staged = false;
+        forEachRun(window, timestamp,
+                   [&](const SongLinkPacket &p, size_t, size_t) { staged |= p.effectsStageCount != 0; });
+        if (!staged) {
+            effects = {};
             forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
                 if (p.flags & 1)
                     linkReceiver->mixEffects(effects.data() + first * 2, end - first, frameTime(timestamp, first),
                                              p.effectsVolume);
-                processStages(effectsChain, effectsSession, p.sessionID, effects.data() + first * 2,
-                              end - first, p.effectsStages, p.effectsStageCount);
             });
-            for (size_t i = 0; i < audio.size(); ++i)
-                audio[i] += effects[i];
         }
+#ifdef OBS_JUKEBOX_QA
+        const bool measured = testMeasure.load(std::memory_order_relaxed);
+        if (!hasMusic) {
+            ++testMusicMissesRaw;
+            testMusicMisses += measured;
+        }
+        if (staged && !hasEffects) {
+            ++testEffectsMissesRaw;
+            testEffectsMisses += measured;
+        }
+#endif
+        for (size_t i = 0; i < audio.size(); ++i)
+            audio[i] += effects[i];
         // A corrupt float WAV or a hostile packet must not put NaN or Inf into OBS's mix.
         for (auto &sample : audio)
             if (!std::isfinite(sample))
@@ -997,13 +1104,26 @@ struct SongSource {
         uint64_t timestamp = os_gettime_ns() - bufferingNs + blockNs;
         wantedTimestamp = timestamp;
         decoderWorker = std::thread([this] { decodeMusic(); });
+        effectsWorker = std::thread([this] { renderEffectsBlocks(); });
         auto next = Clock::now() + std::chrono::nanoseconds(blockNs);
         while (!stop) {
             std::this_thread::sleep_until(next);
 #ifdef OBS_JUKEBOX_QA
+            qaMax(testWakeMaxNs, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                             std::chrono::steady_clock::now() - next)
+                                             .count()));
             std::this_thread::sleep_for(std::chrono::milliseconds(testOutputDelayMs.exchange(0)));
+            const auto mixBegin = std::chrono::steady_clock::now();
 #endif
             auto audio = mixBlock(timestamp);
+#ifdef OBS_JUKEBOX_QA
+            const auto mixNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - mixBegin)
+                                           .count());
+            qaMax(testMaxMixNs, mixNs);
+            if (mixNs > 0)
+                ++testMixBuckets[std::min<uint64_t>(mixNs / 125000, 15)];
+#endif
             obs_source_audio block{};
             block.data[0] = reinterpret_cast<const uint8_t *>(audio.data());
             block.frames = blockFrames;
@@ -1018,24 +1138,24 @@ struct SongSource {
             if (next < now - std::chrono::milliseconds(100)) {
                 next = now;
                 timestamp = os_gettime_ns() - bufferingNs;
-                // Output blocks were skipped; nothing staged for them may play. The decoder resets
-                // its chains when it sees the new generation.
-                musicGeneration.fetch_add(1);
-                resetEffectsChain();
-                {
-                    std::lock_guard lock(musicMutex);
-                    musicQueue.clear();
-                }
+                // Output blocks were skipped; nothing staged for them may play. The workers reset
+                // their chains when they see the new generation.
+                outputGeneration.fetch_add(1);
+                musicBlocks.clear();
+                effectsBlocks.clear();
             }
             wantedTimestamp = timestamp;
-            musicReady.notify_one();
+            musicBlocks.wake();
+            effectsBlocks.wake();
         }
-        if (decoderWorker.joinable())
-            decoderWorker.join();
+        for (auto *thread : {&decoderWorker, &effectsWorker})
+            if (thread->joinable())
+                thread->join();
     }
     ~SongSource() {
         stop = true;
-        musicReady.notify_all();
+        musicBlocks.wake();
+        effectsBlocks.wake();
         if (worker.joinable())
             worker.join();
     }
