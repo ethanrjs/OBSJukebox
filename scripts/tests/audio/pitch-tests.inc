@@ -979,7 +979,9 @@ static void pitchVoiceReuseTest() {
         heartbeat(sim, p, base);
         sim.advance(10000000);
     }
-    sim.advance(700000000); // past 400 ms of staleness, so the voice and its chain are gone
+    // Restart just after the 400 ms staleness point, before a surviving stage could drain its
+    // 4096-frame history. Deleting the voice reset must leave the old 220 Hz audible here.
+    sim.advance(410000000);
     p.epoch = 2; p.position = 0;
     std::strcpy(p.path, "artifacts/audio-tests/tone-high.wav");
     const auto restartAt = sim.now;
