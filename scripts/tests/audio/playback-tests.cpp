@@ -687,8 +687,12 @@ static void malformedV6Test() {
     p.stageCount=9;rejected(p,"v6 rejects more than eight stages");
     p.stageCount=1;p.stageReserved[0]=1;rejected(p,"v6 rejects nonzero stage reserve");
     p.stageReserved[0]=0;p.stageReserved[1]=1;rejected(p,"v6 rejects nonzero stage reserve padding");
-    p.stageReserved[1]=0;p=SongLinkPacket{};p.flags=1;p.effectsStageCount=9;
-    rejected(p,"v6 rejects more than eight effects stages");
+    // The count limit alone must reject: eight valid global stages, then a count of nine.
+    p.stageReserved[1]=0;p=SongLinkPacket{};p.flags=1;p.epoch=723;p.channelID=-1;p.effectsStageCount=8;
+    for(unsigned i=0;i<8;++i)p.effectsStages[i]={.5f,4096,0,50+i};
+    sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==723,"v6 accepts eight effects stages in the global packet");
+    p.effectsStageCount=9;rejected(p,"v6 rejects more than eight effects stages");
     p=SongLinkPacket{};p.flags=1;p.epoch=722;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
     p.flags=16;rejected(p,"v6 rejects unknown flag bits");
     p.flags=8;rejected(p,"v6 rejects an excluded voice that still lists stages");
