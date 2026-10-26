@@ -975,13 +975,15 @@ static void pitchVoiceReuseTest() {
     p.flags = 3; p.epoch = 1; p.channelID = 0; p.stageCount = 1; p.stages[0] = {.5f, 4096, 0, 95};
     std::strcpy(p.path, "artifacts/audio-tests/tone.wav");
     sim.start();
+    uint64_t lastSent = base;
     while (sim.now < base + 300000000) {
         heartbeat(sim, p, base);
+        lastSent = sim.now;
         sim.advance(10000000);
     }
     // Restart just after the staleness point, before a surviving stage could drain its 4096-frame
     // history. Deleting the voice reset must leave the old 220 Hz audible here.
-    const auto retiredAt = base + 290000000 + SongSource::staleNs;
+    const auto retiredAt = lastSent + SongSource::staleNs;
     sim.advance(retiredAt + 20000000 - sim.now);
     p.epoch = 2; p.position = 0;
     std::strcpy(p.path, "artifacts/audio-tests/tone-high.wav");
