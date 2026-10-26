@@ -576,26 +576,34 @@ static void pitchRenderNoGlobalTest() {
     if (std::abs(hz - 440) > 18) std::cerr << "no global: " << hz << " Hz\n";
     check(std::abs(hz - 440) <= 18, "without a global packet the music passes through unchanged");
 }
-// Two voices in one block: the group stage runs once on the eligible voice, and an excluded voice
-// reaches the output unshifted. Both are compared exactly against the same voices played alone.
-static void pitchRenderTwoVoiceTest() {
-    auto run = [&](bool eligibleOn, bool excludedOn, std::vector<std::vector<float>> &blocks,
-                   std::vector<uint64_t> &times) {
+// Two eligible voices and one excluded voice sharing a block. The group stage must run once on the
+// eligible sum, and the excluded voice must be added after it. Each part is compared exactly
+// against the same voices played alone, with the dry sum fed through one offline chain.
+static void pitchRenderGroupBusTest() {
+    auto run = [&](bool firstOn, bool secondOn, bool excludedOn, bool staged,
+                   std::vector<std::vector<float>> &blocks, std::vector<uint64_t> &times) {
         Simulation sim;
         const auto base = sim.now;
         SongLinkPacket global;
         global.channelID = -1; global.flags = 1; global.epoch = 1;
-        global.stageCount = 1; global.stages[0] = {.5f, 1024, 0, 12};
-        SongLinkPacket eligible;
-        eligible.channelID = 0; eligible.flags = 3; eligible.epoch = 1;
-        std::strcpy(eligible.path, "artifacts/audio-tests/tone.wav");
-        SongLinkPacket excluded = eligible;
-        excluded.channelID = 1; excluded.flags = 3 | 8;
-        std::strcpy(excluded.path, "artifacts/audio-tests/tone-high.wav");
+        if (staged) {
+            global.stageCount = 1;
+            global.stages[0] = {.5f, 1024, 0, 12};
+        }
+        SongLinkPacket first;
+        first.channelID = 0; first.flags = 3; first.epoch = 1;
+        std::strcpy(first.path, "artifacts/audio-tests/tone.wav");
+        SongLinkPacket second = first;
+        second.channelID = 1;
+        std::strcpy(second.path, "artifacts/audio-tests/tone-high.wav");
+        SongLinkPacket excluded = first;
+        excluded.channelID = 2; excluded.flags = 3 | 8;
+        std::strcpy(excluded.path, "artifacts/audio-tests/tone-low.wav");
         sim.start();
         while (sim.now < base + 900000000) {
             heartbeat(sim, global, base);
-            if (eligibleOn) heartbeat(sim, eligible, base);
+            if (firstOn) heartbeat(sim, first, base);
+            if (secondOn) heartbeat(sim, second, base);
             if (excludedOn) heartbeat(sim, excluded, base);
             sim.advance(10000000);
         }
@@ -604,17 +612,39 @@ static void pitchRenderTwoVoiceTest() {
             times.push_back(block.timestamp);
         }
     };
-    std::vector<std::vector<float>> eligible, excluded, both;
-    std::vector<uint64_t> eligibleTimes, excludedTimes, bothTimes;
-    run(true, false, eligible, eligibleTimes);
-    run(false, true, excluded, excludedTimes);
-    run(true, true, both, bothTimes);
-    bool match = both.size() == eligible.size() && both.size() == excluded.size() &&
-                 bothTimes == eligibleTimes && bothTimes == excludedTimes;
-    for (size_t i = 0; match && i < both.size(); ++i)
-        for (size_t f = 0; f < both[i].size(); ++f)
-            match &= both[i][f] == eligible[i][f] + excluded[i][f];
-    check(match, "a group stage runs once on the eligible voice and an excluded voice bypasses it");
+    std::vector<std::vector<float>> first, second, both, excluded, all;
+    std::vector<uint64_t> firstTimes, secondTimes, bothTimes, excludedTimes, allTimes;
+    run(true, false, false, false, first, firstTimes);
+    run(false, true, false, false, second, secondTimes);
+    run(true, true, false, true, both, bothTimes);
+    run(false, false, true, true, excluded, excludedTimes);
+    run(true, true, true, true, all, allTimes);
+    bool audible = false;
+    for (const auto &block : first)
+        for (float sample : block) audible |= std::abs(sample) > .01f;
+    for (const auto &block : second)
+        for (float sample : block) audible |= std::abs(sample) > .01f;
+    check(audible, "the group bus test plays audible music on both eligible voices");
+    // One chain, fed the dry sum block by block, is what the group stage must do to the bus.
+    PitchChain chain;
+    PitchStage stage{.5f, 1024, 0, 12};
+    bool sumMatch = both.size() == first.size() && both.size() == second.size() &&
+                    bothTimes == firstTimes && bothTimes == secondTimes;
+    for (size_t i = 0; sumMatch && i < both.size(); ++i) {
+        auto sum = first[i];
+        for (size_t f = 0; f < sum.size(); ++f)
+            sum[f] += second[i][f];
+        chain.process(sum.data(), blockFrames, &stage, 1);
+        for (size_t f = 0; f < sum.size(); ++f)
+            sumMatch &= both[i][f] == sum[f];
+    }
+    check(sumMatch, "the group stage runs once on the sum of the eligible voices");
+    bool excludedMatch = all.size() == both.size() && all.size() == excluded.size() &&
+                         allTimes == bothTimes && allTimes == excludedTimes;
+    for (size_t i = 0; excludedMatch && i < all.size(); ++i)
+        for (size_t f = 0; f < all[i].size(); ++f)
+            excludedMatch &= all[i][f] == both[i][f] + excluded[i][f];
+    check(excludedMatch, "an excluded voice is added after the group stage");
 }
 // A voice packet is not the global state: with no global packet, effects are not mixed at all.
 static void pitchRenderNoEffectsWithoutGlobalTest() {
@@ -641,12 +671,13 @@ static void pitchRenderNoEffectsWithoutGlobalTest() {
 static void pitchRenderTests() {
     writeTone("artifacts/audio-tests/tone.wav");
     writeTone("artifacts/audio-tests/tone-high.wav", 660);
+    writeTone("artifacts/audio-tests/tone-low.wav", 330);
     pitchRenderChannelTest();
     pitchRenderGroupTest();
     pitchRenderEffectsTest();
     pitchRenderRunTest();
     pitchRenderNoGlobalTest();
-    pitchRenderTwoVoiceTest();
+    pitchRenderGroupBusTest();
     pitchRenderNoEffectsWithoutGlobalTest();
 }
 

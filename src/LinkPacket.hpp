@@ -41,8 +41,10 @@ struct SongLinkPacket {
     // v6. A voice packet carries the stages on its own channel only, in signal order. The global
     // packet (channelID -1) carries the music group's stages, then each parent group up to the
     // master, in `stages`; and the SFX group's post-tap stages, then each parent group up to the
-    // master, in `effectsStages`. The lists never overlap. A voice packet has no effects stages;
-    // flag 8 keeps a replacement song out of the music group's stages.
+    // master, in `effectsStages`. A group on both paths (the master, for one) appears in both
+    // global lists, because each list is applied once to its own bus; a voice's list and the
+    // global lists are disjoint. A voice packet has no effects stages; flag 8 keeps a replacement
+    // song out of the music group's stages.
     uint8_t stageCount = 0;
     uint8_t effectsStageCount = 0;
     uint8_t stageReserved[2]{};
