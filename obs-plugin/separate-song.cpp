@@ -1082,8 +1082,10 @@ struct SongSource {
         mixGameEffects(window, timestamp, now);
         std::lock_guard lock(testDryMutex);
         const auto &stored = testDry[timestamp / blockNs % testDry.size()];
+        // The worker reused the slot for a later block. It renders one block ahead at most, so only
+        // a resync jumping the timeline can do that; this block is not counted.
         if (stored.timestamp > timestamp)
-            return; // the worker has run eight blocks ahead since and reused the slot
+            return;
         static const AudioBlock silence{};
         const auto &rendered = stored.timestamp == timestamp ? stored.samples : silence;
         for (size_t f = 0; f < blockFrames; ++f)
