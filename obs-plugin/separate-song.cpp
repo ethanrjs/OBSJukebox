@@ -593,6 +593,8 @@ struct SongSource {
         size_t fadeIn = declickFrames;   // frames of the current fade-in already played
         std::array<float, declickFrames * 2> tail{};
         size_t tailRead = declickFrames; // next tail frame to mix; declickFrames when empty
+        PitchChain chain;                // this channel's stages, decoder thread only
+        uint64_t chainSession = 0;
 
         // Continues the audio that was playing for declickFrames while fading it to silence,
         // so the next state crossfades in instead of cutting. Call before the decoder seeks or
@@ -628,6 +630,12 @@ struct SongSource {
     // Only the decoder thread touches these (the audio tests call renderMusic from their own thread).
     std::array<std::unique_ptr<Voice>, SONG_LINK_MAX_CHANNELS> voices;
     AudioBlock voiceAudio{};
+    PitchChain groupChain;         // the music group's stages; decoder thread only
+    uint64_t groupSession = 0;
+    PitchChain effectsChain{true}; // the SFX stages after the tap; output thread only, preallocated
+    uint64_t effectsSession = 0;
+    bool effectsActive = false; // output thread only
+    bool decoderActive = false; // decoder thread only
 #if defined(__linux__)
     LinuxPaths paths;
 #endif
@@ -677,10 +685,10 @@ struct SongSource {
         v.loadedWriteTime = modified;
         v.retryAt = Clock::now() + std::chrono::seconds(1);
     }
-    // Adds `frames` frames of one voice, as packet p describes them from `time`, to `output`. A
-    // packet that is no longer live only fades out what was playing.
-    void renderVoice(Voice &v, const SongLinkPacket &p, float *output, size_t frames, uint64_t time,
-                     bool live, std::string &decoderError) {
+    // Renders `frames` frames of one voice, as packet p describes them from `time`, into
+    // `voiceAudio`. A packet that is no longer live only fades out what was playing.
+    void renderVoice(Voice &v, const SongLinkPacket &p, size_t frames, uint64_t time, bool live,
+                     std::string &decoderError) {
         v.lastUsed = p.timestamp;
         if (!live && !v.wasPlaying && v.tailRead >= declickFrames)
             return;
@@ -756,8 +764,6 @@ struct SongSource {
                 v.lastGain = gain;
             }
         v.mixTail(voiceAudio.data(), frames);
-        for (size_t j = 0; j < frames * 2; ++j)
-            output[j] += voiceAudio[j];
         if (p.path[0] && !decoder.error.empty())
             decoderError = decoder.error;
         v.wasPlaying = playing;
@@ -772,6 +778,7 @@ struct SongSource {
         auto latest = link.packet;
         bool connected = link.connected && Clock::now() - link.received < std::chrono::milliseconds(400);
         bool stalled = linkReceiver->mainThreadStalled(now);
+        AudioBlock eligible{}, excluded{};
         for (int channel : linkReceiver->getChannels()) {
             if (channel < 0)
                 continue;
@@ -793,17 +800,40 @@ struct SongSource {
             auto &v = *voices[channel];
             forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
                 size_t stale = stalled ? end : std::clamp(frameAt(timestamp, p.timestamp + staleNs), first, end);
+                auto renderPart = [&](size_t from, size_t to, bool live) {
+                    const size_t frames = to - from;
+                    voiceAudio.fill(0);
+                    renderVoice(v, p, frames, frameTime(timestamp, from), live, decoderError);
+                    if (v.chainSession != p.sessionID) {
+                        v.chain.reset();
+                        v.chainSession = p.sessionID;
+                    }
+                    v.chain.process(voiceAudio.data(), frames, p.stages, p.stageCount);
+                    float *bus = (p.flags & 8) ? excluded.data() : eligible.data();
+                    for (size_t j = 0; j < frames * 2; ++j)
+                        bus[from * 2 + j] += voiceAudio[j];
+                };
                 if (stale > first)
-                    renderVoice(v, p, audio.data() + first * 2, stale - first, frameTime(timestamp, first),
-                                true, decoderError);
+                    renderPart(first, stale, true);
                 if (end > stale)
-                    renderVoice(v, p, audio.data() + stale * 2, end - stale, frameTime(timestamp, stale),
-                                false, decoderError);
+                    renderPart(stale, end, false);
             });
         }
         for (auto &voice : voices)
             if (voice && !stalled && timestamp > voice->lastUsed + staleNs)
                 voice.reset();
+        // The music group's stages, once on the sum of the eligible voices. A replacement voice
+        // that the setting excludes never reaches this bus.
+        auto global = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
+        forEachRun(global, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
+            if (p.sessionID != groupSession) {
+                groupChain.reset();
+                groupSession = p.sessionID;
+            }
+            groupChain.process(eligible.data() + first * 2, end - first, p.stages, p.stageCount);
+        });
+        for (size_t i = 0; i < audio.size(); ++i)
+            audio[i] = eligible[i] + excluded[i];
         bool oldMod = !connected && linkReceiver->oldModSending(now);
         bool newMod = !connected && linkReceiver->newModSending(now);
         std::lock_guard lock(mutex);
@@ -821,11 +851,30 @@ struct SongSource {
         configureAudioThread();
         uint64_t timestamp = wantedTimestamp.load();
         while (!stop) {
+            const bool nowActive = active.load();
+            if (nowActive != decoderActive) {
+                for (auto &voice : voices)
+                    if (voice) {
+                        voice->chain.reset();
+                        voice->chainSession = 0;
+                    }
+                groupChain.reset();
+                groupSession = 0;
+                decoderActive = nowActive;
+            }
             auto wanted = wantedTimestamp.load();
             if (timestamp < wanted || (timestamp - wanted) % blockNs != 0) {
                 timestamp = wanted;
                 std::lock_guard lock(musicMutex);
                 musicQueue.clear();
+                // The timeline jumped: what the stages hold belongs to blocks OBS never played.
+                for (auto &voice : voices)
+                    if (voice) {
+                        voice->chain.reset();
+                        voice->chainSession = 0;
+                    }
+                groupChain.reset();
+                groupSession = 0;
             }
             if (timestamp > wanted + 2 * blockNs) {
                 std::unique_lock lock(musicMutex);
@@ -869,7 +918,14 @@ struct SongSource {
         // SFX never waits for music decoding, opening, seeking or path resolution. Effects
         // ignore staleness: they arrive from FMOD's mixer thread even while GD's main thread
         // (which sends status packets) stalls, and stop on their own when GD does.
-        if (active) {
+        const bool outputActive = active.load();
+        if (outputActive != effectsActive) {
+            // A source that was deactivated must not replay audio it held before the gap.
+            effectsChain.reset();
+            effectsSession = 0;
+            effectsActive = outputActive;
+        }
+        if (outputActive) {
             AudioBlock effects{};
             auto channels = linkReceiver->getChannels();
             int global = std::find(channels.begin(), channels.end(), -1) != channels.end() ? -1 : 0;
@@ -878,6 +934,12 @@ struct SongSource {
                 if (p.flags & 1)
                     linkReceiver->mixEffects(effects.data() + first * 2, end - first, frameTime(timestamp, first),
                                              p.effectsVolume);
+                if (p.sessionID != effectsSession) {
+                    effectsChain.reset();
+                    effectsSession = p.sessionID;
+                }
+                effectsChain.process(effects.data() + first * 2, end - first, p.effectsStages,
+                                     p.effectsStageCount);
             });
             for (size_t i = 0; i < audio.size(); ++i)
                 audio[i] += effects[i];
@@ -915,6 +977,9 @@ struct SongSource {
             if (next < now - std::chrono::milliseconds(100)) {
                 next = now;
                 timestamp = os_gettime_ns() - bufferingNs;
+                // Output blocks were skipped; the effects stage's held audio belongs to them.
+                effectsChain.reset();
+                effectsSession = 0;
             }
             wantedTimestamp = timestamp;
             musicReady.notify_one();

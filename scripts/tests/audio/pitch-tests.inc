@@ -397,8 +397,178 @@ static void pitchInvalidInputTest() {
     chain.process(nullptr, 256, nullptr, 0);
     check(audio == untouched, "invalid stage lists are ignored without touching audio");
 }
-
-
+// A four-second 440 Hz tone, so a render test can tell 440 from 220 by counting crossings.
+static void writeTone(const char *path) {
+    std::ofstream out(path, std::ios::binary);
+    constexpr uint32_t frames = 48000 * 4, bytes = frames * 4;
+    auto word = [&](uint32_t value, int count) {
+        for (int i = 0; i < count; ++i) out.put(char(value >> (i * 8)));
+    };
+    out.write("RIFF", 4); word(36 + bytes, 4); out.write("WAVEfmt ", 8); word(16, 4);
+    word(1, 2); word(2, 2); word(48000, 4); word(48000 * 4, 4); word(4, 2); word(16, 2);
+    out.write("data", 4); word(bytes, 4);
+    for (uint32_t i = 0; i < frames; ++i) {
+        auto sample = int16_t(32767 * .3 * std::sin(2 * 3.14159265358979 * 440 * double(i) / 48000));
+        word(uint16_t(sample), 2); word(uint16_t(sample), 2);
+    }
+}
+static unsigned toneCrossings(const Simulation &sim, uint64_t from, uint64_t to) {
+    std::vector<float> mono;
+    for (const auto &block : sim.output)
+        if (block.timestamp >= from && block.timestamp < to)
+            for (size_t i = 0; i < blockFrames; ++i) mono.push_back(block.samples[i * 2]);
+    unsigned count = 0;
+    for (size_t i = 1; i < mono.size(); ++i)
+        if (mono[i - 1] < 0 && mono[i] >= 0) ++count;
+    return count;
+}
+static double toneHz(const Simulation &sim, uint64_t from, uint64_t to) {
+    return double(toneCrossings(sim, from, to)) / (double(to - from) / 1e9);
+}
+// The game sends a song packet about every 10 ms with the position it describes, so the song stays
+// live (packets go stale after 400 ms) and the decoder is never asked to seek.
+static void heartbeat(Simulation &sim, SongLinkPacket p, uint64_t base) {
+    p.position = double(sim.now - base) / 1e9;
+    sim.send(p, sim.now);
+}
+static void playTone(Simulation &sim, SongLinkPacket p, uint64_t base, uint64_t until) {
+    while (sim.now < base + until) {
+        heartbeat(sim, p, base);
+        sim.advance(10000000);
+    }
+}
+static void pitchRenderChannelTest() {
+    Simulation sim;
+    const auto base = sim.now;
+    SongLinkPacket p;
+    p.flags = 3; p.epoch = 1; p.stageCount = 1;
+    p.stages[0] = {.5f, 1024, 0, 7};
+    std::strcpy(p.path, "artifacts/audio-tests/tone.wav");
+    sim.start();
+    playTone(sim, p, base, 1200000000);
+    const double hz = toneHz(sim, base + 300000000, base + 1100000000);
+    if (std::abs(hz - 220) > 18) std::cerr << "channel stage: " << hz << " Hz\n";
+    check(std::abs(hz - 220) <= 18, "a voice packet's stage shifts the music OBS plays");
+}
+// A global stage processes the eligible music; a voice the setting excludes stays unshifted.
+static void pitchRenderGroupTest() {
+    for (bool excluded : {false, true}) {
+        Simulation sim;
+        const auto base = sim.now;
+        SongLinkPacket global;
+        global.channelID = -1; global.flags = 1; global.epoch = 1;
+        global.stageCount = 1; global.stages[0] = {.5f, 1024, 0, 8};
+        SongLinkPacket voice;
+        voice.flags = 3 | (excluded ? 8u : 0u); voice.epoch = 1; voice.stageCount = 0;
+        std::strcpy(voice.path, "artifacts/audio-tests/tone.wav");
+        sim.start();
+        while (sim.now < base + 1200000000) {
+            heartbeat(sim, global, base);
+            heartbeat(sim, voice, base);
+            sim.advance(10000000);
+        }
+        const double hz = toneHz(sim, base + 300000000, base + 1100000000);
+        const double expected = excluded ? 440 : 220;
+        if (std::abs(hz - expected) > 18) std::cerr << "group stage excluded=" << excluded << ": " << hz << " Hz\n";
+        check(std::abs(hz - expected) <= 18,
+              excluded ? "an excluded replacement bypasses the music group's stages"
+                       : "a global stage shifts the eligible music once");
+    }
+}
+static void pitchRenderEffectsTest() {
+    for (bool staged : {false, true}) {
+        Simulation sim;
+        const auto base = sim.now;
+        SongLinkPacket global;
+        global.channelID = -1; global.flags = 1; global.epoch = 1;
+        if (staged) {
+            global.effectsStageCount = 1;
+            global.effectsStages[0] = {.5f, 1024, 0, 9};
+        }
+        sim.start();
+        for (int i = 0; i < 120; ++i) {
+            heartbeat(sim, global, base);
+            EffectsPacketV2 effect;
+            effect.frames = 480; effect.sampleRate = 48000; effect.sequence = i;
+            effect.timestamp = base + uint64_t(i) * 10000000;
+            for (unsigned f = 0; f < 480; ++f)
+                effect.samples[f * 2] = effect.samples[f * 2 + 1] =
+                    float(.2 * std::sin(2 * 3.14159265358979 * 440 * double(i * 480 + f) / 48000));
+            sim.sendEffects(effect);
+            sim.advance(10000000);
+        }
+        sim.advance(100000000);
+        const double hz = toneHz(sim, base + 300000000, base + 1100000000);
+        const double expected = staged ? 220 : 440;
+        if (std::abs(hz - expected) > 18) std::cerr << "effects stage=" << staged << ": " << hz << " Hz\n";
+        check(std::abs(hz - expected) <= 18,
+              staged ? "a global packet's effects stage shifts the SFX OBS plays"
+                     : "SFX without effects stages stay unshifted");
+    }
+}
+// A stage change inside one block must take effect at exactly its packet's frame. A dry run gives
+// the input, and one PitchChain with the same schedule gives the expected output.
+static void pitchRenderRunTest() {
+    auto run = [&](bool staged, std::vector<std::vector<float>> &blocks,
+                   std::vector<uint64_t> &times) -> uint64_t {
+        Simulation sim;
+        const auto base = sim.now;
+        SongLinkPacket p;
+        p.flags = 3; p.epoch = 1;
+        std::strcpy(p.path, "artifacts/audio-tests/tone.wav");
+        if (staged) {
+            p.stageCount = 1;
+            p.stages[0] = {.5f, 1024, 0, 11};
+        }
+        sim.start();
+        while (sim.now < base + 1200000000) {
+            if (sim.now == base + 500000000) {
+                // A packet five milliseconds into the block, as the game's 10 ms packets can
+                // land between OBS's blocks.
+                heartbeat(sim, p, base);
+                sim.advance(5000000);
+                if (staged)
+                    p.stages[0].pitch = 2.f;
+                heartbeat(sim, p, base);
+                sim.advance(5000000);
+                continue;
+            }
+            heartbeat(sim, p, base);
+            sim.advance(10000000);
+        }
+        for (const auto &block : sim.output) {
+            blocks.push_back(block.samples);
+            times.push_back(block.timestamp);
+        }
+        return base;
+    };
+    std::vector<std::vector<float>> staged, dry;
+    std::vector<uint64_t> stagedTimes, dryTimes;
+    const auto base = run(true, staged, stagedTimes);
+    run(false, dry, dryTimes);
+    PitchChain chain(true, 512);
+    PitchStage first{.5f, 1024, 0, 11}, second{2.f, 1024, 0, 11};
+    bool match = staged.size() == dry.size() && staged.size() > 20;
+    for (size_t i = 0; match && i < dry.size(); ++i) {
+        auto expected = dry[i];
+        // The block the stage changes in is split at 505 ms; all others are wholly one stage.
+        const size_t split = frameAt(dryTimes[i], base + 505000000);
+        if (split)
+            chain.process(expected.data(), split, &first, 1);
+        if (split < blockFrames)
+            chain.process(expected.data() + split * 2, blockFrames - split, &second, 1);
+        for (size_t f = 0; f < expected.size(); ++f)
+            match &= std::abs(double(staged[i][f]) - expected[f]) < 1e-9;
+    }
+    check(match, "a stage change inside a block applies from its packet's frame");
+}
+static void pitchRenderTests() {
+    writeTone("artifacts/audio-tests/tone.wav");
+    pitchRenderChannelTest();
+    pitchRenderGroupTest();
+    pitchRenderEffectsTest();
+    pitchRenderRunTest();
+}
 
 static void pitchTests() {
     PitchShifter::prepareTables();
@@ -409,4 +579,5 @@ static void pitchTests() {
     pitchOrderTest();
     pitchAllocationTest();
     pitchInvalidInputTest();
+    pitchRenderTests();
 }
