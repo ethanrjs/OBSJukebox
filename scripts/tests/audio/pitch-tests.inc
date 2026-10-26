@@ -619,12 +619,15 @@ static void pitchRenderGroupBusTest() {
     run(true, true, false, true, both, bothTimes);
     run(false, false, true, true, excluded, excludedTimes);
     run(true, true, true, true, all, allTimes);
-    bool audible = false;
-    for (const auto &block : first)
-        for (float sample : block) audible |= std::abs(sample) > .01f;
-    for (const auto &block : second)
-        for (float sample : block) audible |= std::abs(sample) > .01f;
-    check(audible, "the group bus test plays audible music on both eligible voices");
+    auto audible = [](const std::vector<std::vector<float>> &blocks) {
+        bool heard = false;
+        for (const auto &block : blocks)
+            for (float sample : block)
+                heard |= std::abs(sample) > .01f;
+        return heard;
+    };
+    check(audible(first) && audible(second), "the group bus test plays audible music on both eligible voices");
+    check(audible(excluded), "the group bus test plays audible music on the excluded voice");
     // One chain, fed the dry sum block by block, is what the group stage must do to the bus.
     PitchChain chain;
     PitchStage stage{.5f, 1024, 0, 12};
