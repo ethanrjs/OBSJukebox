@@ -18,7 +18,7 @@ struct PitchStage {
 };
 struct SongLinkPacket {
     char magic[8] = {'G', 'D', 'S', 'O', 'N', 'G', '1', 0};
-    uint32_t version = 5;
+    uint32_t version = 6;
     uint32_t flags = 0;
     uint32_t epoch = 0;
     int32_t attempt = 0;
@@ -38,6 +38,14 @@ struct SongLinkPacket {
     uint32_t fadeCount = 0;
     SongFadePoint fades[8]{};
     double loopStart = 0, loopEnd = 0;
+    // v6. A voice packet carries its channel's stages; the global packet (channelID -1) carries the
+    // music group's stages and, in effectsStages, the post-tap effects stages. A voice packet has no
+    // effects stages; flag 8 keeps a replacement song out of the music group's stages.
+    uint8_t stageCount = 0;
+    uint8_t effectsStageCount = 0;
+    uint8_t stageReserved[2]{};
+    PitchStage stages[8]{};
+    PitchStage effectsStages[8]{};
 };
 struct ClockSyncPacket {
     char magic[8] = {'G', 'D', 'C', 'L', 'K', '1', 0, 0};
@@ -78,11 +86,14 @@ struct PitchPacket {
     } voices[SONG_LINK_MAX_CHANNELS]{};
 };
 #pragma pack(pop)
-inline constexpr unsigned SONG_LINK_V2_SIZE = 1288, SONG_LINK_V3_SIZE = 1296, SONG_LINK_V4_SIZE = 1304;
+inline constexpr unsigned SONG_LINK_V2_SIZE = 1288, SONG_LINK_V3_SIZE = 1296, SONG_LINK_V4_SIZE = 1304,
+                          SONG_LINK_V5_SIZE = 1436;
 static_assert(sizeof(PitchStage) == 16 && alignof(PitchStage) == 1);
 static_assert(offsetof(PitchStage, pitch) == 0 && offsetof(PitchStage, fft) == 4 &&
               offsetof(PitchStage, reserved) == 6 && offsetof(PitchStage, instance) == 8);
-static_assert(sizeof(SongLinkPacket) == 1436);
+static_assert(offsetof(SongLinkPacket, stageCount) == 1436 && offsetof(SongLinkPacket, stages) == 1440 &&
+              offsetof(SongLinkPacket, effectsStages) == 1568);
+static_assert(sizeof(SongLinkPacket) == 1696);
 static_assert(sizeof(PitchPacket) == 32 + 8 + 64 * 12);
 static_assert(sizeof(EffectsPacket) == 4132);
 static_assert(sizeof(EffectsPacketV2) == 4140);

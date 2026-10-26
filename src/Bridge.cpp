@@ -65,7 +65,7 @@ void Bridge::publish(const Snapshot &s) {
     if (socket == BAD_SOCKET)
         return;
     SongLinkPacket p;
-    p.flags = (s.enabled ? 1 : 0) | (s.playing ? 2 : 0) | (s.looping ? 4 : 0);
+    p.flags = (s.enabled ? 1 : 0) | (s.playing ? 2 : 0) | (s.looping ? 4 : 0) | (s.groupExcluded ? 8 : 0);
     p.epoch = s.epoch;
     p.attempt = s.attempt;
     p.position = s.position;
@@ -84,6 +84,10 @@ void Bridge::publish(const Snapshot &s) {
     copyText(p.status, s.status);
     copyText(p.level, s.level);
     copyText(p.song, s.song);
+    p.stageCount = std::min<uint8_t>(s.stageCount, 8);
+    std::copy_n(s.stages.begin(), p.stageCount, p.stages);
+    p.effectsStageCount = std::min<uint8_t>(s.effectsStageCount, 8);
+    std::copy_n(s.effectsStages.begin(), p.effectsStageCount, p.effectsStages);
     // Paths are never shortened: a cut path names the wrong file, so a long one stops playback instead.
     // A path that isn't UTF-8 stops playback too: OBS can't open it.
     bool tooLong = s.path.size() >= sizeof(p.path);

@@ -20,6 +20,9 @@ struct Snapshot {
     std::array<SongFadePoint, 8> fades{};
     bool looping = false;
     double loopStart = 0, loopEnd = 0;
+    std::array<PitchStage, 8> stages{}, effectsStages{};
+    uint8_t stageCount = 0, effectsStageCount = 0;
+    bool groupExcluded = false;
 };
 class Bridge {
     SongSocket socket = BAD_SOCKET;

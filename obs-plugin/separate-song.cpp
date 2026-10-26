@@ -57,13 +57,31 @@ struct LinkState {
     Clock::time_point received{};
     bool connected = false;
 };
-// Checks a v5 song packet's size and fields. Returns nothing if any of them is invalid.
+static bool knownFft(uint16_t fft) {
+    return fft == 256 || fft == 512 || fft == 1024 || fft == 2048 || fft == 4096;
+}
+// A stage the mod observed on the way to the speakers, as FMOD reads its parameters back.
+static bool validStage(const PitchStage &stage) {
+    return std::isfinite(stage.pitch) && stage.pitch >= .5f && stage.pitch <= 2.f && knownFft(stage.fft) &&
+           stage.reserved == 0 && stage.instance != 0;
+}
+static bool emptyStage(const PitchStage &stage) {
+    static const PitchStage zero;
+    return !memcmp(&stage, &zero, sizeof(stage));
+}
+static bool validStages(const PitchStage *stages, uint8_t count) {
+    for (unsigned i = 0; i < 8; ++i)
+        if (i < count ? !validStage(stages[i]) : !emptyStage(stages[i]))
+            return false;
+    return true;
+}
+// Checks a v6 song packet's size and fields. Returns nothing if any of them is invalid.
 static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, size_t size) {
     SongLinkPacket p{};
     if (size != sizeof(p))
         return std::nullopt;
     memcpy(&p, data, size);
-    if (p.version != 5 || memcmp(p.magic, "GDSONG1", 8) || !p.sessionID)
+    if (p.version != 6 || memcmp(p.magic, "GDSONG1", 8) || !p.sessionID)
         return std::nullopt;
     if (!std::isfinite(p.musicVolume) || p.musicVolume < 0 || p.musicVolume > 1 ||
         !std::isfinite(p.effectsVolume) || p.effectsVolume < 0 || p.effectsVolume > 1 ||
@@ -71,7 +89,14 @@ static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, 
         !std::isfinite(p.offset) || !std::isfinite(p.rate) || p.rate <= 0 || p.rate > 16 ||
         p.channelID < -1 || p.channelID >= SONG_LINK_MAX_CHANNELS ||
         !std::isfinite(p.triggerGain) || p.triggerGain < 0 || p.triggerGain > 16 ||
-        p.fadeCount > 8)
+        p.fadeCount > 8 || (p.flags & ~15u) || p.stageCount > 8 || p.effectsStageCount > 8 ||
+        p.stageReserved[0] || p.stageReserved[1])
+        return std::nullopt;
+    if (p.channelID < 0 ? (p.flags & 8) != 0 : p.effectsStageCount != 0)
+        return std::nullopt;
+    if ((p.flags & 8) && p.stageCount)
+        return std::nullopt;
+    if (!validStages(p.stages, p.stageCount) || !validStages(p.effectsStages, p.effectsStageCount))
         return std::nullopt;
     uint64_t previous = 0;
     for (unsigned i = 0; i < p.fadeCount; ++i) {
@@ -139,18 +164,18 @@ static std::optional<PitchPacket> parsePitchPacket(const unsigned char *data, si
             return std::nullopt;
     return p;
 }
-// A GDSONG1 packet below version 5, or any GDSFX1 packet, comes from a mod older than v1.1: v1.0 sent
-// v3 song packets and GDSFX1 effects, before clock sync. handle() has checked that size >= 8.
-static bool fromModBeforeV11(const unsigned char *data, size_t size) {
+// A song packet below version 6, or any GDSFX1 packet, comes from a mod older than this plugin: v1.0
+// sent v3 song packets and GDSFX1 effects, and v1.1 to v1.2 sent v5. handle() has checked size >= 8.
+static bool fromOlderMod(const unsigned char *data, size_t size) {
     if (!memcmp(data, "GDSFX1\0", 8))
         return true;
     uint32_t version = 0;
     if (size < offsetof(SongLinkPacket, version) + sizeof(version) || memcmp(data, "GDSONG1", 8))
         return false;
     memcpy(&version, data + offsetof(SongLinkPacket, version), sizeof(version));
-    return version < 5;
+    return version < 6;
 }
-// A GDSONG1 packet above version 5, a GDSFX2 packet above version 2, or a later GDSONG or GDSFX
+// A song packet above version 6, a GDSFX2 packet above version 2, or a later GDSONG or GDSFX
 // magic comes from a mod newer than this plugin. handle() has checked that size >= 8.
 static bool fromNewerMod(const unsigned char *data, size_t size) {
     uint32_t version = 0;
@@ -158,7 +183,7 @@ static bool fromNewerMod(const unsigned char *data, size_t size) {
         if (size < offsetof(SongLinkPacket, version) + sizeof(version))
             return false;
         memcpy(&version, data + offsetof(SongLinkPacket, version), sizeof(version));
-        return version > 5;
+        return version > 6;
     }
     if (!memcmp(data, "GDSFX2\0", 8)) {
         if (size < offsetof(EffectsPacketV2, version) + sizeof(version))
@@ -288,10 +313,10 @@ class Receiver {
             return;
         if (!memcmp(data, "GDCLK1\0", 8))
             handleClockReply(data, size, from, now);
-        else if (fromModBeforeV11(data, size)) {
+        else if (fromOlderMod(data, size)) {
             std::lock_guard lock(mutex);
             if (!lastOldModPacket)
-                blog(LOG_WARNING, "[OBS Jukebox] Ignoring packets from an OBS Jukebox mod older than v1.1");
+                blog(LOG_WARNING, "[OBS Jukebox] Ignoring packets from an outdated OBS Jukebox mod; update the mod in Geometry Dash");
             lastOldModPacket = now;
         } else if (fromNewerMod(data, size)) {
             std::lock_guard lock(mutex);
@@ -832,7 +857,7 @@ struct SongSource {
         bool oldMod = !connected && linkReceiver->oldModSending(now);
         bool newMod = !connected && linkReceiver->newModSending(now);
         std::lock_guard lock(mutex);
-        detail = oldMod ? "Update the OBS Jukebox mod in Geometry Dash to v1.1 or later."
+        detail = oldMod ? "Update the OBS Jukebox mod in Geometry Dash to match this plugin."
                  : newMod ? "Update the OBS Jukebox plugin to match the mod in Geometry Dash."
                  : !linkReceiver->available() ? "Game link unavailable: local UDP port is already in use."
                  : !decoderError.empty() ? decoderError

@@ -360,7 +360,7 @@ static void pitchAllocationTest() {
     std::vector<float> audio(480 * 2, .2f);
     PitchStage stages[2] = {{1.f, 1024, 0, 41}, {.75f, 2048, 0, 42}};
     chain.process(audio.data(), 480, stages, 2);
-    pitchAllocationCount = 0;
+    pitchAllocationCount = pitchFreeCount = 0;
     pitchCountingAllocations = true;
     chain.process(audio.data(), 480, stages, 2);
     stages[0].pitch = .9f;
@@ -383,16 +383,36 @@ static void pitchAllocationTest() {
 static void pitchInvalidInputTest() {
     PitchShifter shifter(256);
     std::vector<float> audio(512, .1f);
+    shifter.process(audio.data(), 256, .75f, 1024);
+    check(shifter.active(), "a valid stage is active before invalid input");
     shifter.process(nullptr, 256, .75f, 1024);
     shifter.process(audio.data(), 0, .75f, 1024);
     shifter.process(audio.data(), 256, std::numeric_limits<float>::quiet_NaN(), 1024);
     check(!shifter.active(), "a nonfinite pitch clears the stage instead of holding audio");
     shifter.process(audio.data(), 256, .75f, 3000);
     check(shifter.active(), "an FFT size between supported powers still configures a stage");
+    const auto untouched = audio;
     PitchChain chain(true, 256);
     chain.process(audio.data(), 256, nullptr, 2);
     chain.process(nullptr, 256, nullptr, 0);
-    check(true, "invalid stage lists are ignored without touching audio");
+    check(audio == untouched, "invalid stage lists are ignored without touching audio");
+}
+
+// The GDPITCH sidecar PR 24 sent, while it still exists in this task sequence.
+static void pitchPacketTest() {
+    PitchPacket packet;
+    packet.count = 1;
+    packet.voices[0] = {3, {.5f, 1024}};
+    auto parsed = parsePitchPacket(reinterpret_cast<const unsigned char *>(&packet), sizeof(packet));
+    check(parsed && parsed->voices[0].channelID == 3 && parsed->voices[0].shift.pitch == .5f,
+          "a valid pitch packet parses");
+    packet.voices[0].shift.pitch = std::numeric_limits<float>::quiet_NaN();
+    check(!parsePitchPacket(reinterpret_cast<const unsigned char *>(&packet), sizeof(packet)),
+          "a pitch packet with a NaN pitch is refused");
+    packet.voices[0].shift.pitch = .5f;
+    packet.count = SONG_LINK_MAX_CHANNELS + 1;
+    check(!parsePitchPacket(reinterpret_cast<const unsigned char *>(&packet), sizeof(packet)),
+          "a pitch packet with too many voices is refused");
 }
 
 static void pitchTests() {
@@ -404,4 +424,5 @@ static void pitchTests() {
     pitchOrderTest();
     pitchAllocationTest();
     pitchInvalidInputTest();
+    pitchPacketTest();
 }

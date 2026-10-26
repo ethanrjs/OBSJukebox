@@ -37,6 +37,11 @@ int main() {
  FIELD(SongLinkPacket, fades)
  FIELD(SongLinkPacket, loopStart)
  FIELD(SongLinkPacket, loopEnd)
+ FIELD(SongLinkPacket, stageCount)
+ FIELD(SongLinkPacket, effectsStageCount)
+ FIELD(SongLinkPacket, stageReserved)
+ FIELD(SongLinkPacket, stages)
+ FIELD(SongLinkPacket, effectsStages)
  std::cout << "size ClockSyncPacket " << sizeof(ClockSyncPacket) << "\n";
  FIELD(ClockSyncPacket, magic)
  FIELD(ClockSyncPacket, version)
@@ -69,7 +74,13 @@ int main() {
  song.musicVolume=.25f; song.effectsVolume=.5f; song.timestamp=123456; song.sessionID=765432; song.channelID=7; song.triggerGain=2.f;
  song.fadeCount=8; for(unsigned i=0;i<8;++i) { song.fades[i].offsetNs=(i+1)*100; song.fades[i].gain=float(i+1)/2; }
  song.loopStart=3.25; song.loopEnd=9.5;
- fixture("song5",song); song.version=4; fixture("song4",song,SONG_LINK_V4_SIZE); song.version=3; fixture("song3",song,SONG_LINK_V3_SIZE); song.version=2; fixture("song2",song,SONG_LINK_V2_SIZE);
+ song.version=6; song.stageCount=2; song.stages[0]={.75f,1024,0,41}; song.stages[1]={1.5f,2048,0,42};
+ fixture("song6",song);
+ auto global=song; global.channelID=-1; global.stageCount=1; global.stages[0]={1.f,256,0,44}; global.stages[1]={};
+ global.effectsStageCount=1; global.effectsStages[0]={.5f,4096,0,43};
+ fixture("song6global",global);
+ song.stageCount=0; song.effectsStageCount=0; song.stages[0]={}; song.stages[1]={};
+ song.version=5; fixture("song5",song,SONG_LINK_V5_SIZE); song.version=4; fixture("song4",song,SONG_LINK_V4_SIZE); song.version=3; fixture("song3",song,SONG_LINK_V3_SIZE); song.version=2; fixture("song2",song,SONG_LINK_V2_SIZE);
  ClockSyncPacket clock; clock.kind=2; clock.sessionID=765432; clock.t1=11; clock.t2=22; clock.t3=33; fixture("clock",clock);
  EffectsPacket effects; effects.sequence=19; effects.sampleRate=48000; effects.frames=512; effects.timestamp=123456; effects.stream=1;
  for(unsigned i=0;i<1024;++i) effects.samples[i]=float(i)/1024; fixture("effects1",effects);

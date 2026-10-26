@@ -221,7 +221,8 @@ class PitchShifter {
 // absent starts fresh, while a pitch change keeps the audio it is holding. A DSP the mod destroys and
 // recreates at the same address between two samples is indistinguishable and is documented as a limit.
 // The effects chain is built with `preallocate` before its audio thread starts; decoder-side chains
-// build a slot the first time a packet names it.
+// build a slot the first time a packet names it. A list longer than eight keeps the first eight, as
+// the wire and the mod's observer do.
 class PitchChain {
     struct Slot {
         std::unique_ptr<PitchShifter> shifter;

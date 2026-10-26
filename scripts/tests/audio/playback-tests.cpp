@@ -91,9 +91,9 @@ struct Simulation {
     // A song packet of any version, sent as is. The v1.0 mod sent version 3.
     void sendRaw(SongLinkPacket p,uint64_t capture,int version,uint16_t port) {
         p.version=version;p.timestamp=capture;
-        deliver(&p,version==3?SONG_LINK_V3_SIZE:sizeof(p),port);
+        deliver(&p,version==3?SONG_LINK_V3_SIZE:version==4?SONG_LINK_V4_SIZE:version==5?SONG_LINK_V5_SIZE:sizeof(p),port);
     }
-    void send(const Game& game,SongLinkPacket p,uint64_t capture) {p.sessionID=game.session;sendRaw(p,game.stamp(capture),5,game.port);}
+    void send(const Game& game,SongLinkPacket p,uint64_t capture) {p.sessionID=game.session;sendRaw(p,game.stamp(capture),6,game.port);}
     void send(SongLinkPacket p,uint64_t capture) {send(local,p,capture);}
     void sendEffects(const EffectsPacketV2& e,uint16_t port) {deliver(&e,44+e.frames*8,port);}
     void sendEffects(EffectsPacketV2 e) {e.sessionID=local.session;sendEffects(e,local.effectsPort);}
@@ -392,7 +392,7 @@ static void protocolTest() {
     auto at=sim.now;sim.send(p,at);sim.advance(15000000);
     p.epoch=99;sim.send(p,at-1000000);sim.send(p,at+2000000000);
     sim.send(p,0);
-    auto unsupported=p;unsupported.sessionID=sim.local.session;sim.sendRaw(unsupported,sim.now,6,sim.local.port);
+    auto unsupported=p;unsupported.sessionID=sim.local.session;sim.sendRaw(unsupported,sim.now,7,sim.local.port);
     sim.advance(15000000);
     check(receiver->get().packet.timestamp==at && receiver->get().packet.epoch==0,"reordered, stale, future and unsupported packets cannot replace the latest state");
     auto before=receiver->playbackWindow(at-1,at+1);
@@ -426,21 +426,24 @@ static void networkPathTest() {
 }
 // The v1.0 mod sends v3 song packets and GDSFX1 effects. OBS plays neither and asks for a newer mod,
 // whichever of the two arrives.
-static void oldModTest(bool songs,bool effects) {
+// v1.0 sent v3 song packets and GDSFX1 effects; v1.1 to v1.2 sent v5 song packets. This plugin only
+// speaks v6, so both play nothing and ask for the matching mod.
+static void oldModTest(bool songs,bool effects,int version=3) {
     Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
     sim.start();
     for(int i=0;i<10;++i){
-        if(songs)sim.sendRaw(p,sim.now,3,50001);
+        if(songs)sim.sendRaw(p,sim.now,version,50001);
         EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=sim.now;std::fill_n(e.samples,960,.25f);
         if(effects)sim.sendEffects(e,50001);
         sim.advance(10000000);
     }
     bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
     std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
-    check(!receiver->get().connected && silent && detail.find("v1.1")!=std::string::npos,
-        songs?"v3 song packets play nothing and ask for a mod of v1.1 or later":
-        "GDSFX1 effects play nothing and ask for a mod of v1.1 or later");
+    check(!receiver->get().connected && silent && detail.find("match this plugin")!=std::string::npos,
+        songs?(version==5?"v5 song packets play nothing and ask for a matching mod":
+                         "v3 song packets play nothing and ask for a matching mod"):
+        "GDSFX1 effects play nothing and ask for a matching mod");
 }
 // Geode updates the mod by itself, while the plugin is installed by hand. Packets from a newer
 // protocol play nothing and ask for a newer plugin, instead of "Waiting for Geometry Dash".
@@ -448,7 +451,7 @@ static void newModTest() {
     Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;p.sessionID=sim.local.session;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
     sim.start();
-    for(int i=0;i<10;++i){sim.sendRaw(p,sim.now,6,50001);sim.advance(10000000);}
+    for(int i=0;i<10;++i){sim.sendRaw(p,sim.now,7,50001);sim.advance(10000000);}
     bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
     std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
     check(!receiver->get().connected && silent && detail.find("Update the OBS Jukebox plugin")!=std::string::npos,
@@ -655,25 +658,66 @@ static void multipleVoiceFadeTest() {
     check(survived && remainingFrames>1000,"stopping channel 7 leaves channel 0 playing");
 }
 
-static void malformedV5Test() {
+static void malformedV6Test() {
     Simulation sim;
     auto game=sim.game(3600000000000LL);
     check(sim.synchronize(game),"validation test synchronizes its sender");
     SongLinkPacket p;p.flags=1;p.epoch=718;sim.send(game,p,sim.now);
     sim.advance(10000000);
-    p.epoch=999;p.fadeCount=9;sim.send(game,p,sim.now);
-    p.fadeCount=0;p.triggerGain=std::numeric_limits<float>::quiet_NaN();sim.send(game,p,sim.now);
-    p.triggerGain=1;p.channelID=SONG_LINK_MAX_CHANNELS;sim.send(game,p,sim.now);
-    p.channelID=0;p.flags=7;p.loopStart=2;p.loopEnd=1;sim.send(game,p,sim.now);
-    p.loopStart=std::numeric_limits<double>::quiet_NaN();p.loopEnd=2;sim.send(game,p,sim.now);
-    p.loopStart=1;p.loopEnd=1;sim.send(game,p,sim.now);
-    sim.advance(15000000);
-    check(receiver->get().packet.epoch==718,"v5 rejects oversized fades, nonfinite gain, invalid channels and invalid loop bounds");
-    // FMOD can hold two fade points at the same DSP clock
+    unsigned epoch=800;
+    auto rejected=[&](SongLinkPacket bad,const char* what){
+        bad.epoch=++epoch;
+        sim.send(game,bad,sim.now);sim.advance(15000000);
+        check(receiver->get().packet.epoch!=bad.epoch,what);
+    };
+    p.epoch=999;p.fadeCount=9;rejected(p,"v6 rejects oversized fades");
+    p.fadeCount=0;p.triggerGain=std::numeric_limits<float>::quiet_NaN();rejected(p,"v6 rejects a nonfinite gain");
+    p.triggerGain=1;p.channelID=SONG_LINK_MAX_CHANNELS;rejected(p,"v6 rejects an invalid channel");
+    p.channelID=0;p.flags=7;p.loopStart=2;p.loopEnd=1;rejected(p,"v6 rejects inverted loop bounds");
+    p.loopStart=std::numeric_limits<double>::quiet_NaN();p.loopEnd=2;rejected(p,"v6 rejects a nonfinite loop start");
+    p.loopStart=1;p.loopEnd=1;rejected(p,"v6 rejects an empty loop");
     p=SongLinkPacket{};p.flags=1;p.epoch=720;p.fadeCount=2;p.fades[0]={1000000,.5f};p.fades[1]={1000000,0};
-    sim.send(game,p,sim.now);
-    sim.advance(15000000);
-    check(receiver->get().packet.epoch==720,"v5 accepts fade points that share a time");
+    sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==720,"v6 accepts fade points that share a time");
+    // A stage in the list must be one FMOD would process, and every unused entry must be zero.
+    p=SongLinkPacket{};p.flags=1;p.epoch=721;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
+    sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==721,"v6 accepts a valid channel stage");
+    p.stageCount=9;rejected(p,"v6 rejects more than eight stages");
+    p.stageCount=1;p.stageReserved[0]=1;rejected(p,"v6 rejects nonzero stage reserve");
+    p.stageReserved[0]=0;p.flags=16;rejected(p,"v6 rejects unknown flag bits");
+    p.flags=8;p.stageCount=1;rejected(p,"v6 rejects an excluded voice that still lists stages");
+    p.stageCount=0;sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==p.epoch,"v6 accepts an excluded replacement voice");
+    p.flags=1;
+    {
+        auto bad=p;bad.stageCount=1;bad.stages[0]={std::numeric_limits<float>::quiet_NaN(),1024,0,41};
+        rejected(bad,"v6 rejects a nonfinite stage pitch");
+        bad.stages[0].pitch=.4f;rejected(bad,"v6 rejects a pitch below 0.5");
+        bad.stages[0].pitch=2.1f;rejected(bad,"v6 rejects a pitch above 2");
+        bad.stages[0].pitch=.75f;bad.stages[0].fft=0;rejected(bad,"v6 rejects FFT 0");
+        bad.stages[0].fft=768;rejected(bad,"v6 rejects a non-power-of-two FFT");
+        bad.stages[0].fft=8192;rejected(bad,"v6 rejects FFT 8192");
+        bad.stages[0].fft=1024;bad.stages[0].instance=0;rejected(bad,"v6 rejects a zero instance");
+        bad.stages[0].instance=41;bad.stages[0].reserved=1;rejected(bad,"v6 rejects a nonzero stage reserve");
+        bad.stages[0].reserved=0;bad.stages[1].pitch=.5f;rejected(bad,"v6 rejects a nonzero unused stage");
+        bad=p;bad.effectsStageCount=1;rejected(bad,"v6 rejects effects stages on a voice packet");
+    }
+    // The global packet carries music and effects stages; flag 8 is a voice-only rule.
+    p=SongLinkPacket{};p.flags=1;p.epoch=730;p.channelID=-1;p.effectsStageCount=1;
+    p.effectsStages[0]={.5f,4096,0,43};sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==730,"v6 accepts effects stages in the global packet");
+    p.flags=8;rejected(p,"v6 rejects flag 8 on the global packet");
+    p.flags=1;p.epoch=731;p.stageCount=1;p.stages[0]={1.f,256,0,44};sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==731,"v6 accepts music stages beside effects stages");
+    // Size is exact: a short or long v6 packet is refused whole.
+    auto shortPacket=p;shortPacket.epoch=740;
+    sim.deliver(&shortPacket,sizeof(shortPacket)-1,game.port);sim.advance(15000000);
+    check(receiver->get().packet.epoch!=740,"v6 rejects a truncated extension");
+    auto longPacket=p;longPacket.epoch=741;
+    std::array<unsigned char,sizeof(longPacket)+1> longer{};std::memcpy(longer.data(),&longPacket,sizeof(longPacket));
+    sim.deliver(longer.data(),longer.size(),game.port);sim.advance(15000000);
+    check(receiver->get().packet.epoch!=741,"v6 rejects a trailing byte");
 }
 
 static void shortLoopTest() {
@@ -943,7 +987,7 @@ static void senderTest() {
     separate_song::Snapshot s;s.timestamp=monotonicNowNs();s.position=1.25;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     separate_song::Bridge b;check(b.start(),"sender opens its socket");b.publish(s);
-    check(published.version==5 && published.timestamp==s.timestamp && published.position==s.position,
+    check(published.version==6 && published.timestamp==s.timestamp && published.position==s.position,
         "sender preserves sampling time through publication delay");
 }
 static void senderInvalidPathTest() {
@@ -972,10 +1016,10 @@ int main(int argc,char** argv){
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);newModTest();
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);oldModTest(true,false,5);newModTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
-    multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
+    multipleVoiceFadeTest();malformedV6Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
     tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();
     slowSpeedhackTest();verySlowSpeedhackTest();crawlSpeedhackTest();fastSpeedhackTest();rateBoundsTest();senderTest();senderInvalidPathTest();utf8Test();
     pitchTests();receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
