@@ -544,6 +544,16 @@ template <class Run> static void forEachRun(const std::vector<SongLinkPacket> &w
             run(p, first, end);
     }
 }
+// Applies one run's stages to a chain, starting fresh when the run belongs to a new process session.
+// Only the thread that owns the chain calls this, so a session boundary never carries FIFO state.
+static void processStages(PitchChain &chain, uint64_t &session, uint64_t id, float *audio, size_t frames,
+                          const PitchStage *stages, uint8_t count) {
+    if (session != id) {
+        chain.reset();
+        session = id;
+    }
+    chain.process(audio, frames, stages, count);
+}
 
 // Length of the crossfade at every music discontinuity (pause, resume, restart, seek, song
 // change): 5 ms at 48 kHz. FMOD ramps these in game; without it OBS hears a click.
@@ -817,13 +827,10 @@ struct SongSource {
                 size_t stale = stalled ? end : std::clamp(frameAt(timestamp, p.timestamp + staleNs), first, end);
                 auto renderPart = [&](size_t from, size_t to, bool live) {
                     const size_t frames = to - from;
-                    if (v.chainSession != p.sessionID) {
-                        v.chain.reset();
-                        v.chainSession = p.sessionID;
-                    }
                     voiceAudio.fill(0);
                     renderVoice(v, p, frames, frameTime(timestamp, from), live, decoderError);
-                    v.chain.process(voiceAudio.data(), frames, p.stages, p.stageCount);
+                    processStages(v.chain, v.chainSession, p.sessionID, voiceAudio.data(), frames, p.stages,
+                                  p.stageCount);
                     float *bus = (p.flags & 8) ? excluded.data() : eligible.data();
                     for (size_t j = 0; j < frames * 2; ++j)
                         bus[from * 2 + j] += voiceAudio[j];
@@ -841,11 +848,8 @@ struct SongSource {
         // that the setting excludes never reaches this bus.
         auto global = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
         forEachRun(global, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
-            if (p.sessionID != groupSession) {
-                groupChain.reset();
-                groupSession = p.sessionID;
-            }
-            groupChain.process(eligible.data() + first * 2, end - first, p.stages, p.stageCount);
+            processStages(groupChain, groupSession, p.sessionID, eligible.data() + first * 2, end - first,
+                          p.stages, p.stageCount);
         });
         for (size_t i = 0; i < audio.size(); ++i)
             audio[i] = eligible[i] + excluded[i];
@@ -942,12 +946,8 @@ struct SongSource {
                 if (p.flags & 1)
                     linkReceiver->mixEffects(effects.data() + first * 2, end - first, frameTime(timestamp, first),
                                              p.effectsVolume);
-                if (p.sessionID != effectsSession) {
-                    effectsChain.reset();
-                    effectsSession = p.sessionID;
-                }
-                effectsChain.process(effects.data() + first * 2, end - first, p.effectsStages,
-                                     p.effectsStageCount);
+                processStages(effectsChain, effectsSession, p.sessionID, effects.data() + first * 2,
+                              end - first, p.effectsStages, p.effectsStageCount);
             });
             for (size_t i = 0; i < audio.size(); ++i)
                 audio[i] += effects[i];

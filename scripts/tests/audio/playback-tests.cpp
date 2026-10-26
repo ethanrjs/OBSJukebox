@@ -1045,9 +1045,9 @@ static void senderInvalidPathTest() {
         "the sender stops playback instead of sending a path that is not UTF-8");
 }
 #include "receiver-tests.inc"
+#include "pitch-tests.inc"
 #include "deadline-tests.inc"
 #include "recovery-tests.inc"
-#include "pitch-tests.inc"
 int main(int argc,char** argv){
     // --skip-timing leaves out the tests that need the machine to meet real-time audio deadlines.
     const bool timing=!(argc>1 && std::string(argv[1])=="--skip-timing");

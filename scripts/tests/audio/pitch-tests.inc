@@ -354,6 +354,40 @@ static void pitchOrderTest() {
     check(error < 1e-6 && difference > .01, "stages run in order instead of collapsing into one pitch");
 }
 
+// A new process session must not inherit FIFO state, even for the same stage slot and FFT.
+static void pitchSessionResetTest() {
+    constexpr size_t frames = 12000;
+    std::vector<float> first(frames), second(frames);
+    for (size_t i = 0; i < frames; ++i) {
+        first[i] = float(.25 * std::sin(2 * 3.14159265358979 * 330 * double(i) / 48000));
+        second[i] = float(.25 * std::sin(2 * 3.14159265358979 * 550 * double(i) / 48000));
+    }
+    PitchStage stage{.5f, 1024, 0, 61};
+    auto feed = [&](PitchChain &chain, uint64_t &session, uint64_t id, const std::vector<float> &mono,
+                    float pitch) {
+        stage.pitch = pitch;
+        auto audio = pitch_fixtures::stereo(mono);
+        for (size_t at = 0; at < frames; at += 256)
+            processStages(chain, session, id, audio.data() + at * 2, std::min<size_t>(256, frames - at), &stage, 1);
+        return audio;
+    };
+    PitchChain reused(true, 256), fresh(true, 256);
+    uint64_t session = 0, freshSession = 0;
+    feed(reused, session, 1, first, .5f);
+    const auto actual = feed(reused, session, 2, second, 1.5f);
+    const auto expected = feed(fresh, freshSession, 2, second, 1.5f);
+    check(actual == expected, "a new session starts its stages from fresh state");
+    // The same chain without the session change keeps its history, so the audio differs.
+    PitchChain carried(true, 256);
+    uint64_t oneSession = 1;
+    feed(carried, oneSession, 1, first, .5f);
+    const auto continued = feed(carried, oneSession, 1, second, 1.5f);
+    double difference = 0;
+    for (size_t i = 0; i < expected.size(); ++i)
+        difference = std::max(difference, std::abs(double(continued[i]) - expected[i]));
+    check(difference > .01, "carrying a stage across a session boundary would change the audio");
+}
+
 static void pitchAllocationTest() {
     PitchShifter::prepareTables();
     PitchChain chain(true, 256);
@@ -672,6 +706,93 @@ static void pitchRenderNoEffectsWithoutGlobalTest() {
         for (float sample : block.samples) silent &= sample == 0;
     check(silent, "effects are not mixed without a global packet");
 }
+// The first global packet can arrive inside a block. Frames before it stay dry, and the new run
+// starts from a fresh chain at exactly its frame.
+static void pitchFirstGlobalRunTest() {
+    constexpr uint64_t offset = 173 * 1000000000ULL / 48000;
+    auto run = [&](bool staged, std::vector<std::vector<float>> &blocks,
+                   std::vector<uint64_t> &times) -> uint64_t {
+        Simulation sim;
+        const auto base = sim.now;
+        SongLinkPacket voice;
+        voice.flags = 3; voice.epoch = 1;
+        std::strcpy(voice.path, "artifacts/audio-tests/tone.wav");
+        SongLinkPacket global;
+        global.channelID = -1; global.flags = 1; global.epoch = 1;
+        global.stageCount = 1; global.stages[0] = {.5f, 1024, 0, 81};
+        const auto change = base + 500000000 + offset;
+        sim.start();
+        while (sim.now < base + 1200000000) {
+            if (sim.now == base + 500000000) {
+                heartbeat(sim, voice, base);
+                if (staged) {
+                    sim.advance(offset);
+                    sim.send(global, change);
+                    sim.advance(10000000 - offset);
+                } else {
+                    sim.advance(10000000);
+                }
+                continue;
+            }
+            heartbeat(sim, voice, base);
+            if (staged && sim.now > change)
+                heartbeat(sim, global, base);
+            sim.advance(10000000);
+        }
+        for (const auto &block : sim.output) {
+            blocks.push_back(block.samples);
+            times.push_back(block.timestamp);
+        }
+        return base;
+    };
+    std::vector<std::vector<float>> dry, staged;
+    std::vector<uint64_t> dryTimes, stagedTimes;
+    const auto base = run(false, dry, dryTimes);
+    run(true, staged, stagedTimes);
+    const auto change = base + 500000000 + offset;
+    PitchChain chain;
+    PitchStage stage{.5f, 1024, 0, 81};
+    bool match = staged.size() == dry.size() && staged.size() > 20 && stagedTimes == dryTimes;
+    for (size_t i = 0; match && i < dry.size(); ++i) {
+        const size_t split = frameAt(dryTimes[i], change);
+        auto expected = dry[i];
+        for (size_t f = 0; f < split; ++f)
+            match &= staged[i][f] == expected[f];
+        if (split < blockFrames) {
+            chain.process(expected.data() + split * 2, blockFrames - split, &stage, 1);
+            for (size_t f = split; f < blockFrames; ++f)
+                match &= staged[i][f] == expected[f];
+        }
+    }
+    check(match, "the first global run starts from a fresh chain at its packet's frame");
+}
+// During a main-thread stall, song packets stop but FMOD keeps mixing and the effects tap keeps
+// sending. The last global stage must keep processing the music past the 400 ms voice staleness.
+static void pitchStallStagesTest() {
+    Simulation sim;
+    const auto base = sim.now;
+    SongLinkPacket global;
+    global.channelID = -1; global.flags = 1; global.epoch = 1;
+    global.stageCount = 1; global.stages[0] = {.5f, 1024, 0, 82};
+    SongLinkPacket voice;
+    voice.flags = 3; voice.epoch = 1;
+    std::strcpy(voice.path, "artifacts/audio-tests/tone.wav");
+    sim.start();
+    for (int i = 0; i < 90; ++i) {
+        if (sim.now < base + 300000000) {
+            heartbeat(sim, global, base);
+            heartbeat(sim, voice, base);
+        }
+        EffectsPacketV2 effect;
+        effect.frames = 480; effect.sampleRate = 48000; effect.sequence = i;
+        effect.timestamp = sim.now;
+        sim.sendEffects(effect);
+        sim.advance(10000000);
+    }
+    const double hz = toneHz(sim, base + 700000000, base + 850000000);
+    if (std::abs(hz - 220) > 18) std::cerr << "stall stage: " << hz << " Hz\n";
+    check(std::abs(hz - 220) <= 18, "a main-thread stall keeps the group stage");
+}
 static void pitchRenderTests() {
     writeTone("artifacts/audio-tests/tone.wav");
     writeTone("artifacts/audio-tests/tone-high.wav", 660);
@@ -683,6 +804,8 @@ static void pitchRenderTests() {
     pitchRenderNoGlobalTest();
     pitchRenderGroupBusTest();
     pitchRenderNoEffectsWithoutGlobalTest();
+    pitchFirstGlobalRunTest();
+    pitchStallStagesTest();
 }
 
 static void pitchTests() {
@@ -691,6 +814,7 @@ static void pitchTests() {
     pitchChannelTest();
     pitchSplitTest();
     pitchResetTest();
+    pitchSessionResetTest();
     pitchOrderTest();
     pitchAllocationTest();
     pitchInvalidInputTest();

@@ -33,25 +33,39 @@ static void sourceRecoveryTest(bool failedSeek) {
 
 static void sourceResyncRecoveryTest() {
     receiver=std::make_shared<Receiver>();resetOutput();
+    writeTone("artifacts/audio-tests/tone.wav");
     SyncedSender sender(0);
     check(sender.synchronize(),"output resync test synchronizes its sender");
     SongLinkPacket packet;packet.flags=3;packet.position=.5;
-    std::strcpy(packet.path,"artifacts/audio-tests/ramp.wav");
+    std::strcpy(packet.path,"artifacts/audio-tests/tone.wav");
+    // A group stage is primed before the stall; after the resync the music must still carry it.
+    SongLinkPacket global;global.channelID=-1;global.flags=1;global.stageCount=1;
+    global.stages[0]={.5f,1024,0,91};
     {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         auto sendFor=[&](unsigned count){for(unsigned i=0;i<count;++i){
-            sender.send(packet,os_gettime_ns());std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sender.send(packet,os_gettime_ns());sender.send(global,os_gettime_ns());
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }};
         sendFor(20);
         bool heard=false;for(const auto& block:capturedBlocks())for(float sample:block.samples)heard|=sample>.05f;
         check(heard,"output resync test starts audible music");
         auto delayedAt=os_gettime_ns();source.testOutputDelayMs=180;
         sendFor(70);
-        unsigned audible=0,blocks=0;
+        unsigned audible=0,blocks=0,crossings=0;float previous=0;
         for(const auto& block:capturedBlocks())if(block.wall>delayedAt+300000000){
             ++blocks;if(std::any_of(block.samples.begin(),block.samples.end(),[](float sample){return sample>.05f;}))++audible;
+            if(block.wall<delayedAt+600000000)
+                for(size_t i=0;i<480;++i){
+                    auto sample=block.samples[i*2];
+                    crossings+=previous<0&&sample>=0;
+                    previous=sample;
+                }
         }
+        const auto hz=double(crossings)/.3;
+        std::cout<<"Resync group stage: "<<hz<<" Hz\n";
         check(blocks>=20 && audible>=blocks-2,"music resumes after injected output stall resynchronizes timestamp grid");
+        check(hz>200 && hz<240,"the group stage still applies after the resync");
     }
     receiver.reset();
 }
