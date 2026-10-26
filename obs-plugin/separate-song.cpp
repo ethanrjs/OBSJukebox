@@ -68,7 +68,7 @@ static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, 
     if (!std::isfinite(p.musicVolume) || p.musicVolume < 0 || p.musicVolume > 1 ||
         !std::isfinite(p.effectsVolume) || p.effectsVolume < 0 || p.effectsVolume > 1 ||
         !std::isfinite(p.position) || p.position < -600 || p.position >= 86400 ||
-        !std::isfinite(p.offset) || !std::isfinite(p.rate) || p.rate < .25 || p.rate > 4 ||
+        !std::isfinite(p.offset) || !std::isfinite(p.rate) || p.rate <= 0 || p.rate > 16 ||
         p.channelID < -1 || p.channelID >= SONG_LINK_MAX_CHANNELS ||
         !std::isfinite(p.triggerGain) || p.triggerGain < 0 || p.triggerGain > 16 ||
         p.fadeCount > 8)

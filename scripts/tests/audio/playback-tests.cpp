@@ -862,6 +862,66 @@ static void driftCorrectionTest() {
     if(early<.015 || late>early-.0015)std::cerr<<"Drift correction: behind "<<early*1000<<" ms, then "<<late*1000<<" ms\n";
     check(early>.015 && late<early-.0015,"a 20 ms position error is steered out without a seek");
 }
+// A speedhack can move GD's music far outside [0.25, 4]. OBS must follow at the same rate, not drop
+// the packets, and it must not seek to correct a rate it should already be playing. ramp.wav plays
+// .1+seconds*.1, so a sample gives back the song position OBS played.
+static void speedhackTest(double rate,double start,unsigned reports,uint64_t measureFrom,uint64_t measureNs,double tolerance,const char* what) {
+    Simulation sim;
+    auto base=sim.now;
+    SongLinkPacket p;p.flags=3;p.epoch=40;p.position=start;p.rate=rate;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.send(p,base);
+    sim.start();
+    for(unsigned i=1;i<=reports;++i){                    // GD reports every 50 ms
+        auto at=base+i*50000000ULL;
+        if(sim.now+60000000<at)sim.advance(at-60000000-sim.now);
+        p.position=start+double(i)*.05*rate;sim.send(p,at);
+    }
+    sim.advance(120000000);
+    // One seek starts each voice on its first block; any more means OBS could not follow the rate.
+    unsigned seeks=0,voices=0;
+    for(const auto& voice:sim.source->voices)if(voice){++voices;seeks+=voice->decoder.testSeekCount.load();}
+    double worst=0;int heard=0;
+    for(uint64_t t=base+measureFrom;t<base+measureFrom+measureNs;t+=50000000)
+        for(const auto& b:sim.output)if(t>=b.timestamp && t<b.timestamp+10000000){
+            size_t frame=size_t((t-b.timestamp)*48000/1000000000);
+            if(b.samples[frame*2]==0)break;
+            ++heard;
+            double played=(b.samples[frame*2]-.1)/.1,reported=start+double(t-base)/1e9*rate;
+            worst=std::max(worst,std::abs(reported-played));
+            break;
+        }
+    const int expected=int(measureNs/50000000);
+    if(heard<expected-1 || worst>tolerance || seeks>voices)
+        std::cerr<<what<<": heard "<<heard<<" of "<<expected<<", worst error "<<worst*1000
+                 <<" ms, "<<seeks<<" decoder seeks for "<<voices<<" voices\n";
+    check(heard>=expected-1 && worst<=tolerance && seeks<=voices,what);
+}
+// Rates below the old 0.25x floor are the issue's beat repeat; the ceiling is the decoder cache.
+static void slowSpeedhackTest(){speedhackTest(.1,1,30,200000000,1200000000,.01,"music at a 0.1x speedhack plays at 0.1x without jumps");}
+static void verySlowSpeedhackTest(){speedhackTest(.01,1,30,200000000,1200000000,.002,"music at a 0.01x speedhack plays at 0.01x without jumps");}
+// From 0.05 s, 16x reaches the end of the four-second ramp after about 250 ms of wall time.
+static void fastSpeedhackTest(){speedhackTest(16,.05,6,20000000,200000000,.1,"music at a 16x speedhack plays at 16x without jumps");}
+// At 0.0001x the ramp moves less than one PCM step, so this proves OBS accepts the packet, plays it
+// and does not seek; the speed mapping itself is covered by the faster rates.
+static void crawlSpeedhackTest(){speedhackTest(.0001,1,30,200000000,1200000000,.001,"music at a 0.0001x speedhack plays without jumps");}
+// The parser keeps a valid rate for every speedhack FMOD can play at a usable pace, and refuses a
+// stop, a negative or nonfinite rate, and the decoder-cache ceiling with one more step.
+static void rateBoundsTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=1;p.epoch=0;
+    for(double rate:{0.,-1.,std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::infinity(),16.5}){
+        p.rate=rate;++p.epoch;
+        sim.send(p,sim.now);sim.advance(15000000);
+        std::string what="the music rate "+std::to_string(rate)+" is refused";
+        check(receiver->get().packet.epoch!=p.epoch,what.c_str());
+    }
+    for(double rate:{.0001,.01,16.}){
+        p.rate=rate;++p.epoch;
+        sim.send(p,sim.now);sim.advance(15000000);
+        std::string what="the music rate "+std::to_string(rate)+" is accepted";
+        check(receiver->get().packet.epoch==p.epoch && receiver->get().packet.rate==rate,what.c_str());
+    }
+}
 static void localFilesOnlyTest() {
     Decoder decoder;bool refused=true;
     for(const char* path:{"https://example.com/song.mp3","\\\\server\\share\\song.mp3","//server/share/song.mp3",
@@ -954,7 +1014,8 @@ int main(int argc,char** argv){
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
     multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
-    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();senderInvalidPathTest();utf8Test();
+    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();
+    slowSpeedhackTest();verySlowSpeedhackTest();crawlSpeedhackTest();fastSpeedhackTest();rateBoundsTest();senderTest();senderInvalidPathTest();utf8Test();
     pitchShifterTest();receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();

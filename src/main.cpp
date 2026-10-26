@@ -18,8 +18,10 @@
 #include "MusicSampling.hpp"
 #include "GamePolicies.hpp"
 #include "MonotonicClock.hpp"
+#include <array>
 #include <map>
 #include <set>
+#include <span>
 #include <chrono>
 #include <cmath>
 #include <optional>
@@ -40,6 +42,7 @@ struct MusicVoice {
     FMOD::Sound* sound = nullptr;
     double duration = 0;
     bool loop = false, scheduledStop = false, continuing = false, explicitlyStopped = false, dontReset = false;
+    bool rateStopped = false;
     int engineChannelID = 0;
     float lastFade = 1.f;
     std::vector<MusicFade> fadePoints;
@@ -72,22 +75,26 @@ static bool channelPaused(FMOD::Channel* channel) {
     }
     return false;
 }
-static double channelRate(FMOD::Channel* channel, FMOD::Sound* sound) {
-    float base = 0.f, frequency = 0.f, pitch = 1.f;
-    sound->getDefaults(&base, nullptr);
-    channel->getFrequency(&frequency);
-    channel->getPitch(&pitch);
-    double rate = base > 0 && frequency > 0 ? frequency / base : 1.;
-    rate *= pitch;
+static std::optional<double> channelRate(FMOD::Channel* channel, FMOD::Sound* sound) {
+    std::optional<float> base, frequency;
+    float value = 0.f;
+    if (sound->getDefaults(&value, nullptr) == FMOD_OK) base = value;
+    value = 0.f;
+    if (channel->getFrequency(&value) == FMOD_OK) frequency = value;
+    std::array<std::optional<float>, 17> pitches{};
+    size_t count = 0;
+    value = 1.f;
+    if (channel->getPitch(&value) == FMOD_OK) pitches[count++] = value;
     FMOD::ChannelGroup* group = nullptr;
     channel->getChannelGroup(&group);
     for (int depth = 0; group && depth < 16; ++depth) {
-        pitch = 1.f; group->getPitch(&pitch); rate *= pitch;
+        value = 1.f;
+        if (group->getPitch(&value) == FMOD_OK) pitches[count++] = value;
         FMOD::ChannelGroup* parent = nullptr;
         if (group->getParentGroup(&parent) != FMOD_OK || parent == group) break;
         group = parent;
     }
-    return std::isfinite(rate) ? std::clamp(rate, .25, 4.) : 1.;
+    return sampledMusicRate(base, frequency, std::span(pitches.data(), count));
 }
 // A channel's position in seconds and the wall time it is true at. FMOD advances the position
 // once per mixer block (~21 ms), so dating it with the DSP clock of the effects group, which the
@@ -238,8 +245,10 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
     }
     out.channelID = id; out.timestamp = sampleTime;
     out.position = position;
-    out.playing = !channelPaused(channel);
-    out.rate = channelRate(channel, sound);
+    const auto rate = channelRate(channel, sound);
+    voice.rateStopped = !rate;
+    out.rate = rate.value_or(previousRate > 0 && std::isfinite(previousRate) ? std::min(previousRate, 16.) : 1.);
+    out.playing = !voice.rateStopped && !channelPaused(channel);
     double elapsed = previousTimestamp && sampleTime >= previousTimestamp ? (sampleTime - previousTimestamp) / 1e9 : 0.;
     if (newVoice || !previousTimestamp || musicPositionJump(previousPosition, out.position,
             previousPlaying ? elapsed : 0., previousRate)) out.epoch = ++nextEpoch;
@@ -324,7 +333,7 @@ static void sampleMusic(PlayLayer* play) {
             bool deathPause = play->m_player1 && play->m_player1->m_isDead &&
                 !play->m_gameState.m_audioOnDeath && !voice.dontReset &&
                 !(play->m_isPracticeMode && !play->m_practiceMusicSync);
-            out.playing = !paused && !play->m_isPaused && !deathPause;
+            out.playing = !paused && !play->m_isPaused && !deathPause && !voice.rateStopped;
             if (!paused && out.fadeCount) {
                 std::vector<MusicFade> points{{0, out.triggerGain}};
                 for (unsigned i = 0; i < out.fadeCount; ++i)

@@ -3,8 +3,12 @@
 #include "../../src/GamePolicies.hpp"
 #include "../../src/LinkPacket.hpp"
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <optional>
+#include <span>
 #include <unordered_map>
 
 using namespace separate_song;
@@ -86,5 +90,40 @@ int main() {
         "packet fade offsets are strictly increasing and inside protocol limits");
     check(packet[1].gain == 0 && packet[2].gain == 0,
         "scheduled stop wins duplicate timestamp and nonfinite gains are silent");
+    using separate_song::sampledMusicRate;
+    std::array<std::optional<float>, 2> pitches{1.f, .01f};
+    auto slow = sampledMusicRate(48000.f, 48000.f, pitches);
+    check(slow && std::abs(*slow - .01) < 1e-9, "minor group pitch is followed without a 0.25x floor");
+    pitches = {4.f, 8.f};
+    check(sampledMusicRate(48000.f, 48000.f, pitches) == 16., "combined rate stops at 16x");
+    pitches = {1.f, 1.f};
+    check(sampledMusicRate(48000.f, 48000.f, pitches) == 1., "unit factors leave the rate at 1");
+    check(std::abs(*sampledMusicRate(48000.f, 24000.f, pitches) - .5) < 1e-9,
+        "channel frequency below the sound base slows playback");
+    check(sampledMusicRate(0.f, 48000.f, pitches) == 1., "zero base frequency leaves the frequency ratio at one");
+    check(sampledMusicRate(std::numeric_limits<float>::infinity(), 48000.f, pitches) == 1.,
+        "nonfinite base frequency leaves the frequency ratio at one");
+    check(sampledMusicRate(std::numeric_limits<float>::quiet_NaN(), 48000.f, pitches) == 1.,
+        "NaN base frequency leaves the frequency ratio at one");
+    check(!sampledMusicRate(0.f, 0.f, pitches), "read zero frequency stops even with a rejected base");
+    check(!sampledMusicRate(std::nullopt, 0.f, pitches), "read zero frequency stops even with no base");
+    check(!sampledMusicRate(48000.f, std::numeric_limits<float>::quiet_NaN(), pitches),
+        "nonfinite frequency stops the music");
+    check(!sampledMusicRate(48000.f, 0.f, pitches), "read zero frequency stops the music");
+    check(!sampledMusicRate(48000.f, -1.f, pitches), "negative frequency stops the music");
+    check(sampledMusicRate(48000.f, std::nullopt, pitches) == 1., "failed frequency read leaves the ratio at one");
+    pitches = {1.f, std::nullopt};
+    check(sampledMusicRate(48000.f, 48000.f, pitches) == 1., "failed group pitch read leaves the ratio at one");
+    pitches = {1.f, 0.f};
+    check(!sampledMusicRate(48000.f, 48000.f, pitches), "zero group pitch stops the music");
+    pitches = {-1.f, -1.f};
+    check(!sampledMusicRate(48000.f, 48000.f, pitches), "two negative pitches cannot multiply back to playing");
+    pitches = {1.f, std::numeric_limits<float>::quiet_NaN()};
+    check(!sampledMusicRate(48000.f, 48000.f, pitches), "nonfinite pitch stops the music");
+    pitches = {1.f, std::numeric_limits<float>::infinity()};
+    check(!sampledMusicRate(48000.f, 48000.f, pitches), "infinite pitch stops the music");
+    pitches = {1.f, .00001f};
+    auto verySlow = sampledMusicRate(48000.f, 48000.f, pitches);
+    check(verySlow && std::abs(*verySlow - .00001) < 1e-12, "rates below 0.25x stay below 0.25x");
     std::cout << checks << " game identity checks passed\n";
 }

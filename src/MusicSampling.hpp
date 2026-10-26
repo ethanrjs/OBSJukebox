@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -26,6 +27,24 @@ inline float musicFadeAt(std::span<const MusicFade> points, uint64_t clock) {
         return finiteMusicGain(float(a.gain + (b.gain - a.gain) * fraction));
     }
     return finiteMusicGain(points.back().gain);
+}
+// The speed GD plays a channel at, from the factors FMOD reports. A factor the caller could not read
+// stays at one. A read channel frequency or pitch at or below zero means the music is not moving, which
+// is not a speed OBS can follow: the schedule says so and OBS holds its position. FMOD itself plays far
+// beyond 16x, but the decoder's cache does not.
+inline std::optional<double> sampledMusicRate(std::optional<float> base, std::optional<float> frequency,
+                                              std::span<const std::optional<float>> pitches) {
+    double rate = 1;
+    if (frequency && (!std::isfinite(*frequency) || !(*frequency > 0))) return std::nullopt;
+    if (base && frequency && std::isfinite(*base) && *base > 0)
+        rate = double(*frequency) / double(*base);
+    for (const auto& pitch : pitches) {
+        if (!pitch) continue;
+        if (!(*pitch > 0) || !std::isfinite(*pitch)) return std::nullopt;
+        rate *= double(*pitch);
+    }
+    if (!(rate > 0) || !std::isfinite(rate)) return std::nullopt;
+    return std::min(rate, 16.);
 }
 inline bool musicPositionJump(double previous, double current, double elapsed, double rate) {
     return std::abs(current - (previous + elapsed * rate)) > .075;
