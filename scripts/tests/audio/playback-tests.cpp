@@ -1013,8 +1013,18 @@ static void blockQueueTest() {
     for(uint64_t i=0;i<4;++i){block[0]=float(i);all&=queue.push(2000+i*ns,block,0,2000);}
     check(all && !queue.push(2000+4*ns,block,0,2000),"four blocks wait at most");
     check(queue.take(2000+ns,0,out) && out[0]==1,"taking a block drops the older ones before it");
-    check(!queue.take(2000+2*ns,1,out),"a block from an older generation never plays");
-    check(queue.push(2000+5*ns,block,0,2000+3*ns) && queue.take(2000+5*ns,0,out),"the queue keeps working after it fills");
+    // Two slots wait; two more wrap around the ring and fill it.
+    block[0]=4;all=queue.push(2000+4*ns,block,0,2000+2*ns);
+    block[0]=5;all&=queue.push(2000+5*ns,block,0,2000+2*ns);
+    check(all && !queue.push(2000+6*ns,block,0,2000+2*ns),"a ring that wrapped still holds four blocks");
+    bool ordered=true;
+    for(uint64_t i=2;i<6;++i)ordered&=queue.take(2000+i*ns,0,out) && out[0]==float(i);
+    check(ordered,"a wrapped ring plays its blocks in order");
+    // The output asks for a block before it moves `wanted` on; a block it missed must not queue.
+    check(!queue.take(2000+6*ns,0,out) && !queue.push(2000+6*ns,block,0,2000+6*ns),
+          "a block the output just missed is refused before it moves on");
+    check(queue.push(2000+7*ns,block,0,2000+7*ns) && !queue.take(2000+7*ns,1,out),
+          "a block from an older generation never plays");
 }
 static void senderTest() {
     separate_song::Snapshot s;s.timestamp=monotonicNowNs();s.position=1.25;

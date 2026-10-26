@@ -9,6 +9,8 @@ struct StressRun {
     // Windows' default 15.6 ms timer, which it may give OBS while minimized despite libobs's request.
     bool coarseTimer=false;
     uint64_t effectsLatenessNs=0; // how long after its timestamp each effects packet is sent
+    // GD's tap sends 512 frames at the game's output rate, often 44.1 kHz.
+    unsigned effectsFrames=480,effectsRate=48000;
 };
 // A real-worker stress run: five voices carry ten 4096 stages, the global adds a group stage, and
 // eight post-tap effects stages share the same hop grid. Measured after a 1 s warm-up; the raw miss
@@ -67,11 +69,12 @@ static uint64_t pitchStressRun(const StressRun& run) {
             if(loop)position=1+std::fmod(position-1,2.0);
             sender.send(global,now);
             for(auto&p:voices){p.position=position;p.flags=paused?1:(3|(loop?4:0));sender.send(p,now);}
-            EffectsPacketV2 effect;effect.sessionID=sender.session;effect.frames=480;effect.sampleRate=48000;
+            EffectsPacketV2 effect;effect.sessionID=sender.session;effect.frames=run.effectsFrames;
+            effect.sampleRate=run.effectsRate;
             effect.sequence=unsigned(elapsed/10000000);effect.timestamp=now-run.effectsLatenessNs;
-            for(unsigned i=0;i<480;++i)
-                effect.samples[i*2]=effect.samples[i*2+1]=float(
-                    .2*std::sin(2*3.14159265358979*440*(double(elapsed)/1e9*48000+double(i))/48000));
+            for(unsigned i=0;i<run.effectsFrames;++i)
+                effect.samples[i*2]=effect.samples[i*2+1]=float(.2*std::sin(
+                    2*3.14159265358979*440*(double(elapsed)/1e9*run.effectsRate+double(i))/run.effectsRate));
             sendto(effects,reinterpret_cast<const char*>(&effect),44+effect.frames*8,0,
                    reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -107,15 +110,20 @@ static void pitchStressTest() {
     pitchStressRun({.loop=true,.coarseTimer=true});
     pitchStressRun({.checkBudget=false,.voices=64,.seconds=3,.voiceStages=false});
 }
-// The worker renders a staged block when the output starts the block before it, 20 ms after the
-// block's timestamp, so a packet may arrive up to 10 ms after its own last frame. Later ones lose
-// frames; unstaged blocks keep the output's full margin.
+// The worker renders a staged block when the output starts the block before it, at least 20 ms
+// after the block's timestamp, so each frame may arrive up to 10 ms after its own time: a packet up
+// to 10 ms after its timestamp. A packet 20 ms late has frames 10 to 20 ms late, which are lost.
 static void effectsLatenessTest() {
-    const StressRun light{.voices=0,.seconds=4,.effectsStages=1};
-    auto within=light;within.effectsLatenessNs=5000000;
-    auto beyond=light;beyond.effectsLatenessNs=20000000;
-    check(pitchStressRun(within)==0,"staged effects sent 5 ms late lose no frames");
-    check(pitchStressRun(beyond)>0,"staged effects sent 20 ms late lose frames, as the 10 ms margin says");
+    for(const unsigned rate:{48000u,44100u}){
+        StressRun light{.voices=0,.seconds=4,.effectsStages=1};
+        if(rate==44100){light.effectsFrames=512;light.effectsRate=44100;}
+        auto within=light;within.effectsLatenessNs=5000000;
+        auto beyond=light;beyond.effectsLatenessNs=20000000;
+        check(pitchStressRun(within)==0,rate==44100?"tap-sized 44.1 kHz staged effects sent 5 ms late lose no frames"
+                                                     :"staged effects sent 5 ms late lose no frames");
+        check(pitchStressRun(beyond)>0,rate==44100?"tap-sized 44.1 kHz staged effects sent 20 ms late lose frames"
+                                                     :"staged effects sent 20 ms late lose frames");
+    }
 }
 // Slow effects work (a burst of 4096 stages, a reset, a preempted thread) must not hold up the output
 // or the music. Once it catches up, effects play at their own timestamps: each packet carries a

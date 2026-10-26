@@ -27,6 +27,10 @@
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
+#ifdef _WIN32
+#include <windows.h>
+#include <avrt.h>
+#endif
 #if defined(__linux__)
 #include "LinuxPaths.hpp"
 #endif
@@ -45,13 +49,34 @@ MODULE_EXPORT const char *obs_module_author(void) { return "babbur"; }
 #endif
 
 using Clock = std::chrono::steady_clock;
-static void configureAudioThread() {
-#ifdef __APPLE__
-    // Both workers must meet 10 ms audio deadlines, including in background OBS.
-    if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) != 0)
-        blog(LOG_ERROR, "OBS Jukebox: could not configure audio thread scheduling");
+// For the life of an audio thread, asks for the scheduling OBS gives its own audio thread. The
+// output thread and both workers must meet 10 ms deadlines while OBS encodes and renders, and in
+// background OBS. On Windows that is MMCSS's "Audio" task, as in libobs's media-io/audio-io.c.
+class AudioThreadScheduling {
+#ifdef _WIN32
+    HANDLE task = nullptr;
 #endif
-}
+public:
+    AudioThreadScheduling() {
+#ifdef __APPLE__
+        if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) != 0)
+            blog(LOG_ERROR, "OBS Jukebox: could not configure audio thread scheduling");
+#elif defined(_WIN32)
+        DWORD index = 0;
+        task = AvSetMmThreadCharacteristicsW(L"Audio", &index);
+        if (!task)
+            blog(LOG_WARNING, "OBS Jukebox: could not configure audio thread scheduling");
+#endif
+    }
+    ~AudioThreadScheduling() {
+#ifdef _WIN32
+        if (task)
+            AvRevertMmThreadCharacteristics(task);
+#endif
+    }
+    AudioThreadScheduling(const AudioThreadScheduling &) = delete;
+    AudioThreadScheduling &operator=(const AudioThreadScheduling &) = delete;
+};
 struct LinkState {
     SongLinkPacket packet;
     Clock::time_point received{};
@@ -591,17 +616,21 @@ struct SongSource {
         std::condition_variable ready;
         std::array<Block, 4> slots;
         size_t first = 0, count = 0;
+        // The last block the output asked for: played or missed, it is past. The output asks before
+        // it moves `wanted` on, so this catches a block that missed by a moment.
+        uint64_t asked = 0;
 
         void clear() {
             std::lock_guard lock(mutex);
             count = 0;
+            asked = 0;
         }
         // Queues a block unless four already wait or the output has already passed it (`wanted` is
         // the next block it mixes). False means the output will never play this block.
         bool push(uint64_t timestamp, const AudioBlock &samples, uint64_t generation, uint64_t wanted) {
             std::lock_guard lock(mutex);
             dropBefore(wanted);
-            if (timestamp < wanted || count == slots.size())
+            if (timestamp < wanted || timestamp <= asked || count == slots.size())
                 return false;
             slots[(first + count++) % slots.size()] = {timestamp, samples, generation};
             return true;
@@ -611,6 +640,7 @@ struct SongSource {
         // try-lock would turn harmless microsecond contention into silence.
         bool take(uint64_t timestamp, uint64_t generation, AudioBlock &out) {
             std::lock_guard lock(mutex);
+            asked = timestamp;
             dropBefore(timestamp);
             while (count && slots[first].generation != generation)
                 drop();
@@ -985,7 +1015,7 @@ struct SongSource {
     }
     // Music decodes up to two blocks ahead, since opening, seeking and decoding take variable time.
     void decodeMusic() {
-        configureAudioThread();
+        const AudioThreadScheduling scheduling;
         produceBlocks(musicBlocks, 2, [&](uint64_t t, AudioBlock &audio) { renderMusic(t, audio, os_gettime_ns()); },
                       [&] { resetMusicChains(); });
         // On Windows each decoder started COM on this thread when it opened, so it has to close here too.
@@ -994,11 +1024,12 @@ struct SongSource {
     }
     // Effects with stages render one block ahead of the output: enough for an output thread that
     // wakes on 15.6 ms timer ticks and mixes two blocks at once. Effects arrive over the network just
-    // in time, so that lead costs margin: the last frame of a staged block has to arrive within 10 ms
-    // of its timestamp instead of 30. A block without stages never waits for this worker; the output
+    // in time, so that lead costs margin. A staged block renders at least 20 ms after its timestamp,
+    // so each frame has to arrive within 10 ms of its own time, which means a packet within 10 ms of
+    // its timestamp, instead of 30. A block without stages never waits for this worker; the output
     // thread mixes it itself (mixBlock), with the full margin.
     void renderEffectsBlocks() {
-        configureAudioThread();
+        const AudioThreadScheduling scheduling;
         produceBlocks(effectsBlocks, 1, [&](uint64_t t, AudioBlock &audio) {
             if (active)
                 renderEffects(t, audio);
@@ -1043,18 +1074,19 @@ struct SongSource {
         });
     }
 #ifdef OBS_JUKEBOX_QA
-    // Counts the frames of a staged block whose effects packets arrived after the worker rendered
-    // it: mixed again now, they differ from what the worker mixed.
+    // Counts the frames of a staged block that reached the worker too late: mixed again now, they
+    // differ from what the worker mixed. A block the worker rendered before its stages arrived
+    // played silent, so all of its audible frames count.
     void countLateEffects(const std::vector<SongLinkPacket> &window, uint64_t timestamp) {
         AudioBlock now{};
         mixGameEffects(window, timestamp, now);
         std::lock_guard lock(testDryMutex);
-        const auto &rendered = testDry[timestamp / blockNs % testDry.size()];
-        if (rendered.timestamp != timestamp)
-            return;
+        const auto &stored = testDry[timestamp / blockNs % testDry.size()];
+        static const AudioBlock silence{};
+        const auto &rendered = stored.timestamp == timestamp ? stored.samples : silence;
         for (size_t f = 0; f < blockFrames; ++f)
-            testLateFrames += std::abs(now[f * 2] - rendered.samples[f * 2]) > 1e-6f ||
-                              std::abs(now[f * 2 + 1] - rendered.samples[f * 2 + 1]) > 1e-6f;
+            testLateFrames += std::abs(now[f * 2] - rendered[f * 2]) > 1e-6f ||
+                              std::abs(now[f * 2 + 1] - rendered[f * 2 + 1]) > 1e-6f;
     }
 #endif
     // The output block starting at `timestamp`: the music worker's block and the effects, each
@@ -1100,7 +1132,7 @@ struct SongSource {
             ++testEffectsMissesRaw;
             testEffectsMisses += measured;
         }
-        if (staged && hasEffects)
+        if (measured && staged && hasEffects)
             countLateEffects(window, timestamp);
 #endif
         for (size_t i = 0; i < audio.size(); ++i)
@@ -1112,7 +1144,7 @@ struct SongSource {
         return audio;
     }
     void run() {
-        configureAudioThread();
+        const AudioThreadScheduling scheduling;
         // Prefill one block while retaining the existing 40 ms output timeline delay.
         uint64_t timestamp = os_gettime_ns() - bufferingNs + blockNs;
         wantedTimestamp = timestamp;
