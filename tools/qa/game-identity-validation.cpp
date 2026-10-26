@@ -1,5 +1,6 @@
 #include "../../src/PlaybackIdentity.hpp"
 #include "../../src/MusicSampling.hpp"
+#include "../../src/PitchStages.hpp"
 #include "../../src/GamePolicies.hpp"
 #include "../../src/LinkPacket.hpp"
 #include <array>
@@ -125,5 +126,28 @@ int main() {
     pitches = {1.f, .00001f};
     auto verySlow = sampledMusicRate(48000.f, 48000.f, pitches);
     check(verySlow && std::abs(*verySlow - .00001) < 1e-12, "rates below 0.25x stay below 0.25x");
+    using separate_song::ObservedDsp;
+    using separate_song::pitchStages;
+    std::array<ObservedDsp, 4> observed{{
+        {13, .75f, 4096.f, true, 41}, {13, 1.f, 1024.f, true, 42},
+        {13, 2.f, 2048.f, false, 43}, {7, 1.f, 1024.f, true, 44}}};
+    auto stages = pitchStages(observed);
+    check(stages.count == 2 && stages.stages[0].instance == 41 && stages.stages[1].instance == 42 &&
+              !stages.overflow,
+          "qualified pitch stages keep signal order and skip bypassed and other DSPs");
+    observed = {{{13, .2f, 1024.f, true, 1}, {13, 3.f, 2048.f, true, 2},
+                 {13, 1.f, 1000.f, true, 3}, {13, 1.f, 4096.f, true, 0}}};
+    stages = pitchStages(observed);
+    check(stages.count == 2 && stages.stages[0].pitch == .5f && stages.stages[1].pitch == 2.f,
+          "stage pitch is clamped like FMOD and unsupported sizes and instances are refused");
+    observed[0] = {13, std::numeric_limits<float>::quiet_NaN(), 1024.f, true, 5};
+    observed[1] = {13, 1.f, std::numeric_limits<float>::infinity(), true, 6};
+    check(pitchStages(observed).count == 0, "nonfinite stage parameters are refused");
+    std::array<ObservedDsp, 9> many{};
+    for (unsigned i = 0; i < many.size(); ++i)
+        many[i] = {13, 1.f, 1024.f, true, 100 + i};
+    stages = pitchStages(many);
+    check(stages.count == 8 && stages.stages[7].instance == 107 && stages.overflow,
+          "more than eight qualified stages keep the first eight and report overflow");
     std::cout << checks << " game identity checks passed\n";
 }

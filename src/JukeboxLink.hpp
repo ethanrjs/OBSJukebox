@@ -13,6 +13,8 @@ void refreshUI();
 struct MusicSource { std::string path; std::vector<int> extraIDs; };
 using LevelSongs = std::vector<int>;
 LevelSongs snapshotSongs(GJGameLevel* level);
-void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source);
+// Picks the OBS file for a song. Returns true only when it selected an OBS replacement whose file
+// differs from the game's own, so the caller knows the audio OBS plays is not the game's audio.
+bool fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source);
 Readiness prepare(GJGameLevel* level, bool retry = false);
 }

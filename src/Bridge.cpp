@@ -116,13 +116,6 @@ void Bridge::publish(const Snapshot &s) {
     }
     send(&p, sizeof(p));
 }
-void Bridge::publish(PitchPacket p) {
-    if (socket == BAD_SOCKET)
-        return;
-    p.sessionID = processSessionID();
-    p.timestamp = monotonicNowNs();
-    send(&p, sizeof(p));
-}
 void Bridge::send(const void *packet, size_t size) {
     sockaddr_in address{};
     address.sin_family = AF_INET;

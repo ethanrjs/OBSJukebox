@@ -36,7 +36,6 @@ class Bridge {
     bool start();
     void shutdown();
     void publish(const Snapshot &snapshot);
-    void publish(PitchPacket packet);
 };
 Bridge &bridge();
 } // namespace separate_song
