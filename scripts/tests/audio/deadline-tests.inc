@@ -9,6 +9,9 @@ static void musicDeadlineTest(bool delayedOpen) {
     Decoder::testOpenDelayMs=delayedOpen?180:0;
     SongLinkPacket p;p.flags=3;p.position=190;p.effectsVolume=1;
     std::strcpy(p.path,"artifacts/audio-tests/long.mp3");
+    // The global packet carries the game's effects state; the mod sends it every sample.
+    SongLinkPacket global;global.channelID=-1;global.flags=1;global.effectsVolume=1;
+    sender.send(global,os_gettime_ns());
     sender.send(p,os_gettime_ns());
     {
         SongSource source(nullptr);source.active=true;

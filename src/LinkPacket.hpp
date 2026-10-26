@@ -38,9 +38,10 @@ struct SongLinkPacket {
     uint32_t fadeCount = 0;
     SongFadePoint fades[8]{};
     double loopStart = 0, loopEnd = 0;
-    // v6. A voice packet carries its channel's stages; the global packet (channelID -1) carries the
-    // music group's stages and, in effectsStages, the SFX group's post-tap stages. Both lists include
-    // each parent group up to the master, in signal order. A voice packet has no effects stages;
+    // v6. A voice packet carries the stages on its own channel only, in signal order. The global
+    // packet (channelID -1) carries the music group's stages, then each parent group up to the
+    // master, in `stages`; and the SFX group's post-tap stages, then each parent group up to the
+    // master, in `effectsStages`. The lists never overlap. A voice packet has no effects stages;
     // flag 8 keeps a replacement song out of the music group's stages.
     uint8_t stageCount = 0;
     uint8_t effectsStageCount = 0;

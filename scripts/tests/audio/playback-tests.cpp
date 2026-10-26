@@ -292,7 +292,7 @@ static void staleChannelTest() {
 static void staleStatusEffectsTest() {
     Simulation sim;
     auto base=sim.now;
-    SongLinkPacket p;p.flags=1;sim.send(p,base-600000000);
+    SongLinkPacket p;p.flags=1;p.channelID=-1;sim.send(p,base-600000000);
     for(int i=0;i<12;++i){
         EffectsPacketV2 e;e.frames=480;e.sampleRate=48000;e.timestamp=base+i*10000000ULL;
         std::fill_n(e.samples,960,.25f);
@@ -313,7 +313,7 @@ static void staleStatusEffectsTest() {
 static void finiteOutputTest() {
     Simulation sim;
     auto base=sim.now;
-    SongLinkPacket p;p.flags=1;sim.send(p,base);
+    SongLinkPacket p;p.flags=1;p.channelID=-1;sim.send(p,base);
     for(int i=0;i<12;++i){
         EffectsPacketV2 e;e.frames=480;e.sampleRate=48000;e.sequence=i;e.timestamp=base+i*10000000ULL;
         for(unsigned s=0;s<960;++s)e.samples[s]=(s/2)%2?std::numeric_limits<float>::max():-std::numeric_limits<float>::max();
@@ -852,7 +852,7 @@ static void tapClockDriftTest() {
 static void effectsSeamTest(unsigned sampleRate) {
     Simulation sim;
     auto base=sim.now,first=base+7777;
-    SongLinkPacket p;p.flags=1;sim.send(p,base-50000000);
+    SongLinkPacket p;p.flags=1;p.channelID=-1;sim.send(p,base-50000000);
     auto tone=[&](double frame){return .25*std::sin(frame*2*3.14159265358979*3000/sampleRate);};
     unsigned frames=sampleRate/100;
     for(unsigned k=0;k<12;++k){

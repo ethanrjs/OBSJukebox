@@ -397,8 +397,8 @@ static void pitchInvalidInputTest() {
     chain.process(nullptr, 256, nullptr, 0);
     check(audio == untouched, "invalid stage lists are ignored without touching audio");
 }
-// A four-second 440 Hz tone, so a render test can tell 440 from 220 by counting crossings.
-static void writeTone(const char *path) {
+// A four-second tone at `hz`, so a render test can tell frequencies apart by counting crossings.
+static void writeTone(const char *path, double hz = 440) {
     std::ofstream out(path, std::ios::binary);
     constexpr uint32_t frames = 48000 * 4, bytes = frames * 4;
     auto word = [&](uint32_t value, int count) {
@@ -408,7 +408,7 @@ static void writeTone(const char *path) {
     word(1, 2); word(2, 2); word(48000, 4); word(48000 * 4, 4); word(4, 2); word(16, 2);
     out.write("data", 4); word(bytes, 4);
     for (uint32_t i = 0; i < frames; ++i) {
-        auto sample = int16_t(32767 * .3 * std::sin(2 * 3.14159265358979 * 440 * double(i) / 48000));
+        auto sample = int16_t(32767 * .3 * std::sin(2 * 3.14159265358979 * hz * double(i) / 48000));
         word(uint16_t(sample), 2); word(uint16_t(sample), 2);
     }
 }
@@ -548,7 +548,7 @@ static void pitchRenderRunTest() {
     run(false, dry, dryTimes);
     PitchChain chain(true, 512);
     PitchStage first{.5f, 1024, 0, 11}, second{2.f, 1024, 0, 11};
-    bool match = staged.size() == dry.size() && staged.size() > 20;
+    bool match = staged.size() == dry.size() && staged.size() > 20 && stagedTimes == dryTimes;
     for (size_t i = 0; match && i < dry.size(); ++i) {
         auto expected = dry[i];
         // The block the stage changes in is split at 505 ms; all others are wholly one stage.
@@ -562,12 +562,92 @@ static void pitchRenderRunTest() {
     }
     check(match, "a stage change inside a block applies from its packet's frame");
 }
+// Without a global packet the music has no group stages to follow, so it passes through as the
+// game's channel stages leave it.
+static void pitchRenderNoGlobalTest() {
+    Simulation sim;
+    const auto base = sim.now;
+    SongLinkPacket p;
+    p.flags = 3; p.epoch = 1;
+    std::strcpy(p.path, "artifacts/audio-tests/tone.wav");
+    sim.start();
+    playTone(sim, p, base, 900000000);
+    const double hz = toneHz(sim, base + 300000000, base + 800000000);
+    if (std::abs(hz - 440) > 18) std::cerr << "no global: " << hz << " Hz\n";
+    check(std::abs(hz - 440) <= 18, "without a global packet the music passes through unchanged");
+}
+// Two voices in one block: the group stage runs once on the eligible voice, and an excluded voice
+// reaches the output unshifted. Both are compared exactly against the same voices played alone.
+static void pitchRenderTwoVoiceTest() {
+    auto run = [&](bool eligibleOn, bool excludedOn, std::vector<std::vector<float>> &blocks,
+                   std::vector<uint64_t> &times) {
+        Simulation sim;
+        const auto base = sim.now;
+        SongLinkPacket global;
+        global.channelID = -1; global.flags = 1; global.epoch = 1;
+        global.stageCount = 1; global.stages[0] = {.5f, 1024, 0, 12};
+        SongLinkPacket eligible;
+        eligible.channelID = 0; eligible.flags = 3; eligible.epoch = 1;
+        std::strcpy(eligible.path, "artifacts/audio-tests/tone.wav");
+        SongLinkPacket excluded = eligible;
+        excluded.channelID = 1; excluded.flags = 3 | 8;
+        std::strcpy(excluded.path, "artifacts/audio-tests/tone-high.wav");
+        sim.start();
+        while (sim.now < base + 900000000) {
+            heartbeat(sim, global, base);
+            if (eligibleOn) heartbeat(sim, eligible, base);
+            if (excludedOn) heartbeat(sim, excluded, base);
+            sim.advance(10000000);
+        }
+        for (const auto &block : sim.output) {
+            blocks.push_back(block.samples);
+            times.push_back(block.timestamp);
+        }
+    };
+    std::vector<std::vector<float>> eligible, excluded, both;
+    std::vector<uint64_t> eligibleTimes, excludedTimes, bothTimes;
+    run(true, false, eligible, eligibleTimes);
+    run(false, true, excluded, excludedTimes);
+    run(true, true, both, bothTimes);
+    bool match = both.size() == eligible.size() && both.size() == excluded.size() &&
+                 bothTimes == eligibleTimes && bothTimes == excludedTimes;
+    for (size_t i = 0; match && i < both.size(); ++i)
+        for (size_t f = 0; f < both[i].size(); ++f)
+            match &= both[i][f] == eligible[i][f] + excluded[i][f];
+    check(match, "a group stage runs once on the eligible voice and an excluded voice bypasses it");
+}
+// A voice packet is not the global state: with no global packet, effects are not mixed at all.
+static void pitchRenderNoEffectsWithoutGlobalTest() {
+    Simulation sim;
+    const auto base = sim.now;
+    SongLinkPacket voice;
+    voice.flags = 3; voice.epoch = 1; // no path: this voice plays nothing
+    sim.send(voice, base);
+    sim.start();
+    for (int i = 0; i < 30; ++i) {
+        EffectsPacketV2 effect;
+        effect.frames = 480; effect.sampleRate = 48000; effect.sequence = i;
+        effect.timestamp = base + uint64_t(i) * 10000000;
+        for (unsigned f = 0; f < 480; ++f)
+            effect.samples[f * 2] = effect.samples[f * 2 + 1] = .25f;
+        sim.sendEffects(effect);
+        sim.advance(10000000);
+    }
+    bool silent = true;
+    for (const auto &block : sim.output)
+        for (float sample : block.samples) silent &= sample == 0;
+    check(silent, "effects are not mixed without a global packet");
+}
 static void pitchRenderTests() {
     writeTone("artifacts/audio-tests/tone.wav");
+    writeTone("artifacts/audio-tests/tone-high.wav", 660);
     pitchRenderChannelTest();
     pitchRenderGroupTest();
     pitchRenderEffectsTest();
     pitchRenderRunTest();
+    pitchRenderNoGlobalTest();
+    pitchRenderTwoVoiceTest();
+    pitchRenderNoEffectsWithoutGlobalTest();
 }
 
 static void pitchTests() {

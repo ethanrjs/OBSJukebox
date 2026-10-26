@@ -594,7 +594,7 @@ struct SongSource {
         std::array<float, declickFrames * 2> tail{};
         size_t tailRead = declickFrames; // next tail frame to mix; declickFrames when empty
         PitchChain chain;                // this channel's stages, decoder thread only
-        uint64_t chainSession = 0;
+        uint64_t chainSession = 0;       // 0 is never a wire session, so the first packet resets
 
         // Continues the audio that was playing for declickFrames while fading it to silence,
         // so the next state crossfades in instead of cutting. Call before the decoder seeks or
@@ -770,6 +770,21 @@ struct SongSource {
         v.lastEpoch = p.epoch;
         v.lastRate = rate;
     }
+    // Drops what the decoder thread's stages hold for blocks that will never reach the speakers.
+    void resetMusicChains() {
+        for (auto &voice : voices)
+            if (voice) {
+                voice->chain.reset();
+                voice->chainSession = 0;
+            }
+        groupChain.reset();
+        groupSession = 0;
+    }
+    // Drops what the output thread's effects stage holds across a gap in its output.
+    void resetEffectsChain() {
+        effectsChain.reset();
+        effectsSession = 0;
+    }
     // Mixes every voice's music for the block starting at `timestamp` and updates the status
     // OBS shows in the source's properties. `now` is os_gettime_ns().
     void renderMusic(uint64_t timestamp, AudioBlock &audio, uint64_t now) {
@@ -802,12 +817,12 @@ struct SongSource {
                 size_t stale = stalled ? end : std::clamp(frameAt(timestamp, p.timestamp + staleNs), first, end);
                 auto renderPart = [&](size_t from, size_t to, bool live) {
                     const size_t frames = to - from;
-                    voiceAudio.fill(0);
-                    renderVoice(v, p, frames, frameTime(timestamp, from), live, decoderError);
                     if (v.chainSession != p.sessionID) {
                         v.chain.reset();
                         v.chainSession = p.sessionID;
                     }
+                    voiceAudio.fill(0);
+                    renderVoice(v, p, frames, frameTime(timestamp, from), live, decoderError);
                     v.chain.process(voiceAudio.data(), frames, p.stages, p.stageCount);
                     float *bus = (p.flags & 8) ? excluded.data() : eligible.data();
                     for (size_t j = 0; j < frames * 2; ++j)
@@ -853,28 +868,16 @@ struct SongSource {
         while (!stop) {
             const bool nowActive = active.load();
             if (nowActive != decoderActive) {
-                for (auto &voice : voices)
-                    if (voice) {
-                        voice->chain.reset();
-                        voice->chainSession = 0;
-                    }
-                groupChain.reset();
-                groupSession = 0;
+                resetMusicChains();
                 decoderActive = nowActive;
             }
             auto wanted = wantedTimestamp.load();
             if (timestamp < wanted || (timestamp - wanted) % blockNs != 0) {
+                // The timeline jumped: what the stages hold belongs to blocks OBS never played.
                 timestamp = wanted;
+                resetMusicChains();
                 std::lock_guard lock(musicMutex);
                 musicQueue.clear();
-                // The timeline jumped: what the stages hold belongs to blocks OBS never played.
-                for (auto &voice : voices)
-                    if (voice) {
-                        voice->chain.reset();
-                        voice->chainSession = 0;
-                    }
-                groupChain.reset();
-                groupSession = 0;
             }
             if (timestamp > wanted + 2 * blockNs) {
                 std::unique_lock lock(musicMutex);
@@ -885,13 +888,19 @@ struct SongSource {
             }
             AudioBlock audio{};
             renderMusic(timestamp, audio, os_gettime_ns());
+            bool dropped = false;
             {
                 std::lock_guard lock(musicMutex);
                 while (!musicQueue.empty() && musicQueue.front().timestamp < wantedTimestamp.load())
                     musicQueue.pop_front();
                 if (musicQueue.size() < 4)
                     musicQueue.push_back({timestamp, audio});
+                else
+                    dropped = true;
             }
+            // OBS skipped this block, so the stages kept audio that belongs to it. Start fresh.
+            if (dropped)
+                resetMusicChains();
             timestamp += blockNs;
         }
         // On Windows each decoder started COM on this thread when it opened, so it has to close here too.
@@ -921,15 +930,14 @@ struct SongSource {
         const bool outputActive = active.load();
         if (outputActive != effectsActive) {
             // A source that was deactivated must not replay audio it held before the gap.
-            effectsChain.reset();
-            effectsSession = 0;
+            resetEffectsChain();
             effectsActive = outputActive;
         }
         if (outputActive) {
             AudioBlock effects{};
-            auto channels = linkReceiver->getChannels();
-            int global = std::find(channels.begin(), channels.end(), -1) != channels.end() ? -1 : 0;
-            auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, global);
+            // Only the global packet carries the game's effects state; a voice packet never does.
+            // With no global history the SFX stage does not run and effects are not mixed.
+            auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
             forEachRun(window, timestamp, [&](const SongLinkPacket &p, size_t first, size_t end) {
                 if (p.flags & 1)
                     linkReceiver->mixEffects(effects.data() + first * 2, end - first, frameTime(timestamp, first),
@@ -978,8 +986,7 @@ struct SongSource {
                 next = now;
                 timestamp = os_gettime_ns() - bufferingNs;
                 // Output blocks were skipped; the effects stage's held audio belongs to them.
-                effectsChain.reset();
-                effectsSession = 0;
+                resetEffectsChain();
             }
             wantedTimestamp = timestamp;
             musicReady.notify_one();
