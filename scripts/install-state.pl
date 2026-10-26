@@ -70,10 +70,7 @@ sub undo_grants {
     my $line = 'filesystems=' . join(';', @remaining) . ';';
     # If the user removed the complete key/section, leave that decision intact.
     $text =~ s/^filesystems=[^\r\n]*/$line/m;
-    open my $out, '>', "$entry->{target}.obs-jukebox-undo" or die "$!\n";
-    print $out $text; close $out or die "$!\n";
-    chmod((stat($entry->{target}))[2] & 07777, "$entry->{target}.obs-jukebox-undo");
-    rename "$entry->{target}.obs-jukebox-undo", $entry->{target} or die "$!\n";
+    write_text($entry->{target}, $text);
     return 1;
 }
 sub save {
@@ -83,8 +80,29 @@ sub save {
     close $out or die "$path: $!\n";
     rename "$path.tmp", $path or die "$path: $!\n";
 }
+sub write_text {
+    my ($path, $text) = @_;
+    open my $out, '>', "$path.obs-jukebox-new" or die "$!\n";
+    print $out $text; close $out or die "$!\n";
+    chmod((stat($path))[2] & 07777, "$path.obs-jukebox-new");
+    rename "$path.obs-jukebox-new", $path or die "$!\n";
+}
+# Removes exact entries from a Flatpak override's filesystems line. The receipt recorded afterwards
+# lists them as removed grants, so undo puts them back.
+if (@ARGV && $ARGV[0] eq 'revoke') {
+    my (undef, $file, @grants) = @ARGV;
+    exit 0 unless defined($file) && -f $file;
+    my $text = read_text($file);
+    my %revoked = map { $_ => 1 } @grants;
+    my @kept = grep { !$revoked{$_} } filesystems($text);
+    exit 0 if @kept == scalar(filesystems($text));
+    my $line = 'filesystems=' . join(';', @kept) . (@kept ? ';' : '');
+    $text =~ s/^filesystems=[^\r\n]*/$line/m;
+    write_text($file, $text);
+    exit 0;
+}
 my ($action, $directory, $target, $backup) = @ARGV;
-die "Usage: install-state.pl record|undo|undo-latest directory [target backup]\n" unless defined $directory;
+die "Usage: install-state.pl record|undo|undo-latest directory [target backup], or revoke file grant...\n" unless defined $directory;
 if ($action eq 'undo-latest') {
     opendir my $dir, $directory or die "No installation receipts found.\n";
     my @receipts = sort grep { -f "$directory/$_/receipt.json" && -f "$directory/$_/complete" } readdir $dir;

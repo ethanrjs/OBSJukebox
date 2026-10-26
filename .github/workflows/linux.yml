@@ -27,6 +27,8 @@ jobs:
         run: python3 tools/qa/linux-installer-transaction.py
       - name: Check link diagnostics
         run: python3 tools/qa/test_link_protocol.py
+      - name: Check the mod package check
+        run: python3 tools/qa/test_check_mod_package.py
       - name: Check timestamped playback
         run: bash scripts/tests/audio/run.sh
       - name: Check Proton paths

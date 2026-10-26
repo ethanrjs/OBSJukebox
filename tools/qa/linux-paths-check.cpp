@@ -38,6 +38,17 @@ int main() {
     assert(fs::equivalent(LinuxPaths().resolve(windows),song));
     unsetenv("STEAM_COMPAT_DATA_PATH");setenv("WINEPREFIX",prefix.c_str(),1);
     assert(fs::equivalent(LinuxPaths().resolve(windows),song));
+    // The mod writes its link key in the prefix's AppData under Wine's default permissions. The plugin
+    // finds it and makes its folder and file owner-only.
+    auto key=prefix/"drive_c/users/steamuser/AppData/Local/OBS Jukebox/link-key";
+    assert(LinuxPaths().keyFiles().empty());
+    fs::create_directories(key.parent_path());std::ofstream(key)<<"key";
+    fs::permissions(key.parent_path(),fs::perms::all);fs::permissions(key,fs::perms::all);
+    auto keys=LinuxPaths().keyFiles();
+    assert(keys.size()==1 && fs::equivalent(keys[0],key));
+    auto shared=fs::perms::group_all|fs::perms::others_all;
+    assert((fs::status(key.parent_path()).permissions()&shared)==fs::perms::none);
+    assert((fs::status(key).permissions()&shared)==fs::perms::none);
     fs::remove_all(root);
-    std::cout<<"11 path checks passed\n";
+    std::cout<<"15 path checks passed\n";
 }

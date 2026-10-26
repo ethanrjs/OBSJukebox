@@ -361,8 +361,12 @@ static class Engine
     {
         if(args.Length<3 || args[1] is not ("write" or "remove"))throw new IOException("Invalid plugin helper request.");
         string destination=MachinePlugin;
-        for(string? path=destination;path!=null;path=Path.GetDirectoryName(path))
-            if((File.Exists(path)||Directory.Exists(path)) && (File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new IOException("Plugin installation path contains a link or junction: "+path);
+        void RefuseLinks()
+        {
+            for(string? path=destination;path!=null;path=Path.GetDirectoryName(path))
+                if((File.Exists(path)||Directory.Exists(path)) && (File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new IOException("Plugin installation path contains a link or junction: "+path);
+        }
+        RefuseLinks();
         if(args[1]=="remove")
         {
             if(args.Length!=3)throw new IOException("Invalid plugin removal request.");
@@ -376,6 +380,8 @@ static class Engine
             using var buffer=new MemoryStream();input.CopyTo(buffer);byte[] bytes=buffer.ToArray();
             if(Hash(bytes)!=args[3])throw new IOException("Plugin copy verification failed.");
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            // Folders created above didn't exist at the first check, and a junction could appear meanwhile.
+            RefuseLinks();
             string temporary=destination+"."+Guid.NewGuid().ToString("N")+".tmp";
             try { File.WriteAllBytes(temporary,bytes);File.Move(temporary,destination,true); }
             finally { if(File.Exists(temporary))File.Delete(temporary); }
@@ -499,11 +505,57 @@ static class Engine
             stopped.Add(exe);
         }
     }
+    // A setup killed mid-transaction leaves its session at "installing", with backups that neither
+    // undo nor a new install reach. Each run restores such sessions before doing anything else.
+    internal static void RecoverInterrupted(Options o,Action<string> log,List<string> stopped)
+    {
+        // Recovery may have to close OBS, which a mod-only update promises not to do.
+        if(o.ModOnly || !Directory.Exists(o.StateRoot)) return;
+        foreach(var session in Directory.GetDirectories(o.StateRoot))
+        {
+            string manifest=Path.Combine(session,"manifest.json");
+            if(!File.Exists(manifest)) continue;
+            InstallRecord? record;
+            try { record=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(manifest)); }
+            catch(Exception ex) when(ex is JsonException or IOException or UnauthorizedAccessException) { continue; }
+            if(record is not { Status: "installing" } || !IsKnownProduct(record.Product)) continue;
+            log("Restoring an installation that was interrupted: "+manifest);
+            // A session left at "installing" would be retried, and fail, on every later run.
+            try
+            {
+                string gd=o.GD,obs=o.OBS;
+                try { o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(Replaced).Select(f=>f.Destination)); }
+                finally { o.GD=gd; o.OBS=obs; }
+                Restore(record,log);
+                record.Status="rolled-back";
+            }
+            catch(Exception ex) { log("Rollback incomplete: "+ex.Message); record.Status="rollback-incomplete"; }
+            WriteManifest(manifest,record);
+        }
+    }
+    // Through a temporary file, so a setup killed mid-write leaves the previous manifest, not half of one.
+    static void WriteManifest(string path,InstallRecord record)
+    {
+        File.WriteAllText(path+".tmp",JsonSerializer.Serialize(record,JsonOptions));
+        File.Move(path+".tmp",path,true);
+    }
+    internal const string SetupLockName=@"Local\OBS Jukebox Setup";
+    // One setup at a time: recovery treats every session left at "installing" as abandoned, so it would
+    // roll back a second window's live transaction.
     public static void Execute(Options o,Action<string> output,List<string>? closedApps=null)
+    {
+        using var running=new Mutex(false,SetupLockName);
+        try { if(!running.WaitOne(0)) throw new IOException("Another OBS Jukebox setup is running. Let it finish, then try again."); }
+        catch(AbandonedMutexException) { } // a killed setup held it; recovery handles what it left
+        try { ExecuteAlone(o,output,closedApps); }
+        finally { running.ReleaseMutex(); }
+    }
+    static void ExecuteAlone(Options o,Action<string> output,List<string>? closedApps)
     {
         var logLines = new List<string>(); string? logPath=null;
         void Log(string s) { string line=DateTimeOffset.Now.ToString("O") + " " + s; logLines.Add(line); output(s); if(logPath!=null) File.AppendAllText(logPath,line+Environment.NewLine); }
         var stopped=closedApps??new List<string>();
+        if (!o.DryRun) RecoverInterrupted(o,Log,stopped);
         if (o.Uninstall) { Uninstall(o,Log,stopped); if(closedApps==null && o.Restart) RestartApps(stopped,Log); return; }
         o.PreviousVersion=InstalledVersion(o.GD); o.AlreadyCurrent=false;
         var plan=Plan(o,Log);
@@ -515,7 +567,7 @@ static class Engine
         string session=Path.Combine(o.StateRoot,DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(session); logPath=Path.Combine(session,"install.log"); File.WriteAllLines(logPath,logLines);
         var record=new InstallRecord{GD=o.GD,OBS=o.OBS}; string manifest=Path.Combine(session,"manifest.json");
-        void Save() => File.WriteAllText(manifest,JsonSerializer.Serialize(record,JsonOptions));
+        void Save() => WriteManifest(manifest,record);
         Save();
         try
         {
@@ -562,13 +614,22 @@ static class Engine
             log("Restarted: "+exe);
         }
     }
+    // Setup saves Applied only after replacing a file, so a setup killed in between leaves the new file
+    // unrecorded; its hash still shows it was replaced. A file it can't read counts as replaced, so its
+    // apps get closed and Restore reports that one file instead of stopping before the others.
+    static bool Replaced(ChangedFile f)
+    {
+        if(f.Applied) return true;
+        try { return File.Exists(f.Destination) && HashFile(f.Destination)==f.InstalledHash; }
+        catch(Exception ex) when(ex is IOException or UnauthorizedAccessException) { return true; }
+    }
     // Restores every file it can, then reports the ones it couldn't.
     internal static void Restore(InstallRecord record,Action<string> log)
     {
         var failed=new List<string>();
         foreach(var f in record.Files.AsEnumerable().Reverse())
         {
-            if(!f.Applied) continue;
+            if(!Replaced(f)) continue;
             try { if(!RestoreFile(f,log)) failed.Add(f.Destination); }
             catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
             {
@@ -617,7 +678,7 @@ static class Engine
         if(record.Status!="installed") throw new IOException("This transaction is not installed: "+record.Status);
         if(o.DryRun) { foreach(var f in record.Files) log("Would restore/remove if unchanged: "+f.Destination); return; }
         o.GD=record.GD; o.OBS=record.OBS; CloseMatchingApps(o,log,stopped,record.Files.Where(f=>f.Applied).Select(f=>f.Destination));
-        Restore(record,log); record.Status="uninstalled"; File.WriteAllText(path,JsonSerializer.Serialize(record,JsonOptions));
+        Restore(record,log); record.Status="uninstalled"; WriteManifest(path,record);
         log("Removed this install transaction. Later user changes were preserved. To restore an earlier installer update, repeat with that earlier manifest. Geode/Jukebox already present before this transaction were retained.");
     }
 }
@@ -633,6 +694,13 @@ sealed class SetupForm : Form
     readonly Button install=new(){Text="Install",AutoSize=true},undo=new(){Text="Undo last install",AutoSize=true};
     readonly object logLock=new();
     string? attemptLog;
+    bool working;
+    // Closing mid-transaction would end the process before its rollback could run.
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if(working){e.Cancel=true;SetStatus("Wait for setup to finish before closing it.");}
+        base.OnFormClosing(e);
+    }
     public SetupForm(Options o)
     {
         options=o; Text="OBS Jukebox - Windows Setup"; Width=730;Height=650;MinimumSize=new(730,650);AutoSize=true;AutoSizeMode=AutoSizeMode.GrowOnly;StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",10);
@@ -709,6 +777,7 @@ sealed class SetupForm : Form
         Control[] inputs=[gd.Parent!,obs.Parent!,scene,modOnly,close,restart,jukebox,install,undo];
         foreach(var input in inputs)input.Enabled=false;
         bool success=false;
+        working=true;
         try
         {
             Collect();options.Uninstall=restoring;
@@ -725,7 +794,7 @@ sealed class SetupForm : Form
             try{Detail(ex.ToString());}catch(IOException){}
             SetStatus(ex is UnauthorizedAccessException ? "Setup cannot write this folder. Choose a writable installation or grant your account access, then retry. User files are never edited by an elevated installer." : ex.Message,true);
         }
-        finally{foreach(var input in inputs)input.Enabled=true;scene.Enabled=!modOnly.Checked;options.Uninstall=false;undo.Enabled=Engine.CanUndo(options);}
+        finally{working=false;foreach(var input in inputs)input.Enabled=true;scene.Enabled=!modOnly.Checked;options.Uninstall=false;undo.Enabled=Engine.CanUndo(options);}
         if(success)SetStatus(restoring?"Undo complete. Later user changes were preserved. You may close setup.":Engine.SuccessMessage(options));
     }
 }

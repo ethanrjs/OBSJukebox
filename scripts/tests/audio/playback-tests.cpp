@@ -37,7 +37,7 @@ static void writeRamp(const char* path,bool negative=false) {
     for(unsigned i=0;i<frames;++i){auto sample=int16_t(32768*(.1+double(i)/480000)*(negative?-1:1));word(uint16_t(sample),2);word(uint16_t(sample),2);}
 }
 static void sendState(SongSocket socket,SongLinkPacket p,uint64_t capture) {
-    p.timestamp=capture;
+    p.timestamp=capture;signPacket(processLinkKey(),p);
     sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
     auto sent=sendto(socket,reinterpret_cast<const char*>(&p),int(sizeof(p)),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
     if(sent!=int(sizeof(p)))check(false,"loopback send succeeds");
@@ -53,9 +53,10 @@ static void resetOutput(){std::lock_guard lock(capturedMutex);captured.clear();}
 // recovery timers and the "connected" test don't follow the simulated clock. The offline receiver
 // reports the game link as unavailable. run() and the decode queue only run in the real-thread tests.
 struct Simulation {
-    // A game whose clock is `offset` ns from OBS's. Songs and effects come from separate ports.
+    // A game whose clock is `offset` ns from OBS's. Songs and effects come from separate ports. It
+    // signs with the key in the test's key file unless a test gives it another.
     struct Game {
-        uint64_t session;int64_t offset;uint16_t port,effectsPort;
+        uint64_t session;int64_t offset;uint16_t port,effectsPort;LinkKey key=processLinkKey();
         uint64_t stamp(uint64_t obs) const {return uint64_t(int64_t(obs)+offset);}
     };
     uint64_t now=5000000000000ULL; // 5000 s, so a game clock an hour behind stays positive
@@ -76,6 +77,7 @@ struct Simulation {
     const std::deque<uint64_t>& probes() const {return receiver->probes;}
     void reply(const Game& game,uint64_t t1,uint64_t senderTime) {
         ClockSyncPacket p;p.kind=2;p.sessionID=game.session;p.t1=t1;p.t2=p.t3=senderTime;
+        signPacket(game.key,p);
         handle(&p,sizeof(p),game.port);
     }
     void answerProbes() {
@@ -87,15 +89,24 @@ struct Simulation {
         receiver->probe(now);answerProbes();
         handle(data,size,port);answerProbes();
     }
-    // A song packet of any version, sent as is. The v1.0 mod sent version 3.
-    void sendRaw(SongLinkPacket p,uint64_t capture,int version,uint16_t port) {
+    // A song packet of any version, signed with `key` if there is one. The v1.0 mod sent version 3,
+    // and v1.1 to v1.2.3 sent version 5, which has no tag.
+    void sendRaw(SongLinkPacket p,uint64_t capture,int version,uint16_t port,const LinkKey* key=nullptr) {
         p.version=version;p.timestamp=capture;
-        deliver(&p,version==3?SONG_LINK_V3_SIZE:sizeof(p),port);
+        if(key)signPacket(*key,p);
+        deliver(&p,version==3?SONG_LINK_V3_SIZE:version==5?SONG_LINK_V5_SIZE:sizeof(p),port);
     }
-    void send(const Game& game,SongLinkPacket p,uint64_t capture) {p.sessionID=game.session;sendRaw(p,game.stamp(capture),5,game.port);}
+    void send(const Game& game,SongLinkPacket p,uint64_t capture) {
+        p.sessionID=game.session;sendRaw(p,game.stamp(capture),6,game.port,&game.key);
+    }
     void send(SongLinkPacket p,uint64_t capture) {send(local,p,capture);}
-    void sendEffects(const EffectsPacketV2& e,uint16_t port) {deliver(&e,44+e.frames*8,port);}
-    void sendEffects(EffectsPacketV2 e) {e.sessionID=local.session;sendEffects(e,local.effectsPort);}
+    void sendEffects(const Game& game,EffectsPacketV3 e,uint16_t port) {
+        auto size=offsetof(EffectsPacketV3,samples)+e.frames*8;
+        signPacket(game.key,e,size);
+        deliver(&e,size,port);
+    }
+    void sendEffects(const EffectsPacketV3& e,uint16_t port) {sendEffects(local,e,port);}
+    void sendEffects(EffectsPacketV3 e) {e.sessionID=local.session;sendEffects(e,local.effectsPort);}
     void sendEffects(const EffectsPacket& e,uint16_t port) {deliver(&e,36+e.frames*8,port);}
     // Says hello from the game every 10 ms and answers its clock probes, as SyncedSender does,
     // until the receiver follows the game's session on a clock within 100 ms of OBS's. The game
@@ -293,7 +304,7 @@ static void staleStatusEffectsTest() {
     auto base=sim.now;
     SongLinkPacket p;p.flags=1;sim.send(p,base-600000000);
     for(int i=0;i<12;++i){
-        EffectsPacketV2 e;e.frames=480;e.sampleRate=48000;e.timestamp=base+i*10000000ULL;
+        EffectsPacketV3 e;e.frames=480;e.sampleRate=48000;e.timestamp=base+i*10000000ULL;
         std::fill_n(e.samples,960,.25f);
         sim.sendEffects(e);
     }
@@ -314,7 +325,7 @@ static void finiteOutputTest() {
     auto base=sim.now;
     SongLinkPacket p;p.flags=1;sim.send(p,base);
     for(int i=0;i<12;++i){
-        EffectsPacketV2 e;e.frames=480;e.sampleRate=48000;e.sequence=i;e.timestamp=base+i*10000000ULL;
+        EffectsPacketV3 e;e.frames=480;e.sampleRate=48000;e.sequence=i;e.timestamp=base+i*10000000ULL;
         for(unsigned s=0;s<960;++s)e.samples[s]=(s/2)%2?std::numeric_limits<float>::max():-std::numeric_limits<float>::max();
         sim.sendEffects(e);
     }
@@ -391,7 +402,7 @@ static void protocolTest() {
     auto at=sim.now;sim.send(p,at);sim.advance(15000000);
     p.epoch=99;sim.send(p,at-1000000);sim.send(p,at+2000000000);
     sim.send(p,0);
-    auto unsupported=p;unsupported.sessionID=sim.local.session;sim.sendRaw(unsupported,sim.now,6,sim.local.port);
+    auto unsupported=p;unsupported.sessionID=sim.local.session;sim.sendRaw(unsupported,sim.now,7,sim.local.port,&sim.local.key);
     sim.advance(15000000);
     check(receiver->get().packet.timestamp==at && receiver->get().packet.epoch==0,"reordered, stale, future and unsupported packets cannot replace the latest state");
     auto before=receiver->playbackWindow(at-1,at+1);
@@ -423,23 +434,86 @@ static void networkPathTest() {
     check(afterNetwork==before && sim.source->testStatCount.load()>afterNetwork,
         "a network path is refused before OBS reads its file information");
 }
-// The v1.0 mod sends v3 song packets and GDSFX1 effects. OBS plays neither and asks for a newer mod,
-// whichever of the two arrives.
-static void oldModTest(bool songs,bool effects) {
+// Mods before this one send unsigned packets: v1.0 sent v3 song packets and GDSFX1 effects, and v1.1
+// to v1.2.3 sent v5 song packets and GDSFX2 effects. OBS plays none of them and asks for a newer mod,
+// whichever arrives.
+enum class OldMod { V3Songs, V1Effects, V5Songs, V2Effects };
+static void oldModTest(OldMod sends) {
     Simulation sim;
-    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    SongLinkPacket p;p.flags=3;p.position=1;p.sessionID=sim.local.session;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
     sim.start();
     for(int i=0;i<10;++i){
-        if(songs)sim.sendRaw(p,sim.now,3,50001);
+        if(sends==OldMod::V3Songs)sim.sendRaw(p,sim.now,3,50001);
+        if(sends==OldMod::V5Songs)sim.sendRaw(p,sim.now,5,50001);
         EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=sim.now;std::fill_n(e.samples,960,.25f);
-        if(effects)sim.sendEffects(e,50001);
+        if(sends==OldMod::V1Effects)sim.sendEffects(e,50001);
+        if(sends==OldMod::V2Effects){
+            // GDSFX2 had the GDSFX3 layout without its tag.
+            EffectsPacketV3 v2;std::memcpy(v2.magic,"GDSFX2\0",8);v2.version=2;v2.frames=480;v2.sampleRate=48000;
+            v2.timestamp=sim.now;v2.sessionID=sim.local.session;
+            unsigned char wire[sizeof(v2)];auto header=offsetof(EffectsPacketV3,tag);
+            std::memcpy(wire,&v2,header);std::memcpy(wire+header,v2.samples,960*sizeof(float));
+            sim.deliver(wire,header+960*sizeof(float),50001);
+        }
         sim.advance(10000000);
     }
     bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
     std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
-    check(!receiver->get().connected && silent && detail.find("v1.1")!=std::string::npos,
-        songs?"v3 song packets play nothing and ask for a mod of v1.1 or later":
-        "GDSFX1 effects play nothing and ask for a mod of v1.1 or later");
+    const char* names[]={"v3 song packets","GDSFX1 effects","v5 song packets","GDSFX2 effects"};
+    check(!receiver->get().connected && silent && detail.find("Update the OBS Jukebox mod")!=std::string::npos,
+        (std::string(names[int(sends)])+" play nothing and ask for a newer mod").c_str());
+}
+// Another program, or another user on the PC, can send to OBS's port but can't sign with this user's
+// link key. OBS never follows it, and says what's wrong instead of waiting for Geometry Dash.
+static void forgedSenderTest() {
+    Simulation sim;
+    auto forger=sim.game();forger.key[0]^=1;
+    SongLinkPacket p;p.flags=3;p.position=1;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.start();
+    for(int i=0;i<10;++i){sim.send(forger,p,sim.now);sim.advance(10000000);}
+    bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
+    std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
+    check(!receiver->get().connected && silent && detail.find("link key")!=std::string::npos,
+        "a sender without the link key plays nothing and OBS says the key doesn't match");
+    check(sim.synchronize(sim.local),"the game is followed once it signs with the link key");
+    sim.advance(2050000000);
+    p.epoch=900;
+    for(int i=0;i<10;++i){sim.send(forger,p,sim.now);sim.advance(10000000);}
+    check(receiver->get().packet.sessionID==sim.local.session && receiver->get().packet.epoch!=900,
+        "a sender without the link key can't take over after the game goes quiet");
+}
+// Forged clock replies would shift where OBS places every packet in time.
+static void forgedClockTest() {
+    Simulation sim;
+    auto forger=sim.local;forger.key[0]^=1;
+    sim.answering=&forger;
+    SongLinkPacket hello;
+    for(int i=0;i<30;++i){sim.send(hello,sim.now);sim.advance(10000000);}
+    check(!receiver->get().connected,"clock replies without the link key don't synchronize OBS");
+}
+// Forged effects would put any audio on the stream.
+static void forgedEffectsTest() {
+    Simulation sim;
+    check(sim.synchronize(sim.local),"forged effects test synchronizes the game");
+    SongLinkPacket song;song.epoch=822;
+    auto native=sim.now;sim.send(song,native);sim.advance(15000000);
+    auto mapped=receiver->get().packet.timestamp;
+    auto forger=sim.local;forger.key[0]^=1;
+    EffectsPacketV3 e;e.sessionID=sim.local.session;e.timestamp=sim.local.stamp(native);e.sampleRate=48000;e.frames=480;
+    std::fill_n(e.samples,960,.5f);
+    sim.sendEffects(forger,e,sim.local.effectsPort);sim.advance(15000000);
+    float audio[2]{};receiver->mixEffects(audio,1,mapped+1000000,1);
+    check(audio[0]==0 && audio[1]==0,"effects without the link key are never mixed");
+}
+// GD writes a new key at every launch. OBS follows the relaunched game without a restart of its own.
+static void newKeyTest() {
+    Simulation sim;
+    check(sim.synchronize(sim.local),"new key test synchronizes the first game");
+    sim.advance(2050000000);
+    auto relaunched=sim.game();relaunched.key[0]^=0x80;
+    writeLinkKey(relaunched.key);
+    check(sim.synchronize(relaunched),"a relaunched game with a new key is followed");
+    writeLinkKey(processLinkKey());
 }
 // Geode updates the mod by itself, while the plugin is installed by hand. Packets from a newer
 // protocol play nothing and ask for a newer plugin, instead of "Waiting for Geometry Dash".
@@ -447,7 +521,7 @@ static void newModTest() {
     Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;p.sessionID=sim.local.session;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
     sim.start();
-    for(int i=0;i<10;++i){sim.sendRaw(p,sim.now,6,50001);sim.advance(10000000);}
+    for(int i=0;i<10;++i){sim.sendRaw(p,sim.now,7,50001);sim.advance(10000000);}
     bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
     std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
     check(!receiver->get().connected && silent && detail.find("Update the OBS Jukebox plugin")!=std::string::npos,
@@ -487,9 +561,9 @@ struct SyncedSender {
                     reinterpret_cast<sockaddr*>(&peer),&peerSize);
                 auto received=stamp(os_gettime_ns());
                 if(n==sizeof(probe) && !std::memcmp(probe.magic,"GDCLK1\0",8) &&
-                    probe.version==1 && probe.kind==1 && probe.sessionID==session){
+                    probe.version==2 && probe.kind==1 && probe.sessionID==session && signedWith(processLinkKey(),probe)){
                     ++probes;
-                    probe.kind=2;probe.t2=received;probe.t3=stamp(os_gettime_ns());
+                    probe.kind=2;probe.t2=received;probe.t3=stamp(os_gettime_ns());signPacket(processLinkKey(),probe);
                     sendto(socket,reinterpret_cast<const char*>(&probe),sizeof(probe),0,
                         reinterpret_cast<sockaddr*>(&peer),peerSize);
                 }else {
@@ -540,7 +614,7 @@ static void mainThreadStallTest(Silence silence) {
     for(unsigned sequence=0;sim.now<base+800000000;++sequence){
         auto now=sim.now;
         if(silence!=Silence::Crash){
-            EffectsPacketV2 p;p.sessionID=game.session;p.frames=480;p.sampleRate=48000;p.sequence=sequence;
+            EffectsPacketV3 p;p.sessionID=game.session;p.frames=480;p.sampleRate=48000;p.sequence=sequence;
             p.timestamp=game.stamp(now);std::fill_n(p.samples,960,0.f);
             sim.sendEffects(p,game.effectsPort);
         }
@@ -675,6 +749,16 @@ static void malformedV5Test() {
     check(receiver->get().packet.epoch==720,"v5 accepts fade points that share a time");
 }
 
+// Points that share a time are a step. A zero-width segment never reaches the division in songGainAt.
+static void sharedFadeTimeTest() {
+    SongLinkPacket p;p.timestamp=1000;p.fadeCount=2;p.fades[0]={1000000,.5f};p.fades[1]={1000000,0};
+    bool finite=true;
+    for(uint64_t t:{0ull,1000ull,501000ull,1000999ull,1001000ull,1001001ull,9000000ull})finite&=std::isfinite(songGainAt(p,t));
+    p.fades[0].offsetNs=0;finite&=std::isfinite(songGainAt(p,1000));
+    p.fades[0].offsetNs=1000000;
+    check(finite && std::abs(songGainAt(p,501000)-.75f)<1e-6f && songGainAt(p,1001000)==0,
+        "fade points that share a time give a finite step");
+}
 static void shortLoopTest() {
     Simulation sim;
     auto game=sim.game(3600000000000LL);
@@ -729,7 +813,7 @@ static void foreignEffectsTest() {
     global.flags=0;sim.send(game,global,base+30000000);
     global.flags=1;global.effectsVolume=.8f;sim.send(game,global,base+60000000);
     for(int i=-3;i<11;++i){
-        EffectsPacketV2 p;p.sessionID=game.session;p.frames=480;p.sampleRate=48000;
+        EffectsPacketV3 p;p.sessionID=game.session;p.frames=480;p.sampleRate=48000;
         p.timestamp=game.stamp(uint64_t(int64_t(base)+i*10000000LL));
         std::fill_n(p.samples,960,.25f);
         sim.sendEffects(p,game.effectsPort);
@@ -798,7 +882,7 @@ static void effectsSeamTest(unsigned sampleRate) {
     auto tone=[&](double frame){return .25*std::sin(frame*2*3.14159265358979*3000/sampleRate);};
     unsigned frames=sampleRate/100;
     for(unsigned k=0;k<12;++k){
-        EffectsPacketV2 e;e.sequence=100+k;e.frames=frames;e.sampleRate=sampleRate;e.timestamp=first+k*10000000ULL;
+        EffectsPacketV3 e;e.sequence=100+k;e.frames=frames;e.sampleRate=sampleRate;e.timestamp=first+k*10000000ULL;
         for(unsigned i=0;i<frames;++i)e.samples[i*2]=e.samples[i*2+1]=float(tone(k*double(frames)+i));
         sim.sendEffects(e);
     }
@@ -822,7 +906,7 @@ static void effectsGapTest() {
     auto base=sim.now;
     // Consecutive sequence numbers do not prove continuity: the producer may have stalled.
     for(unsigned k=0;k<2;++k){
-        EffectsPacketV2 e;e.sequence=100+k;e.frames=441;e.sampleRate=44100;e.timestamp=base+k*100000000ULL;
+        EffectsPacketV3 e;e.sequence=100+k;e.frames=441;e.sampleRate=44100;e.timestamp=base+k*100000000ULL;
         std::fill_n(e.samples,e.frames*2,k?0.f:.5f);
         sim.sendEffects(e);
     }
@@ -882,8 +966,25 @@ static void senderTest() {
     separate_song::Snapshot s;s.timestamp=monotonicNowNs();s.position=1.25;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     separate_song::Bridge b;check(b.start(),"sender opens its socket");b.publish(s);
-    check(published.version==5 && published.timestamp==s.timestamp && published.position==s.position,
+    check(published.version==6 && published.timestamp==s.timestamp && published.position==s.position,
         "sender preserves sampling time through publication delay");
+    check(signedWith(processLinkKey(),published),"sender signs song packets with its link key");
+    check(readLinkKey(linkKeyFile())==processLinkKey(),"sender writes its link key for OBS when it starts");
+}
+// A flood of datagrams at the game's clock socket would keep its thread spinning. The plugin sends 4
+// probes a second, far under the budget.
+static void senderFloodBudgetTest() {
+    separate_song::DatagramBudget budget;unsigned allowed=0;
+    for(int i=0;i<1000;++i)allowed+=budget.spend(1000);
+    check(allowed==32 && budget.spend(1000+50000000),"the game handles at most 32 datagrams per 50 ms");
+}
+// The game answers only clock probes signed with its key, so nothing else can time its clock.
+static void senderProbeTest() {
+    ClockSyncPacket probe;probe.sessionID=processSessionID();probe.t1=5;signPacket(processLinkKey(),probe);
+    sockaddr_in loopback{};loopback.sin_family=AF_INET;loopback.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    auto forged=probe;forged.tag[0]^=1;
+    check(separate_song::answersProbe(probe,sizeof(probe),loopback) && !separate_song::answersProbe(forged,sizeof(forged),loopback),
+        "the game answers clock probes signed with its key and ignores others");
 }
 static void senderInvalidPathTest() {
     separate_song::Snapshot s;s.playing=true;s.path="C:/s\xFF.mp3";s.timestamp=monotonicNowNs();
@@ -905,16 +1006,21 @@ int main(int argc,char** argv){
 #endif
 #ifdef _WIN32
     _putenv_s("OBS_JUKEBOX_TEST_PORT","49177");
+    _putenv_s("OBS_JUKEBOX_TEST_KEY_FILE","artifacts/audio-tests/link-key");
 #else
     setenv("OBS_JUKEBOX_TEST_PORT","49177",1);
+    setenv("OBS_JUKEBOX_TEST_KEY_FILE","artifacts/audio-tests/link-key",1);
 #endif
+    writeLinkKey(processLinkKey());
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
-    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();oldModTest(true,false);oldModTest(false,true);newModTest();
+    pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();
+    oldModTest(OldMod::V3Songs);oldModTest(OldMod::V1Effects);oldModTest(OldMod::V5Songs);oldModTest(OldMod::V2Effects);newModTest();
+    forgedSenderTest();forgedClockTest();forgedEffectsTest();newKeyTest();senderProbeTest();senderFloodBudgetTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
-    multipleVoiceFadeTest();malformedV5Test();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
+    multipleVoiceFadeTest();malformedV5Test();sharedFadeTimeTest();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
     tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();senderInvalidPathTest();utf8Test();
     receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
