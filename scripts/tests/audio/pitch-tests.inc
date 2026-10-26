@@ -398,22 +398,7 @@ static void pitchInvalidInputTest() {
     check(audio == untouched, "invalid stage lists are ignored without touching audio");
 }
 
-// The GDPITCH sidecar PR 24 sent, while it still exists in this task sequence.
-static void pitchPacketTest() {
-    PitchPacket packet;
-    packet.count = 1;
-    packet.voices[0] = {3, {.5f, 1024}};
-    auto parsed = parsePitchPacket(reinterpret_cast<const unsigned char *>(&packet), sizeof(packet));
-    check(parsed && parsed->voices[0].channelID == 3 && parsed->voices[0].shift.pitch == .5f,
-          "a valid pitch packet parses");
-    packet.voices[0].shift.pitch = std::numeric_limits<float>::quiet_NaN();
-    check(!parsePitchPacket(reinterpret_cast<const unsigned char *>(&packet), sizeof(packet)),
-          "a pitch packet with a NaN pitch is refused");
-    packet.voices[0].shift.pitch = .5f;
-    packet.count = SONG_LINK_MAX_CHANNELS + 1;
-    check(!parsePitchPacket(reinterpret_cast<const unsigned char *>(&packet), sizeof(packet)),
-          "a pitch packet with too many voices is refused");
-}
+
 
 static void pitchTests() {
     PitchShifter::prepareTables();
@@ -424,5 +409,4 @@ static void pitchTests() {
     pitchOrderTest();
     pitchAllocationTest();
     pitchInvalidInputTest();
-    pitchPacketTest();
 }

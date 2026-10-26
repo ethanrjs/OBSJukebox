@@ -1002,15 +1002,41 @@ static void senderTest() {
     separate_song::Bridge b;check(b.start(),"sender opens its socket");b.publish(s);
     check(published.version==6 && published.timestamp==s.timestamp && published.position==s.position,
         "sender preserves sampling time through publication delay");
-    s.channelID=-1;s.groupExcluded=true;s.stageCount=1;s.stages[0]={.75f,1024,0,41};
-    s.effectsStageCount=2;s.effectsStages[0]={1.5f,2048,0,42};s.effectsStages[1]={.5f,4096,0,43};
+    // A voice packet carries its stages; effects stages belong to the global packet, so the sender
+    // must drop them here.
+    s.channelID=0;s.groupExcluded=false;s.stageCount=2;
+    s.stages[0]={.75f,1024,0,41};s.stages[1]={1.5f,2048,0,42};
+    s.effectsStageCount=2;s.effectsStages[0]={1.5f,2048,0,43};s.effectsStages[1]={.5f,4096,0,44};
     b.publish(s);
-    check((published.flags&8) && published.stageCount==1 && published.stages[0].instance==41 &&
-              published.effectsStageCount==2 && published.effectsStages[1].instance==43,
-        "sender carries ordered music and effects stages with the exclusion flag");
-    s.stageCount=9;s.effectsStageCount=9;b.publish(s);
-    check(published.stageCount==8 && published.effectsStageCount==8,
+    check(!(published.flags&8) && published.stageCount==2 && published.stages[1].instance==42 &&
+              published.effectsStageCount==0,
+        "sender carries a voice's stages and drops effects stages");
+    check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
+        "the sender's voice packet is one the plugin accepts");
+    // An excluded replacement has no stages of its own.
+    s.groupExcluded=true;s.stageCount=0;s.stages[0]={};s.stages[1]={};
+    b.publish(s);
+    check((published.flags&8) && published.stageCount==0,
+        "sender marks an excluded replacement voice");
+    check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
+        "the sender's excluded packet is one the plugin accepts");
+    // The global packet carries music and effects stages and never the voice-only flag.
+    s.channelID=-1;s.groupExcluded=true;s.stageCount=2;s.stages[0]={.75f,1024,0,41};
+    s.stages[1]={1.5f,2048,0,42};s.effectsStageCount=2;
+    b.publish(s);
+    check(!(published.flags&8) && published.stageCount==2 && published.effectsStageCount==2 &&
+              published.effectsStages[1].instance==44,
+        "sender carries a global packet's music and effects stages");
+    check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
+        "the sender's global packet is one the plugin accepts");
+    // The wire holds eight stages; a longer list keeps the first eight.
+    s.channelID=0;s.groupExcluded=false;s.stageCount=9;
+    for(unsigned i=0;i<8;++i)s.stages[i]={1.f,1024,0,100+i};
+    b.publish(s);
+    check(published.stageCount==8 && published.stages[7].instance==107,
         "sender never publishes more stages than the wire holds");
+    check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
+        "the sender's capped packet is one the plugin accepts");
 }
 static void senderInvalidPathTest() {
     separate_song::Snapshot s;s.playing=true;s.path="C:/s\xFF.mp3";s.timestamp=monotonicNowNs();

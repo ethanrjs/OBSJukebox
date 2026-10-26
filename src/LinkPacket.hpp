@@ -69,23 +69,6 @@ struct EffectsPacketV2 {
     float samples[512 * 2]{};
 };
 inline constexpr int SONG_LINK_MAX_CHANNELS = 64;
-// FMOD pitch shifter DSPs (such as Mega Hack's Pitch Shifter) that other mods put on the path from a
-// sound to GD's output. OBS never hears that output: it decodes the music itself, and the effects tap
-// sits upstream of them. Plugins that don't know this magic ignore it.
-struct PitchShift {
-    float pitch = 1.f;     // product of every active pitch shifter on the path; 1 for none
-    uint32_t fftSize = 0;  // the first shifter's FFT size; 0 for none
-};
-struct PitchPacket {
-    char magic[8] = {'G', 'D', 'P', 'I', 'T', 'C', 'H', 0};
-    uint32_t version = 1, count = 0;
-    uint64_t sessionID = 0, timestamp = 0;
-    PitchShift effects;
-    struct Voice {
-        int32_t channelID = 0;
-        PitchShift shift;
-    } voices[SONG_LINK_MAX_CHANNELS]{};
-};
 #pragma pack(pop)
 inline constexpr unsigned SONG_LINK_V2_SIZE = 1288, SONG_LINK_V3_SIZE = 1296, SONG_LINK_V4_SIZE = 1304,
                           SONG_LINK_V5_SIZE = 1436;
@@ -95,7 +78,6 @@ static_assert(offsetof(PitchStage, pitch) == 0 && offsetof(PitchStage, fft) == 4
 static_assert(offsetof(SongLinkPacket, stageCount) == 1436 && offsetof(SongLinkPacket, stages) == 1440 &&
               offsetof(SongLinkPacket, effectsStages) == 1568);
 static_assert(sizeof(SongLinkPacket) == 1696);
-static_assert(sizeof(PitchPacket) == 32 + 8 + 64 * 12);
 static_assert(sizeof(EffectsPacket) == 4132);
 static_assert(sizeof(EffectsPacketV2) == 4140);
 inline constexpr int SONG_LINK_PORT = 39022;

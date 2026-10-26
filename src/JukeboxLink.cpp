@@ -537,14 +537,15 @@ bool fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
     std::vector<MusicCandidate> candidates;
     for (const auto* ids : {songs, &source.extraIDs})
         for (int id : *ids) candidates.push_back({id, forPlayback(id).normalizedGamePath});
-    auto matched = songForPath(normalizedMusicPath(source.path), candidates);
+    const auto gamePath = normalizedMusicPath(source.path);
+    auto matched = songForPath(gamePath, candidates);
     if (!matched) { gameSong(); return false; }
     const auto& cached = forPlayback(*matched);
     if (!cached.obs || !cached.obsReady) { gameSong(); return false; }
     state.song = cached.obs->name;
     state.path = cached.obs->path;
     state.offset += (cached.obs->offset - cached.game.offset) / 1000.0;
-    return normalizedMusicPath(cached.obs->path) != normalizedMusicPath(source.path);
+    return normalizedMusicPath(cached.obs->path) != gamePath;
 }
 void initialize() {
     if (!cellLayoutMatches()) return;

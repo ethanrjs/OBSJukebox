@@ -281,6 +281,12 @@ static void markStopped(Snapshot& snapshot, uint64_t now) {
     snapshot.timestamp = std::max(snapshot.timestamp, now);
     snapshot.playing = false;
     snapshot.epoch = ++nextEpoch;
+    // The channel is gone; a stopped packet must not name its old DSP instances.
+    snapshot.stages = {};
+    snapshot.stageCount = 0;
+    snapshot.effectsStages = {};
+    snapshot.effectsStageCount = 0;
+    snapshot.groupExcluded = false;
 }
 static void stopVoices() {
     const auto now = monotonicNowNs();
@@ -403,6 +409,7 @@ static void sampleMusic(PlayLayer* play) {
     const auto now = monotonicNowNs();
     state.song.clear();
     auto engine = FMODAudioEngine::get();
+    if (!engine) return;
     std::set<int> seen;
     for (auto& [id, music] : engine->m_fmodMusic)
         if (sampleChannel(engine, id, music, play)) seen.insert(id);
@@ -465,6 +472,7 @@ static void sampleMusicOutsideLevels() {
     if (editor) playingSongs = jukebox_link::snapshotSongs(editor->m_level);
     else playingSongs.reset();
     auto engine = FMODAudioEngine::get();
+    if (!engine) return;
     std::set<int> seen;
     for (auto& [id, music] : engine->m_fmodMusic)
         if (sampleChannel(engine, id, music, editor)) seen.insert(id);
