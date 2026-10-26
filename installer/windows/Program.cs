@@ -632,8 +632,14 @@ static class Engine
         }
     }
     // Setup saves Applied only after replacing a file, so a setup killed in between leaves the new file
-    // unrecorded; its hash still shows it was replaced.
-    static bool Replaced(ChangedFile f) => f.Applied || File.Exists(f.Destination) && HashFile(f.Destination)==f.InstalledHash;
+    // unrecorded; its hash still shows it was replaced. A file it can't read counts as replaced, so its
+    // apps get closed and Restore reports that one file instead of stopping before the others.
+    static bool Replaced(ChangedFile f)
+    {
+        if(f.Applied) return true;
+        try { return File.Exists(f.Destination) && HashFile(f.Destination)==f.InstalledHash; }
+        catch(Exception ex) when(ex is IOException or UnauthorizedAccessException) { return true; }
+    }
     // Restores every file it can, then reports the ones it couldn't.
     internal static void Restore(InstallRecord record,Action<string> log)
     {

@@ -154,6 +154,16 @@ static class InstallerTests
                 new ChangedFile { Destination=modFile,Backup=Path.Combine(unrecorded,"0000.bak"),OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("half-installed mod")) }] }));
             Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
             Check(File.ReadAllText(modFile)=="previous mod","recovery restores a file replaced just before setup was killed");
+            // A destination recovery can't read must not stop it restoring the other files.
+            string partial=Path.Combine(interrupted,"20260102-000000-abcdef");Directory.CreateDirectory(partial);
+            string applied=Path.Combine(interrupted,"applied.dll"),locked=Path.Combine(interrupted,"locked.dll");
+            File.WriteAllText(Path.Combine(partial,"0000.bak"),"previous plugin");File.WriteAllText(applied,"installed plugin");File.WriteAllText(locked,"previous scene");
+            File.WriteAllText(Path.Combine(partial,"manifest.json"),System.Text.Json.JsonSerializer.Serialize(new InstallRecord { GD=interrupted,OBS=interrupted,Files=[
+                new ChangedFile { Destination=applied,Backup=Path.Combine(partial,"0000.bak"),OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("previous plugin")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("installed plugin")),Applied=true },
+                new ChangedFile { Destination=locked,InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("installed scene")) }] }));
+            using(new FileStream(locked,FileMode.Open,FileAccess.Read,FileShare.None))
+                Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
+            Check(File.ReadAllText(applied)=="previous plugin" && File.ReadAllText(Path.Combine(partial,"manifest.json")).Contains("rollback-incomplete"),"recovery restores the files it can when one destination is locked");
             // Recovery would roll back another setup's live transaction, so only one setup runs at a time.
             using(var held=new ManualResetEventSlim()) using(var release=new ManualResetEventSlim())
             {
