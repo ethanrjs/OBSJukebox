@@ -583,6 +583,7 @@ struct SongSource {
     std::atomic<int> testOutputDelayMs{0};
     std::atomic<unsigned> testStatCount{0};
     std::atomic<unsigned> testVoiceCount{0};
+    std::atomic<unsigned> testChainResets{0};
 #endif
     explicit SongSource(obs_source_t *s)
         : source(s), linkReceiver(receiver) {}
@@ -782,6 +783,9 @@ struct SongSource {
     }
     // Drops what the decoder thread's stages hold for blocks that will never reach the speakers.
     void resetMusicChains() {
+#ifdef OBS_JUKEBOX_QA
+        ++testChainResets;
+#endif
         for (auto &voice : voices)
             if (voice) {
                 voice->chain.reset();
@@ -792,6 +796,9 @@ struct SongSource {
     }
     // Drops what the output thread's effects stage holds across a gap in its output.
     void resetEffectsChain() {
+#ifdef OBS_JUKEBOX_QA
+        ++testChainResets;
+#endif
         effectsChain.reset();
         effectsSession = 0;
     }
@@ -873,6 +880,11 @@ struct SongSource {
             const bool nowActive = active.load();
             if (nowActive != decoderActive) {
                 resetMusicChains();
+                if (nowActive) {
+                    // A block rendered before the source was deactivated must not play on resume.
+                    std::lock_guard lock(musicMutex);
+                    musicQueue.clear();
+                }
                 decoderActive = nowActive;
             }
             auto wanted = wantedTimestamp.load();
@@ -935,6 +947,11 @@ struct SongSource {
         if (outputActive != effectsActive) {
             // A source that was deactivated must not replay audio it held before the gap.
             resetEffectsChain();
+            if (outputActive) {
+                // The decoder thread's reset may not have run yet; drop any block it queued before.
+                std::lock_guard lock(musicMutex);
+                musicQueue.clear();
+            }
             effectsActive = outputActive;
         }
         if (outputActive) {

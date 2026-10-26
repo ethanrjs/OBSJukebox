@@ -31,16 +31,30 @@ static void sourceRecoveryTest(bool failedSeek) {
     receiver.reset();
 }
 
+// The frequency of captured blocks whose wall time falls in [from, to).
+static double capturedHz(uint64_t from,uint64_t to) {
+    unsigned crossings=0,frames=0;float previous=0;bool first=true;
+    for(const auto& block:capturedBlocks())if(block.wall>=from&&block.wall<to)
+        for(size_t i=0;i<480;++i){
+            auto sample=block.samples[i*2];
+            if(!first)crossings+=previous<0&&sample>=0;
+            previous=sample;first=false;++frames;
+        }
+    return frames?double(crossings)/(double(frames)/48000.):0.;
+}
+
 static void sourceResyncRecoveryTest() {
     receiver=std::make_shared<Receiver>();resetOutput();
     writeTone("artifacts/audio-tests/tone.wav");
+    writeTone("artifacts/audio-tests/tone-high.wav",660);
     SyncedSender sender(0);
     check(sender.synchronize(),"output resync test synchronizes its sender");
     SongLinkPacket packet;packet.flags=3;packet.position=.5;
     std::strcpy(packet.path,"artifacts/audio-tests/tone.wav");
-    // A group stage is primed before the stall; after the resync the music must still carry it.
+    // A group stage is primed before the stall. Its 4096 FFT holds 64 ms of audio, so a chain that
+    // wrongly survives the resync would replay the old 220 Hz before the new 330 Hz.
     SongLinkPacket global;global.channelID=-1;global.flags=1;global.stageCount=1;
-    global.stages[0]={.5f,1024,0,91};
+    global.stages[0]={.5f,4096,0,91};
     {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         auto sendFor=[&](unsigned count){for(unsigned i=0;i<count;++i){
@@ -50,22 +64,58 @@ static void sourceResyncRecoveryTest() {
         sendFor(20);
         bool heard=false;for(const auto& block:capturedBlocks())for(float sample:block.samples)heard|=sample>.05f;
         check(heard,"output resync test starts audible music");
+        auto resets=source.testChainResets.load();
         auto delayedAt=os_gettime_ns();source.testOutputDelayMs=180;
+        std::strcpy(packet.path,"artifacts/audio-tests/tone-high.wav");packet.position=0;
         sendFor(70);
-        unsigned audible=0,blocks=0,crossings=0;float previous=0;
+        unsigned audible=0,blocks=0;
         for(const auto& block:capturedBlocks())if(block.wall>delayedAt+300000000){
             ++blocks;if(std::any_of(block.samples.begin(),block.samples.end(),[](float sample){return sample>.05f;}))++audible;
-            if(block.wall<delayedAt+600000000)
-                for(size_t i=0;i<480;++i){
-                    auto sample=block.samples[i*2];
-                    crossings+=previous<0&&sample>=0;
-                    previous=sample;
-                }
         }
-        const auto hz=double(crossings)/.3;
-        std::cout<<"Resync group stage: "<<hz<<" Hz\n";
+        const auto hz=capturedHz(delayedAt+300000000,delayedAt+500000000);
+        std::cout<<"Resync settled audio: "<<hz<<" Hz\n";
         check(blocks>=20 && audible>=blocks-2,"music resumes after injected output stall resynchronizes timestamp grid");
-        check(hz>200 && hz<240,"the group stage still applies after the resync");
+        check(source.testChainResets.load()>resets,"the resync resets the stage history");
+        check(hz>300 && hz<350,"the resync leaves the new stage processing");
+    }
+    receiver.reset();
+}
+
+static void sourceToggleRecoveryTest() {
+    receiver=std::make_shared<Receiver>();resetOutput();
+    writeTone("artifacts/audio-tests/tone.wav");
+    writeTone("artifacts/audio-tests/tone-high.wav",660);
+    SyncedSender sender(0);
+    check(sender.synchronize(),"source toggle test synchronizes its sender");
+    SongLinkPacket packet;packet.flags=3;packet.position=.5;
+    std::strcpy(packet.path,"artifacts/audio-tests/tone.wav");
+    SongLinkPacket global;global.channelID=-1;global.flags=1;global.stageCount=1;
+    global.stages[0]={.5f,4096,0,92};
+    {
+        SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
+        auto sendFor=[&](unsigned count){for(unsigned i=0;i<count;++i){
+            sender.send(packet,os_gettime_ns());sender.send(global,os_gettime_ns());
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }};
+        sendFor(20);
+        bool heard=false;for(const auto& block:capturedBlocks())for(float sample:block.samples)heard|=sample>.05f;
+        check(heard,"source toggle test starts audible music");
+        auto resets=source.testChainResets.load();
+        source.active=false;
+        auto offAt=os_gettime_ns();
+        sendFor(20);
+        bool silent=true;
+        for(const auto& block:capturedBlocks())if(block.wall>offAt+50000000)
+            for(float sample:block.samples)silent&=sample==0;
+        check(silent,"a deactivated source is silent");
+        std::strcpy(packet.path,"artifacts/audio-tests/tone-high.wav");packet.position=0;
+        auto onAt=os_gettime_ns();
+        source.active=true;
+        sendFor(50);
+        const auto hz=capturedHz(onAt+200000000,onAt+400000000);
+        std::cout<<"Reactivation settled audio: "<<hz<<" Hz\n";
+        check(source.testChainResets.load()>resets,"reactivation resets the stage history");
+        check(hz>300 && hz<350,"reactivation leaves the new stage processing");
     }
     receiver.reset();
 }

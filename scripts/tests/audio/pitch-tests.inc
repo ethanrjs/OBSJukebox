@@ -684,6 +684,57 @@ static void pitchRenderGroupBusTest() {
             excludedMatch &= all[i][f] == both[i][f] + excluded[i][f];
     check(excludedMatch, "an excluded voice is added after the group stage");
 }
+// The first `frames` samples above the noise floor at or after `at`, as a frequency. A resume
+// plays the stage's held audio first, so this tells it from the new audio that follows.
+static double firstAudibleHz(const Simulation &sim, uint64_t at, size_t frames) {
+    std::vector<float> mono;
+    for (const auto &block : sim.output) {
+        if (block.timestamp < at)
+            continue;
+        for (size_t i = 0; i < blockFrames && mono.size() < frames; ++i) {
+            const float sample = block.samples[i * 2];
+            if (mono.empty() && std::abs(sample) <= .01f)
+                continue;
+            mono.push_back(sample);
+        }
+        if (mono.size() == frames)
+            break;
+    }
+    if (mono.size() < frames)
+        return 0;
+    unsigned crossings = 0;
+    for (size_t i = 1; i < mono.size(); ++i)
+        crossings += mono[i - 1] < 0 && mono[i] >= 0;
+    return double(crossings) / (double(frames) / 48000.);
+}
+// Pause freezes the stage, including the audio it is holding. The resumed file is a different
+// tone, so the first audio after the resume can only be the held one.
+static void pitchPauseHeldTest() {
+    Simulation sim;
+    const auto base = sim.now;
+    const auto pauseAt = base + 500000000, resumeAt = base + 550000000;
+    SongLinkPacket p;
+    p.flags = 3; p.epoch = 1; p.stageCount = 1; p.stages[0] = {.5f, 4096, 0, 93};
+    std::strcpy(p.path, "artifacts/audio-tests/tone.wav");
+    sim.start();
+    while (sim.now < pauseAt) {
+        heartbeat(sim, p, base);
+        sim.advance(10000000);
+    }
+    p.flags = 1; p.position = .5;
+    sim.send(p, sim.now);
+    sim.advance(resumeAt - sim.now);
+    p.flags = 3; p.position = 0;
+    std::strcpy(p.path, "artifacts/audio-tests/tone-high.wav");
+    sim.send(p, sim.now);
+    while (sim.now < base + 900000000) {
+        heartbeat(sim, p, base);
+        sim.advance(10000000);
+    }
+    const double hz = firstAudibleHz(sim, resumeAt, 1920);
+    if (std::abs(hz - 220) > 25) std::cerr << "pause held: " << hz << " Hz\n";
+    check(std::abs(hz - 220) <= 25, "a resume plays the stage's held audio first");
+}
 // A voice packet is not the global state: with no global packet, effects are not mixed at all.
 static void pitchRenderNoEffectsWithoutGlobalTest() {
     Simulation sim;
@@ -756,15 +807,111 @@ static void pitchFirstGlobalRunTest() {
     for (size_t i = 0; match && i < dry.size(); ++i) {
         const size_t split = frameAt(dryTimes[i], change);
         auto expected = dry[i];
-        for (size_t f = 0; f < split; ++f)
+        for (size_t f = 0; f < split * 2; ++f)
             match &= staged[i][f] == expected[f];
         if (split < blockFrames) {
             chain.process(expected.data() + split * 2, blockFrames - split, &stage, 1);
-            for (size_t f = split; f < blockFrames; ++f)
+            for (size_t f = split * 2; f < expected.size(); ++f)
                 match &= staged[i][f] == expected[f];
         }
     }
     check(match, "the first global run starts from a fresh chain at its packet's frame");
+}
+// A second process session starts with no stage history. Session 1 primes the group chain, then
+// goes silent long enough for the receiver to accept session 2; session 2's first global packet
+// arrives mid-block and must start exactly like a fresh chain.
+static void pitchSessionRenderTest() {
+    constexpr uint64_t offset = 173 * 1000000000ULL / 48000;
+    auto run = [&](bool primed, std::vector<std::vector<float>> &blocks,
+                   std::vector<uint64_t> &times) -> uint64_t {
+        Simulation sim;
+        const auto base = sim.now;
+        const auto secondStart = base + 2350000000ULL;
+        const auto change = secondStart + 500000000ULL + offset;
+        auto firstSession = sim.game();
+        auto secondSession = sim.game();
+        SongLinkPacket firstVoice;
+        firstVoice.flags = 3; firstVoice.epoch = 1;
+        std::strcpy(firstVoice.path, "artifacts/audio-tests/tone.wav");
+        SongLinkPacket firstGlobal;
+        firstGlobal.channelID = -1; firstGlobal.flags = 1; firstGlobal.epoch = 1;
+        firstGlobal.stageCount = 1; firstGlobal.stages[0] = {.5f, 1024, 0, 91};
+        SongLinkPacket secondVoice = firstVoice;
+        SongLinkPacket secondGlobal = firstGlobal;
+        secondGlobal.stages[0].pitch = 2.f;
+        // Both runs play session 1 first, so session 2 sees the same clock and decoder history.
+        // The dry run's session 1 has no stages, which is the only difference before the change.
+        firstGlobal.stageCount = primed ? 1 : 0;
+        sim.start();
+        sim.answering = &firstSession;
+        while (sim.now < base + 300000000) {
+            sim.send(firstSession, firstVoice, sim.now);
+            sim.send(firstSession, firstGlobal, sim.now);
+            sim.advance(10000000);
+        }
+        if (sim.now < secondStart)
+            sim.advance(secondStart - sim.now);
+        sim.answering = &secondSession;
+        while (sim.now < secondStart + 900000000) {
+            const auto at = sim.now - secondStart;
+            if (at == 500000000) {
+                secondVoice.position = .5;
+                sim.send(secondSession, secondVoice, sim.now);
+                sim.advance(offset);
+                sim.send(secondSession, secondGlobal, sim.now);
+                sim.advance(10000000 - offset);
+                continue;
+            }
+            secondVoice.position = double(at) / 1e9;
+            sim.send(secondSession, secondVoice, sim.now);
+            if (sim.now > change)
+                sim.send(secondSession, secondGlobal, sim.now);
+            sim.advance(10000000);
+        }
+        for (const auto &block : sim.output) {
+            blocks.push_back(block.samples);
+            times.push_back(block.timestamp);
+        }
+        return base;
+    };
+    std::vector<std::vector<float>> dry, primed;
+    std::vector<uint64_t> dryTimes, primedTimes;
+    const auto base = run(false, dry, dryTimes);
+    run(true, primed, primedTimes);
+    const auto secondStart = base + 2350000000ULL;
+    const auto change = secondStart + 500000000ULL + offset;
+    bool match = primed.size() == dry.size() && primed.size() > 20 && primedTimes == dryTimes;
+    size_t block = dry.size();
+    for (size_t i = 0; i < dry.size(); ++i)
+        if (dryTimes[i] <= change && change < dryTimes[i] + SongSource::blockNs) {
+            block = i;
+            break;
+        }
+    match &= block < dry.size();
+    if (match) {
+        const size_t split = frameAt(dryTimes[block], change);
+        // A fresh chain's first call outputs nothing for its latency. A chain that carried session
+        // 1's held audio would output it here instead.
+        double freshPeak = 0;
+        for (size_t f = split * 2; f < std::min<size_t>(split * 2 + 512, blockFrames * 2); ++f)
+            freshPeak = std::max(freshPeak, double(std::abs(primed[block][f])));
+        PitchChain carried;
+        PitchStage firstStage{.5f, 1024, 0, 91}, stage{2.f, 1024, 0, 91};
+        for (size_t i = 0; i < block; ++i)
+            if (dryTimes[i] >= base && dryTimes[i] < base + 300000000)
+                carried.process(dry[i].data(), blockFrames, &firstStage, 1);
+        auto carriedBlock = dry[block];
+        carried.process(carriedBlock.data() + split * 2, blockFrames - split, &stage, 1);
+        double carriedPeak = 0;
+        for (size_t f = split * 2; f < std::min<size_t>(split * 2 + 512, blockFrames * 2); ++f)
+            carriedPeak = std::max(carriedPeak, double(std::abs(carriedBlock[f])));
+        if (freshPeak >= 1e-3 || carriedPeak <= .01)
+            std::cerr << "session fresh peak " << freshPeak << ", carried peak " << carriedPeak << '\n';
+        check(freshPeak < 1e-3, "a new session's first global run starts from a fresh chain");
+        check(carriedPeak > .01, "carrying a stage into the new session would be audible");
+    } else {
+        check(false, "session test finds its first global run");
+    }
 }
 // During a main-thread stall, song packets stop but FMOD keeps mixing and the effects tap keeps
 // sending. The last global stage must keep processing the music past the 400 ms voice staleness.
@@ -793,6 +940,33 @@ static void pitchStallStagesTest() {
     if (std::abs(hz - 220) > 18) std::cerr << "stall stage: " << hz << " Hz\n";
     check(std::abs(hz - 220) <= 18, "a main-thread stall keeps the group stage");
 }
+// The effects stage comes from the same global packet. Once that packet stops updating, the last
+// stage must keep shifting the SFX that FMOD's mixer thread still sends.
+static void pitchStallEffectsTest() {
+    Simulation sim;
+    const auto base = sim.now;
+    SongLinkPacket voice;
+    voice.flags = 1; voice.epoch = 1; // no path: this voice plays nothing
+    SongLinkPacket global;
+    global.channelID = -1; global.flags = 1; global.epoch = 1;
+    global.effectsStageCount = 1; global.effectsStages[0] = {.5f, 1024, 0, 83};
+    sim.send(voice, base);
+    sim.start();
+    for (int i = 0; i < 90; ++i) {
+        if (sim.now < base + 300000000) heartbeat(sim, global, base);
+        EffectsPacketV2 effect;
+        effect.frames = 480; effect.sampleRate = 48000; effect.sequence = i;
+        effect.timestamp = sim.now;
+        for (unsigned f = 0; f < 480; ++f)
+            effect.samples[f * 2] = effect.samples[f * 2 + 1] =
+                float(.2 * std::sin(2 * 3.14159265358979 * 440 * double(i * 480 + f) / 48000));
+        sim.sendEffects(effect);
+        sim.advance(10000000);
+    }
+    const double hz = toneHz(sim, base + 700000000, base + 850000000);
+    if (std::abs(hz - 220) > 18) std::cerr << "stall effects: " << hz << " Hz\n";
+    check(std::abs(hz - 220) <= 18, "a main-thread stall keeps the effects stage");
+}
 static void pitchRenderTests() {
     writeTone("artifacts/audio-tests/tone.wav");
     writeTone("artifacts/audio-tests/tone-high.wav", 660);
@@ -805,7 +979,10 @@ static void pitchRenderTests() {
     pitchRenderGroupBusTest();
     pitchRenderNoEffectsWithoutGlobalTest();
     pitchFirstGlobalRunTest();
+    pitchSessionRenderTest();
     pitchStallStagesTest();
+    pitchStallEffectsTest();
+    pitchPauseHeldTest();
 }
 
 static void pitchTests() {
