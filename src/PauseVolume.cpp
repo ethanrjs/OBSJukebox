@@ -15,14 +15,23 @@ struct SliderCallback {
 static SliderThumb* thumbOf(Slider* slider) {
     return slider->m_touchLogic ? slider->m_touchLogic->m_thumb : nullptr;
 }
+// Points the slider's thumb at `callback` and returns the callback it had.
+static SliderCallback retarget(Slider* slider, SliderCallback callback) {
+    auto thumb = thumbOf(slider);
+    SliderCallback previous{thumb->m_pListener, thumb->m_pfnSelector};
+    thumb->setTarget(callback.target, callback.selector);
+    return previous;
+}
 
 class $modify(ObsJukeboxPauseVolume, PauseLayer) {
     struct Fields {
         bool obs = false;
-        Slider* music = nullptr;
-        Slider* effects = nullptr;
-        CCLabelBMFont* musicLabel = nullptr;
-        CCLabelBMFont* effectsLabel = nullptr;
+        // Retained, so the toggle never touches a freed node if another mod removes or replaces
+        // these after setup.
+        Ref<Slider> music;
+        Ref<Slider> effects;
+        Ref<CCLabelBMFont> musicLabel;
+        Ref<CCLabelBMFont> effectsLabel;
         std::string gameMusicLabel;
         std::string gameEffectsLabel;
         SliderCallback gameMusic;
@@ -40,11 +49,7 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
         fields->musicLabel = typeinfo_cast<CCLabelBMFont*>(getChildByIDRecursive("music-label"));
         fields->effectsLabel = typeinfo_cast<CCLabelBMFont*>(getChildByIDRecursive("sfx-label"));
         if (!fields->music || !fields->effects || fields->music == fields->effects) return;
-        auto musicThumb = thumbOf(fields->music);
-        auto effectsThumb = thumbOf(fields->effects);
-        if (!musicThumb || !effectsThumb) return;
-        fields->gameMusic = {musicThumb->m_pListener, musicThumb->m_pfnSelector};
-        fields->gameEffects = {effectsThumb->m_pListener, effectsThumb->m_pfnSelector};
+        if (!thumbOf(fields->music) || !thumbOf(fields->effects)) return;
         if (fields->musicLabel) fields->gameMusicLabel = fields->musicLabel->getString();
         if (fields->effectsLabel) fields->gameEffectsLabel = fields->effectsLabel->getString();
 
@@ -79,12 +84,14 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
         fields->effects->setValue(fields->obs ? obs_volume::effects() : audio->getEffectsVolume());
         fields->music->updateBar();
         fields->effects->updateBar();
+        // The Game callbacks are saved here rather than at setup, so one another mod set after our
+        // setup is the one restored.
         if (fields->obs) {
-            thumbOf(fields->music)->setTarget(this, menu_selector(ObsJukeboxPauseVolume::onObsMusic));
-            thumbOf(fields->effects)->setTarget(this, menu_selector(ObsJukeboxPauseVolume::onObsEffects));
+            fields->gameMusic = retarget(fields->music, {this, menu_selector(ObsJukeboxPauseVolume::onObsMusic)});
+            fields->gameEffects = retarget(fields->effects, {this, menu_selector(ObsJukeboxPauseVolume::onObsEffects)});
         } else {
-            thumbOf(fields->music)->setTarget(fields->gameMusic.target, fields->gameMusic.selector);
-            thumbOf(fields->effects)->setTarget(fields->gameEffects.target, fields->gameEffects.selector);
+            retarget(fields->music, fields->gameMusic);
+            retarget(fields->effects, fields->gameEffects);
         }
     }
 
