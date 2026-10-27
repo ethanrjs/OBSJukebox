@@ -1,3 +1,9 @@
+## Unreleased
+- OBS follows speedhacks from 0.0001x to 16x; it used to stop at 0.25x and 4x
+- OBS applies other mods' pitch shifters to music and sound effects in the same order as the game, building on @ethanrjs's pitch shifter support
+- New setting: Pitch shift a different OBS song (on by default)
+- Update the mod and the OBS plugin together; the new versions only work with each other
+
 ## v1.2.3
 -  Level editor support
 - Less notification spam
