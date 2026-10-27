@@ -662,6 +662,8 @@ static void multipleVoiceFadeTest() {
     check(survived && remainingFrames>1000,"stopping channel 7 leaves channel 0 playing");
 }
 
+// Fresh packets are SongLinkPacket(), not SongLinkPacket{}: GCC 13 crashes (in gimple_add_tmp_var)
+// on the second `p=SongLinkPacket{}` in one function.
 static void malformedV6Test() {
     Simulation sim;
     auto game=sim.game(3600000000000LL);
@@ -680,24 +682,24 @@ static void malformedV6Test() {
     p.channelID=0;p.flags=7;p.loopStart=2;p.loopEnd=1;rejected(p,"v6 rejects inverted loop bounds");
     p.loopStart=std::numeric_limits<double>::quiet_NaN();p.loopEnd=2;rejected(p,"v6 rejects a nonfinite loop start");
     p.loopStart=1;p.loopEnd=1;rejected(p,"v6 rejects an empty loop");
-    p=SongLinkPacket{};p.flags=1;p.epoch=720;p.fadeCount=3;
+    p=SongLinkPacket();p.flags=1;p.epoch=720;p.fadeCount=3;
     p.fades[0]={0,.5f};p.fades[1]={1000000,.5f};p.fades[2]={1000000,0};
     sim.send(game,p,sim.now);sim.advance(15000000);
     check(receiver->get().packet.epoch==720,"v6 accepts a fade at zero and points that share a time");
     // A stage in the list must be one FMOD would process, and every unused entry must be zero.
-    p=SongLinkPacket{};p.flags=1;p.epoch=721;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
+    p=SongLinkPacket();p.flags=1;p.epoch=721;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
     sim.send(game,p,sim.now);sim.advance(15000000);
     check(receiver->get().packet.epoch==721,"v6 accepts a valid channel stage");
     p.stageCount=9;rejected(p,"v6 rejects more than eight stages");
     p.stageCount=1;p.stageReserved[0]=1;rejected(p,"v6 rejects nonzero stage reserve");
     p.stageReserved[0]=0;p.stageReserved[1]=1;rejected(p,"v6 rejects nonzero stage reserve padding");
     // The count limit alone must reject: eight valid global stages, then a count of nine.
-    p.stageReserved[1]=0;p=SongLinkPacket{};p.flags=1;p.epoch=723;p.channelID=-1;p.effectsStageCount=8;
+    p.stageReserved[1]=0;p=SongLinkPacket();p.flags=1;p.epoch=723;p.channelID=-1;p.effectsStageCount=8;
     for(unsigned i=0;i<8;++i)p.effectsStages[i]={.5f,4096,0,50+i};
     sim.send(game,p,sim.now);sim.advance(15000000);
     check(receiver->get().packet.epoch==723,"v6 accepts eight effects stages in the global packet");
     p.effectsStageCount=9;rejected(p,"v6 rejects more than eight effects stages");
-    p=SongLinkPacket{};p.flags=1;p.epoch=722;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
+    p=SongLinkPacket();p.flags=1;p.epoch=722;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
     p.flags=16;rejected(p,"v6 rejects unknown flag bits");
     p.flags=8;rejected(p,"v6 rejects an excluded voice that still lists stages");
     p.stageCount=0;p.stages[0]={};sim.send(game,p,sim.now);sim.advance(15000000);
@@ -718,7 +720,7 @@ static void malformedV6Test() {
         rejected(bad,"v6 rejects effects stages on a voice packet");
     }
     // The global packet carries music and effects stages; flag 8 is a voice-only rule.
-    p=SongLinkPacket{};p.flags=1;p.epoch=730;p.channelID=-1;p.effectsStageCount=1;
+    p=SongLinkPacket();p.flags=1;p.epoch=730;p.channelID=-1;p.effectsStageCount=1;
     p.effectsStages[0]={.5f,4096,0,43};sim.send(game,p,sim.now);sim.advance(15000000);
     check(receiver->get().packet.epoch==730,"v6 accepts effects stages in the global packet");
     p.flags=8;rejected(p,"v6 rejects flag 8 on the global packet");
