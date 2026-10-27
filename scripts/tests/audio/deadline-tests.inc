@@ -50,8 +50,8 @@ static uint64_t pitchStressRun(const StressRun& run) {
         // `effectsLatenessNs` after its timestamp. The sender spins, so a coarse timer adds no lateness,
         // and it runs at audio scheduling, as FMOD's mixer thread does in GD. Its own lateness is
         // taken once each packet is out, so a slow harness cannot pass for a plugin miss.
-        std::atomic<bool> stopEffects{false},sendFailed{false};
-        std::atomic<uint64_t> sendLateNs{0};
+        std::atomic<bool> stopEffects{false};
+        bool sendFailed=false;uint64_t sendLateNs=0; // the sender's own; read after it joins
         std::thread effectsSender([&]{
             const AudioThreadScheduling scheduling;
             uint64_t sent=0;unsigned sequence=0;
@@ -67,7 +67,7 @@ static uint64_t pitchStressRun(const StressRun& run) {
                 const int size=int(44+effect.frames*8);
                 if(sendto(effects,reinterpret_cast<const char*>(&effect),size,0,
                           reinterpret_cast<sockaddr*>(&addr),sizeof(addr))!=size)sendFailed=true;
-                if(measuring)sendLateNs=std::max<uint64_t>(sendLateNs,os_gettime_ns()-stamp-run.effectsLatenessNs);
+                if(measuring)sendLateNs=std::max(sendLateNs,os_gettime_ns()-stamp-run.effectsLatenessNs);
                 sent+=run.effectsFrames;
             }
         });
@@ -108,10 +108,12 @@ static uint64_t pitchStressRun(const StressRun& run) {
                  <<(run.coarseTimer?" coarse timer":"")<<" lateness "<<double(run.effectsLatenessNs)/1e6
                  <<" ms: max mix "<<double(maxMix)/1e6<<" ms, misses "<<misses<<"/"<<raw
                  <<", effects misses "<<effectsMisses<<"/"<<effectsRaw<<", late frames "<<lateFrames
-                 <<", wake "<<double(wake)/1e6<<" ms, sender late "<<double(sendLateNs.load())/1e6<<" ms\n";
+                 <<", wake "<<double(wake)/1e6<<" ms, sender late "<<double(sendLateNs)/1e6<<" ms\n";
         check(!sendFailed,"the effects sender sends every packet");
-        if(run.checkBudget){
-            check(sendLateNs<2000000,"the effects sender keeps its cadence");
+        // A sender that fell behind fails as the harness; its run says nothing about the plugin.
+        const bool onCadence=sendLateNs<2000000;
+        if(run.checkBudget)check(onCadence,"the effects sender keeps its cadence");
+        if(run.checkBudget && onCadence){
             check(misses==0,"pitch stress has no missed music blocks");
             check(effectsMisses==0,"pitch stress has no missed effects blocks");
             check(maxMix<=2000000,"pitch stress mixBlock stays within 2 ms");
