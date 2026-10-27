@@ -254,4 +254,12 @@ std::optional<uint64_t> wallAtDspClock(unsigned long long clock) {
         return std::nullopt;
     return uint64_t(origin + int64_t(framesToNs(clock, effects->rate)));
 }
+std::optional<int> dspIndex() {
+    auto engine = FMODAudioEngine::get();
+    int index = 0;
+    if (!engine || !effects || !effects->attachedTo(engine->m_globalChannel) ||
+        engine->m_globalChannel->getDSPIndex(effects->dsp, &index) != FMOD_OK)
+        return std::nullopt;
+    return index;
+}
 } // namespace separate_song::audio_tap

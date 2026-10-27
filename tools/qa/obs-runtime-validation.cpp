@@ -1,6 +1,7 @@
 #include "../../src/Socket.hpp"
 #include "../../src/LinkKey.hpp"
 #include "../../src/LinkPacket.hpp"
+#include "PitchShifter.hpp"
 #include <obs.h>
 #include <util/platform.h>
 #ifdef _WIN32
@@ -18,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,22 +46,77 @@ uint64_t cpuTicks(){
     rusage usage{};getrusage(RUSAGE_SELF,&usage);return uint64_t(usage.ru_utime.tv_sec+usage.ru_stime.tv_sec)*10000000+uint64_t(usage.ru_utime.tv_usec+usage.ru_stime.tv_usec)*10;
 #endif
 }
-void wave(const std::filesystem::path& path,double frequencyScale=1,uint32_t samples=48000*6) {
+// The group reference needs many frequencies, since a pure tone's shifted level depends on its
+// starting phase. Filter the noise so fractional decoder interpolation barely changes its level;
+// the quiet 440 Hz pilot still measures the output frequency.
+struct PilotNoise {
+    std::minstd_rand random{19};
+    double filtered=0;
+    int16_t sample(uint64_t frame){
+        filtered+=.05*(double(random())/random.max()*2-1-filtered);
+        const double value=filtered*39318+900*std::sin(2*3.141592653589793*440*double(frame)/48000);
+        return int16_t(std::clamp(value,-32767.,32767.));
+    }
+};
+// A 440, 660, 880 then 1100 Hz tone, or with `constant` 440 Hz throughout.
+void wave(const std::filesystem::path& path,double frequencyScale=1,uint32_t samples=48000*6,bool constant=false,bool pilotNoise=false) {
     std::ofstream out(path,std::ios::binary);uint32_t size=samples*4;
     auto put=[&](auto n){out.write(reinterpret_cast<const char*>(&n),sizeof(n));};
     out.write("RIFF",4);put(size+36);out.write("WAVEfmt ",8);put(uint32_t(16));put(uint16_t(1));put(uint16_t(2));put(uint32_t(48000));put(uint32_t(192000));put(uint16_t(4));put(uint16_t(16));out.write("data",4);put(size);
-    for(uint32_t i=0;i<samples;++i){double hz=(i<48000?440:i<96000?660:i<192000?880:1100)*frequencyScale;int16_t v=int16_t(std::sin(2*3.141592653589793*hz*i/48000)*9000);put(v);put(v);}
+    PilotNoise noise;
+    for(uint32_t i=0;i<samples;++i){double hz=(constant||i<48000?440:i<96000?660:i<192000?880:1100)*frequencyScale;int16_t v=pilotNoise?noise.sample(i):int16_t(std::sin(2*3.141592653589793*hz*i/48000)*9000);put(v);put(v);}
     out.close();
     std::error_code error;auto written=std::filesystem::file_size(path,error);
     if(!out || error || written!=size+44){fprintf(stderr,"WAV fixture write failed: %s\n",path.string().c_str());std::exit(2);}
 }
+// Frame `frame` of the constant fixture as the decoder delivers it.
+float toneSample(uint64_t frame){return float(int16_t(std::sin(2*3.141592653589793*440*double(frame)/48000)*9000))/32768;}
+// The level the constant tone settles at through one fresh stage, from the plugin's own shifter fed
+// 10 ms blocks as OBS feeds it. The stage cases compare OBS's output with this.
+double stageRms(float pitch,uint16_t fft,bool pilotNoise=false,double fraction=0){
+    PitchShifter stage;std::vector<float> block(960);double squares=0;size_t counted=0;
+    PilotNoise noise;
+    auto sample=[&](uint64_t frame){return pilotNoise?float(noise.sample(frame))/32768:toneSample(frame);};
+    float current=sample(0);
+    for(uint64_t frame=0;frame<48000*2;frame+=480){
+        for(unsigned i=0;i<480;++i){float next=sample(frame+i+1);block[i*2]=block[i*2+1]=float(current*(1-fraction)+next*fraction);current=next;}
+        stage.process(block.data(),480,pitch,fft);
+        if(frame>=48000)for(unsigned i=0;i<480;++i){squares+=double(block[i*2])*block[i*2];++counted;}
+    }
+    return std::sqrt(squares/double(counted));
+}
+bool validGroupFixture(){
+    const double reference=stageRms(1.25f,2048,true);
+    for(double fraction:{.25,.5,.75}){
+        const double actual=stageRms(1.25f,2048,true,fraction);
+        if(std::abs(actual-reference)>reference*.05){
+            fprintf(stderr,"Group fixture interpolation %.2f changed RMS %.6f to %.6f beyond 5%%\n",fraction,reference,actual);
+            return false;
+        }
+    }
+    return true;
+}
+// The strongest frequency from half to twice `expected`, by a DFT over the whole capture. It
+// measures a 4.4 Hz tone as well as 7 kHz, where counting zero crossings needs many cycles.
+double dominantHz(const std::vector<float>& samples,double expected){
+    double best=0,bestPower=-1;
+    for(double hz=expected*.5;hz<=expected*2;hz*=1.002){
+        const double coefficient=2*std::cos(2*3.141592653589793*hz/48000);double s1=0,s2=0;
+        for(float sample:samples){const double s0=sample+coefficient*s1-s2;s2=s1;s1=s0;}
+        const double power=s1*s1+s2*s2-coefficient*s1*s2;
+        if(power>bestPower){bestPower=power;best=hz;}
+    }
+    return best;
+}
 int main(int argc,char** argv){
+    if(argc==2 && !std::strcmp(argv[1],"--check-group-fixture"))return validGroupFixture()?0:1;
     if(argc<3){fprintf(stderr,"Usage: harness plugin-path output-directory [optional-mp3 | --live [seconds]]\n");return 2;}
     bool live=argc>3 && !std::strcmp(argv[3],"--live");
     double liveSeconds=live&&argc>4?std::strtod(argv[4],nullptr):15;
     if(live && (!std::isfinite(liveSeconds)||liveSeconds<1||liveSeconds>60)){
         fprintf(stderr,"Live capture requires 1-60 seconds\n");return 2;
     }
+    if(!live && !validGroupFixture())return 2;
 
     if(!socketsReady()){fprintf(stderr,"sockets unavailable\n");return 2;}
     auto preflight=socket(AF_INET,SOCK_DGRAM,0);sockaddr_in preflightAddress{};
@@ -145,15 +202,29 @@ int main(int argc,char** argv){
         }
     });
     SongLinkPacket packet;packet.sessionID=0x51414e4154495644ULL;std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));std::strcpy(packet.song,"Runtime synthetic tone");std::strcpy(packet.status,"playing");packet.flags=3;packet.epoch=1;
+    // The mod's global packet: effects, their volume and the group stages. It goes out with each
+    // voice packet, on the same session, socket and timestamp.
+    SongLinkPacket global;global.channelID=-1;
+    // With `spectral` a case measures its frequency by DFT; with `expectedRms` its level must be
+    // within 5% of that oracle. Both stay set until changed, like the packets' volumes.
+    bool spectral=false;double expectedRms=0;
     std::ofstream json(output/"runtime-results.json");json<<"{\"host\":\"Installed OBS libobs\",\"plugin\":\""<<std::filesystem::path(argv[1]).filename().string()<<"\",\"cases\":[\n";bool first=true;int failures=0;
+    // effects: 1 sends a 0.15 level each tick, 2 the tap's 44.1 kHz bursts of that level, 3 the
+    // constant tone at 48 kHz, 30 ms ahead so a coarse timer cannot make a staged block late.
     auto phase=[&](const char* name,double seconds,double expected,double pos,uint32_t flags,double rate=1,double offset=0,bool transmit=true,int effects=0,bool expectedMuted=false,bool expectEffectMean=false,bool advanceEpoch=true,double settleSeconds=.55){
         if(std::getenv("OBS_QA_RECOVERY_ONLY") && std::strcmp(name,"mp3_decode") && std::strcmp(name,"failed_seek_music_silence") && std::strcmp(name,"failed_seek_effects_continue") && std::strcmp(name,"failed_seek_restart_recovery"))return Metric{};
         packet.position=pos;packet.flags=flags;packet.rate=rate;packet.offset=offset;if(advanceEpoch)packet.epoch++;
         auto start=Clock::now(),end=start+std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));uint64_t cpu=cpuTicks();capture.reset();bool reset=false;
         uint64_t effectClock=os_gettime_ns(),effectFrames=0;uint32_t sequence=0;
         while(Clock::now()<end){double elapsed=std::chrono::duration<double>(Clock::now()-start).count();packet.position=pos+((flags&2)?elapsed*rate:0);
-            packet.timestamp=os_gettime_ns();signPacket(processLinkKey(),packet);
-            if(transmit)sendto(sock,reinterpret_cast<const char*>(&packet),sizeof(packet),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+            packet.timestamp=os_gettime_ns();
+            global.sessionID=packet.sessionID;global.timestamp=packet.timestamp;global.flags=flags&1;
+            global.musicVolume=packet.musicVolume;global.effectsVolume=packet.effectsVolume;
+            if(transmit){
+                signPacket(processLinkKey(),global);signPacket(processLinkKey(),packet);
+                sendto(sock,reinterpret_cast<const char*>(&global),sizeof(global),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+                sendto(sock,reinterpret_cast<const char*>(&packet),sizeof(packet),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+            }
             auto sendEffects=[&](EffectsPacketV3& e){auto size=offsetof(EffectsPacketV3,samples)+e.frames*8;signPacket(processLinkKey(),e,size);sendto(sock,reinterpret_cast<const char*>(&e),int(size),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));};
             if(effects==1){EffectsPacketV3 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendEffects(e);}
             if(effects==2){
@@ -164,14 +235,23 @@ int main(int argc,char** argv){
                     jitter=(effectFrames/1024)%2?.006:0;
                 }
             }
+            while(effects==3 && elapsed+.03>=double(effectFrames)/48000){
+                EffectsPacketV3 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.sequence=sequence++;
+                e.timestamp=effectClock+effectFrames*1000000000/48000;
+                for(unsigned i=0;i<e.frames;++i)e.samples[i*2]=e.samples[i*2+1]=toneSample(effectFrames+i);
+                effectFrames+=480;
+                sendEffects(e);
+            }
             if(!reset&&elapsed>settleSeconds){capture.reset();reset=true;}std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         double cpuPercent=double(cpuTicks()-cpu)/1e7/seconds*100;
-        Metric m;{std::lock_guard lock(capture.mutex);m.frames=capture.samples.size();double squares=0,total=0;size_t crosses=0;for(size_t i=0;i<m.frames;++i){double v=capture.samples[i];squares+=v*v;total+=v;if(i&&capture.samples[i-1]<=0&&v>0)crosses++;}if(m.frames){m.rms=std::sqrt(squares/m.frames);m.mean=total/m.frames;m.hz=double(crosses)*48000/m.frames;m.mutedFraction=double(capture.mutedFrames)/m.frames;}}
+        Metric m;{std::lock_guard lock(capture.mutex);m.frames=capture.samples.size();double squares=0,total=0;size_t crosses=0;for(size_t i=0;i<m.frames;++i){double v=capture.samples[i];squares+=v*v;total+=v;if(i&&capture.samples[i-1]<=0&&v>0)crosses++;}if(m.frames){m.rms=std::sqrt(squares/m.frames);m.mean=total/m.frames;m.hz=double(crosses)*48000/m.frames;m.mutedFraction=double(capture.mutedFrames)/m.frames;}
+            if(spectral&&expected>0)m.hz=dominantHz(capture.samples,expected);}
         m.pass=m.frames>1000&&(expected==0?m.rms<.00001:expected<0?m.rms>.05:m.rms>.05&&std::abs(m.hz-expected)<expected*.08)&&(expectedMuted?m.mutedFraction>.99:m.mutedFraction<.01)&&(!expectEffectMean||m.mean>.03);
+        if(expectedRms>0&&std::abs(m.rms-expectedRms)>expectedRms*.05)m.pass=false;
         if(effects==2){std::lock_guard lock(capture.mutex);for(float sample:capture.samples)if(std::abs(sample-.15f*packet.effectsVolume)>.001f)m.pass=false;}
         if(packet.musicVolume==.5f && expected>0 && !effects)m.pass=m.pass&&m.rms>.09&&m.rms<.105;
-        if(!m.pass)failures++;if(!first)json<<",\n";first=false;json<<"{\"name\":\""<<name<<"\",\"frames\":"<<m.frames<<",\"raw_rms\":"<<m.rms<<",\"sample_mean\":"<<m.mean<<",\"frequency_hz\":"<<m.hz<<",\"obs_callback_muted_fraction\":"<<m.mutedFraction<<",\"process_cpu_one_core_percent\":"<<cpuPercent<<",\"pass\":"<<(m.pass?"true":"false")<<"}";
+        if(!m.pass)failures++;if(!first)json<<",\n";first=false;json<<"{\"name\":\""<<name<<"\",\"frames\":"<<m.frames<<",\"raw_rms\":"<<m.rms<<",\"sample_mean\":"<<m.mean<<",\"frequency_hz\":"<<m.hz<<",\"frequency_method\":\""<<(spectral&&expected>0?"dft":"zero_crossings")<<"\",\"expected_rms\":"<<expectedRms<<",\"obs_callback_muted_fraction\":"<<m.mutedFraction<<",\"process_cpu_one_core_percent\":"<<cpuPercent<<",\"pass\":"<<(m.pass?"true":"false")<<"}";
         printf("%s: %s rms=%.5f hz=%.1f mean=%.4f muted=%.2f CPU=%.2f%% of one core\n",name,m.pass?"PASS":"FAIL",m.rms,m.hz,m.mean,m.mutedFraction,cpuPercent);fflush(stdout);return m;
     };
     phase("no_link_silence",1,0,0,0,1,0,false);
@@ -246,6 +326,42 @@ int main(int argc,char** argv){
         phase("failed_seek_restart_recovery",1,-1,0,3);
     }
     std::memset(packet.path,0,sizeof(packet.path));std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));
+    // v7 speed and pitch stages on a constant 440 Hz tone. It lasts 32 s, so 16x for 1.5 s still has
+    // audio after settling. Each case clears its stages, and the previous path comes back after.
+    {
+        auto constant=output/"constant-440.wav";wave(constant,1,48000*32,true);
+        char previous[sizeof(packet.path)];std::memcpy(previous,packet.path,sizeof(previous));
+        auto constantUtf8=constant.u8string();std::memset(packet.path,0,sizeof(packet.path));
+        std::memcpy(packet.path,constantUtf8.data(),std::min(constantUtf8.size(),sizeof(packet.path)-1));
+        spectral=true;
+        phase("rate_hundredth_constant_tone",8,4.4,0,3,.01);
+        phase("rate_16x_constant_tone",1.5,7040,0,3,16);
+        packet.stageCount=1;packet.stages[0]={.75f,4096,0,0x7001};expectedRms=stageRms(.75f,4096);
+        phase("channel_stage_three_quarters",2,330,2,3);
+        // The same stage at a new pitch keeps its instance, so OBS keeps the stage and its audio. Its
+        // level then depends on the phase it carried over, which no fresh stage reproduces, so only
+        // the frequency is checked; the chain tests cover what the stage keeps.
+        packet.stages[0].pitch=1.5f;expectedRms=0;
+        phase("channel_stage_same_instance_pitch_change",2,660,4,3,1,0,true,0,false,false,false);
+        packet.stages[0]={1.f,4096,0,0x7002};expectedRms=stageRms(1.f,4096);
+        phase("channel_stage_pitch_one_gain",2,440,2,3);
+        packet.stageCount=0;packet.stages[0]={};
+        auto groupTone=output/"group-pilot-noise.wav";wave(groupTone,1,48000*6,true,true);
+        auto groupUtf8=groupTone.u8string();std::memset(packet.path,0,sizeof(packet.path));
+        std::memcpy(packet.path,groupUtf8.data(),std::min(groupUtf8.size(),sizeof(packet.path)-1));
+        global.stageCount=1;global.stages[0]={1.25f,2048,0,0x7003};expectedRms=stageRms(1.25f,2048,true);
+        phase("group_stage_shifts_music",2,550,0,3);
+        std::memset(packet.path,0,sizeof(packet.path));
+        std::memcpy(packet.path,constantUtf8.data(),std::min(constantUtf8.size(),sizeof(packet.path)-1));
+        expectedRms=0;
+        phase("excluded_replacement_skips_group_stage",2,440,2,3|8);
+        global.stageCount=0;global.stages[0]={};
+        global.effectsStageCount=1;global.effectsStages[0]={.5f,1024,0,0x7004};expectedRms=stageRms(.5f,1024);
+        phase("effects_stage_shifts_effects",2,220,0,1,1,0,true,3);
+        global.effectsStageCount=0;global.effectsStages[0]={};expectedRms=0;
+        spectral=false;
+        std::memcpy(packet.path,previous,sizeof(previous));
+    }
     // A different session can take ownership only after the prior sender is stale.
     phase("session_handoff_quiet_window",2.2,0,0,0,1,0,false);
     packet.sessionID=0x51414e4154495645ULL;

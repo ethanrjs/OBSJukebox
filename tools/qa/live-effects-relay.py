@@ -49,8 +49,8 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             continue
         if kind == "song":
             packet = packet[:264] + bytes(1024) + packet[1288:]
-            if fields["version"] == 6:
-                packet = sign(key, packet, SONG_TAG)
+            if fields["version"] >= 6:
+                packet = sign(key, packet, 1436 if fields["version"] == 6 else SONG_TAG)
             songs += 1
             modern_songs += fields["version"] >= 5
         elif kind == "effects":

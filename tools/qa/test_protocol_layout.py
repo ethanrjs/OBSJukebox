@@ -6,8 +6,8 @@ from link_protocol import CLOCK_TAG, EFFECTS_TAG, SONG_TAG, parse_packet, SONG, 
 
 schemas = {
     'SongFadePoint': [('offsetNs', 'Q'), ('gain', 'f')],
-    'SongLinkPacket': list(zip('magic version flags epoch attempt position rate offset status level song path musicVolume effectsVolume timestamp sessionID channelID triggerGain fadeCount fades loopStart loopEnd tag'.split(),
-                               ['8s','I','I','I','i','d','d','d','24s','96s','96s','1024s','f','f','Q','Q','i','f','I','96s','d','d','16s'])),
+    'SongLinkPacket': list(zip('magic version flags epoch attempt position rate offset status level song path musicVolume effectsVolume timestamp sessionID channelID triggerGain fadeCount fades loopStart loopEnd stageCount effectsStageCount stageReserved stages effectsStages tag'.split(),
+                               ['8s','I','I','I','i','d','d','d','24s','96s','96s','1024s','f','f','Q','Q','i','f','I','96s','d','d','B','B','2s','128s','128s','16s'])),
     'ClockSyncPacket': list(zip('magic version kind sessionID t1 t2 t3 tag'.split(), ['8s','I','I','Q','Q','Q','Q','16s'])),
 }
 for name, modern in [('EffectsPacket', False), ('EffectsPacketV3', True)]:
@@ -37,7 +37,7 @@ assert not expected, expected
 assert SONG.size == 1288 and CLOCK.size == 48
 # protocol-layout.cpp signs with this key, so a match means both sides compute the same HMAC.
 KEY = bytes([0x11] * 32)
-for version in range(2, 7):
+for version in range(2, 8):
     packet = packets.pop('song' + str(version))
     assert len(packet) == SONG_SIZES[version]
     kind, fields = parse_packet(packet)
@@ -50,8 +50,20 @@ for version in range(2, 7):
                     channel_id=7 if modern else 0, trigger_gain=2. if modern else 1.,
                     fades=[dict(offset_ns=(i+1)*100, gain=(i+1)/2) for i in range(8)] if modern else [],
                     loop_start=3.25 if modern else 0., loop_end=9.5 if modern else 0.,
-                    tag=tag(KEY, packet, SONG_TAG).hex() if version == 6 else None)
+                    tag=tag(KEY, packet, 1436 if version == 6 else SONG_TAG).hex() if version >= 6 else None)
+    if version == 7:
+        baseline.update(stage_count=2, effects_stage_count=0,
+                        stages=[dict(pitch=.75, fft=1024, instance=41),
+                                dict(pitch=1.5, fft=2048, instance=42)],
+                        effects_stages=[], group_excluded=False)
     assert fields == baseline, (version, fields, baseline)
+global_packet = packets.pop('song7global')
+kind, fields = parse_packet(global_packet)
+assert kind == 'song' and fields['channel_id'] == -1 and fields['stage_count'] == 1
+assert fields['stages'] == [dict(pitch=1., fft=256, instance=44)]
+assert fields['effects_stage_count'] == 1
+assert fields['effects_stages'] == [dict(pitch=.5, fft=4096, instance=43)]
+assert fields['tag'] == tag(KEY, global_packet, SONG_TAG).hex()
 clock = packets.pop('clock')
 kind, fields = parse_packet(clock)
 assert (kind, fields) == ('clock', dict(kind=2, session_id=765432, t1=11, t2=22, t3=33, tag=tag(KEY, clock, CLOCK_TAG).hex()))

@@ -539,26 +539,28 @@ LevelSongs snapshotSongs(GJGameLevel* level) {
     int id = songID(level);
     return levelSongIDs(id, std::string(level->m_songIDs));
 }
-void fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
+bool fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
     state.path.clear(); state.song.clear();
-    if (!songs) return;
+    if (!songs) return false;
     // GD's own file, by full path: GD keeps built-in songs as names relative to its resources.
     auto gameSong = [&] {
         state.song = "In-game song";
         if (!source.path.empty()) state.path = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
     };
-    if (!cellLayoutMatches()) return gameSong();
-    if (source.path.empty()) return;
+    if (!cellLayoutMatches()) { gameSong(); return false; }
+    if (source.path.empty()) return false;
     std::vector<MusicCandidate> candidates;
     for (const auto* ids : {songs, &source.extraIDs})
         for (int id : *ids) candidates.push_back({id, forPlayback(id).normalizedGamePath});
-    auto matched = songForPath(normalizedMusicPath(source.path), candidates);
-    if (!matched) return gameSong();
+    const auto gamePath = normalizedMusicPath(source.path);
+    auto matched = songForPath(gamePath, candidates);
+    if (!matched) { gameSong(); return false; }
     const auto& cached = forPlayback(*matched);
-    if (!cached.obs || !cached.obsReady) return gameSong();
+    if (!cached.obs || !cached.obsReady) { gameSong(); return false; }
     state.song = cached.obs->name;
     state.path = cached.obs->path;
     state.offset += (cached.obs->offset - cached.game.offset) / 1000.0;
+    return normalizedMusicPath(cached.obs->path) != gamePath;
 }
 void initialize() {
     if (!cellLayoutMatches()) return;

@@ -1,10 +1,15 @@
 #include "../../src/PlaybackIdentity.hpp"
 #include "../../src/MusicSampling.hpp"
+#include "../../src/PitchStages.hpp"
 #include "../../src/GamePolicies.hpp"
 #include "../../src/LinkPacket.hpp"
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <optional>
+#include <span>
 #include <unordered_map>
 
 using namespace separate_song;
@@ -44,9 +49,9 @@ int main() {
     auto ids = levelSongIDs(-1, "123,456,123,-2,0,invalid,12oops,2147483648,");
     check(ids == std::vector<int>({-1, 123, 456, -2}), "candidate list supports built-in IDs and rejects malformed entries");
     check(levelSongIDs(123, "") == std::vector<int>({123}), "empty extra-song list preserves the initial ID");
-    std::string many;
-    for (int id = 1; id <= 100000; ++id) many += std::to_string(id) + ",";
-    auto capped = levelSongIDs(-1, many);
+    std::string declaredSongs;
+    for (int id = 1; id <= 100000; ++id) declaredSongs += std::to_string(id) + ",";
+    auto capped = levelSongIDs(-1, declaredSongs);
     check(capped.size() == 128 && capped.front() == -1 && capped.back() == 127,
         "a level declaring 100000 songs is cut to its first 128 IDs");
     std::vector<MusicCandidate> songs{{123, "/songs/a.mp3"}, {456, "/nongs/song-b.mp3"}};
@@ -91,5 +96,63 @@ int main() {
         "packet fade offsets are strictly increasing and inside protocol limits");
     check(packet[1].gain == 0 && packet[2].gain == 0,
         "scheduled stop wins duplicate timestamp and nonfinite gains are silent");
+    using separate_song::sampledMusicRate;
+    std::array<std::optional<float>, 2> pitches{1.f, .01f};
+    auto slow = sampledMusicRate(48000.f, 48000.f, pitches);
+    check(slow && std::abs(*slow - .01) < 1e-9, "minor group pitch is followed without a 0.25x floor");
+    pitches = {4.f, 8.f};
+    check(sampledMusicRate(48000.f, 48000.f, pitches) == 16., "combined rate stops at 16x");
+    pitches = {1.f, 1.f};
+    check(sampledMusicRate(48000.f, 48000.f, pitches) == 1., "unit factors leave the rate at 1");
+    check(std::abs(*sampledMusicRate(48000.f, 24000.f, pitches) - .5) < 1e-9,
+        "channel frequency below the sound base slows playback");
+    check(sampledMusicRate(0.f, 48000.f, pitches) == 1., "zero base frequency leaves the frequency ratio at one");
+    check(sampledMusicRate(std::numeric_limits<float>::infinity(), 48000.f, pitches) == 1.,
+        "nonfinite base frequency leaves the frequency ratio at one");
+    check(sampledMusicRate(std::numeric_limits<float>::quiet_NaN(), 48000.f, pitches) == 1.,
+        "NaN base frequency leaves the frequency ratio at one");
+    check(!sampledMusicRate(0.f, 0.f, pitches), "read zero frequency stops even with a rejected base");
+    check(!sampledMusicRate(std::nullopt, 0.f, pitches), "read zero frequency stops even with no base");
+    check(!sampledMusicRate(48000.f, std::numeric_limits<float>::quiet_NaN(), pitches),
+        "nonfinite frequency stops the music");
+    check(!sampledMusicRate(48000.f, 0.f, pitches), "read zero frequency stops the music");
+    check(!sampledMusicRate(48000.f, -1.f, pitches), "negative frequency stops the music");
+    check(sampledMusicRate(48000.f, std::nullopt, pitches) == 1., "failed frequency read leaves the ratio at one");
+    pitches = {1.f, std::nullopt};
+    check(sampledMusicRate(48000.f, 48000.f, pitches) == 1., "failed group pitch read leaves the ratio at one");
+    pitches = {1.f, 0.f};
+    check(!sampledMusicRate(48000.f, 48000.f, pitches), "zero group pitch stops the music");
+    pitches = {-1.f, -1.f};
+    check(!sampledMusicRate(48000.f, 48000.f, pitches), "two negative pitches cannot multiply back to playing");
+    pitches = {1.f, std::numeric_limits<float>::quiet_NaN()};
+    check(!sampledMusicRate(48000.f, 48000.f, pitches), "nonfinite pitch stops the music");
+    pitches = {1.f, std::numeric_limits<float>::infinity()};
+    check(!sampledMusicRate(48000.f, 48000.f, pitches), "infinite pitch stops the music");
+    pitches = {1.f, .00001f};
+    auto verySlow = sampledMusicRate(48000.f, 48000.f, pitches);
+    check(verySlow && std::abs(*verySlow - .00001) < 1e-12, "rates below 0.25x stay below 0.25x");
+    using separate_song::ObservedDsp;
+    using separate_song::pitchStages;
+    std::array<ObservedDsp, 4> observed{{
+        {13, .75f, 4096.f, true, 41}, {13, 1.f, 1024.f, true, 42},
+        {13, 2.f, 2048.f, false, 43}, {7, 1.f, 1024.f, true, 44}}};
+    auto stages = pitchStages(observed);
+    check(stages.count == 2 && stages.stages[0].instance == 41 && stages.stages[1].instance == 42 &&
+              !stages.overflow,
+          "qualified pitch stages keep signal order and skip bypassed and other DSPs");
+    observed = {{{13, .2f, 1024.f, true, 1}, {13, 3.f, 2048.f, true, 2},
+                 {13, 1.f, 1000.f, true, 3}, {13, 1.f, 4096.f, true, 0}}};
+    stages = pitchStages(observed);
+    check(stages.count == 2 && stages.stages[0].pitch == .5f && stages.stages[1].pitch == 2.f,
+          "stage pitch is clamped like FMOD and unsupported sizes and instances are refused");
+    observed[0] = {13, std::numeric_limits<float>::quiet_NaN(), 1024.f, true, 5};
+    observed[1] = {13, 1.f, std::numeric_limits<float>::infinity(), true, 6};
+    check(pitchStages(observed).count == 0, "nonfinite stage parameters are refused");
+    std::array<ObservedDsp, 9> many{};
+    for (unsigned i = 0; i < many.size(); ++i)
+        many[i] = {13, 1.f, 1024.f, true, 100 + i};
+    stages = pitchStages(many);
+    check(stages.count == 8 && stages.stages[7].instance == 107 && stages.overflow,
+          "more than eight qualified stages keep the first eight and report overflow");
     std::cout << checks << " game identity checks passed\n";
 }

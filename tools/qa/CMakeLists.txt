@@ -41,6 +41,17 @@ else()
   target_link_libraries(obs-runtime-validation PRIVATE PkgConfig::LIBOBS)
 endif()
 
+# Manual QA: measures FMOD's own pitch shifter in the local GD fmod.dll (see the tool's header).
+set(GEODE_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../geode-sdk" CACHE PATH "Geode SDK, for FMOD's headers and import library")
+if(WIN32 AND EXISTS "${GEODE_SDK_DIR}/loader/include/link/win64/fmod.lib")
+  add_executable(fmod-pitchshift-reference fmod-pitchshift-reference.cpp)
+  target_include_directories(fmod-pitchshift-reference PRIVATE "${GEODE_SDK_DIR}/loader/include/Geode/fmod")
+  target_compile_definitions(fmod-pitchshift-reference PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+  target_compile_options(fmod-pitchshift-reference PRIVATE /W4 /EHsc /utf-8)
+  target_link_libraries(fmod-pitchshift-reference PRIVATE "${GEODE_SDK_DIR}/loader/include/link/win64/fmod.lib" delayimp)
+  target_link_options(fmod-pitchshift-reference PRIVATE /DELAYLOAD:fmod.dll)
+endif()
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_executable(protocol-layout protocol-layout.cpp)
 add_test(NAME protocol-layout-parity COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_protocol_layout.py $<TARGET_FILE:protocol-layout>)

@@ -16,13 +16,17 @@
 #include "LevelIdentity.hpp"
 #include "PlaybackIdentity.hpp"
 #include "MusicSampling.hpp"
+#include "PitchStages.hpp"
 #include "GamePolicies.hpp"
 #include "MonotonicClock.hpp"
+#include <array>
 #include <map>
 #include <set>
+#include <span>
 #include <chrono>
 #include <cmath>
 #include <optional>
+#include <climits>
 
 using namespace geode::prelude;
 using namespace separate_song;
@@ -32,6 +36,7 @@ static PlayLayer* activePlayLayer = nullptr;
 static std::string offsetLevel;
 static bool loadingOffset = false;
 static bool enabled = true;
+static bool pitchShiftReplacement = true;
 struct MusicVoice {
     Snapshot snapshot;
     jukebox_link::MusicSource source;
@@ -39,9 +44,11 @@ struct MusicVoice {
     FMOD::Sound* sound = nullptr;
     double duration = 0;
     bool loop = false, scheduledStop = false, continuing = false, explicitlyStopped = false, dontReset = false;
+    bool rateStopped = false;
     int engineChannelID = 0;
     float lastFade = 1.f;
     std::vector<MusicFade> fadePoints;
+    StageList observedStages;
 };
 static std::map<int, MusicVoice> voices;
 static unsigned nextEpoch = 1;
@@ -71,22 +78,26 @@ static bool channelPaused(FMOD::Channel* channel) {
     }
     return false;
 }
-static double channelRate(FMOD::Channel* channel, FMOD::Sound* sound) {
-    float base = 0.f, frequency = 0.f, pitch = 1.f;
-    sound->getDefaults(&base, nullptr);
-    channel->getFrequency(&frequency);
-    channel->getPitch(&pitch);
-    double rate = base > 0 && frequency > 0 ? frequency / base : 1.;
-    rate *= pitch;
+static std::optional<double> channelRate(FMOD::Channel* channel, FMOD::Sound* sound) {
+    std::optional<float> base, frequency;
+    float value = 0.f;
+    if (sound->getDefaults(&value, nullptr) == FMOD_OK) base = value;
+    value = 0.f;
+    if (channel->getFrequency(&value) == FMOD_OK) frequency = value;
+    std::array<std::optional<float>, 17> pitches{};
+    size_t count = 0;
+    value = 1.f;
+    if (channel->getPitch(&value) == FMOD_OK) pitches[count++] = value;
     FMOD::ChannelGroup* group = nullptr;
     channel->getChannelGroup(&group);
     for (int depth = 0; group && depth < 16; ++depth) {
-        pitch = 1.f; group->getPitch(&pitch); rate *= pitch;
+        value = 1.f;
+        if (group->getPitch(&value) == FMOD_OK) pitches[count++] = value;
         FMOD::ChannelGroup* parent = nullptr;
         if (group->getParentGroup(&parent) != FMOD_OK || parent == group) break;
         group = parent;
     }
-    return std::isfinite(rate) ? std::clamp(rate, .25, 4.) : 1.;
+    return sampledMusicRate(base, frequency, std::span(pitches.data(), count));
 }
 // A channel's position in seconds and the wall time it is true at. FMOD advances the position
 // once per mixer block (~21 ms), so dating it with the DSP clock of the effects group, which the
@@ -176,25 +187,98 @@ static void settings(Snapshot& snapshot) {
     snapshot.effectsVolume = obs_volume::effects();
     snapshot.offset = playingSongs ? offset_setting::value() : 0.0;
 }
+// One main-thread scratch list, so the 10 ms sampling does not allocate a vector each time.
+static std::vector<ObservedDsp>& dspScratch() {
+    static std::vector<ObservedDsp> scratch;
+    return scratch;
+}
+// Reads the pitch shifters FMOD will process on `control`, from the input end (highest index) to the
+// output end (index 0). `below` stops the walk before a tap, so only DSPs that process the audio
+// after the tap are read.
+static void observeDsps(FMOD::ChannelControl* control, int below, std::vector<ObservedDsp>& out) {
+    int total = 0;
+    if (!control || control->getNumDSPs(&total) != FMOD_OK) return;
+    for (int i = std::min(below, total) - 1; i >= 0; --i) {
+        FMOD::DSP* dsp = nullptr;
+        FMOD_DSP_TYPE type = FMOD_DSP_TYPE_UNKNOWN;
+        if (control->getDSP(i, &dsp) != FMOD_OK || !dsp || dsp->getType(&type) != FMOD_OK ||
+            type != FMOD_DSP_TYPE_PITCHSHIFT) continue;
+        bool bypass = false, active = false;
+        float pitch = 1.f, fft = 0.f;
+        if (dsp->getBypass(&bypass) != FMOD_OK || bypass || dsp->getActive(&active) != FMOD_OK || !active ||
+            dsp->getParameterFloat(FMOD_DSP_PITCHSHIFT_PITCH, &pitch, nullptr, 0) != FMOD_OK ||
+            dsp->getParameterFloat(FMOD_DSP_PITCHSHIFT_FFTSIZE, &fft, nullptr, 0) != FMOD_OK)
+            continue;
+        out.push_back({int(type), pitch, fft, true, uint64_t(reinterpret_cast<uintptr_t>(dsp))});
+    }
+}
+// Every group from `group` to the master, in signal order.
+static void observeGroupChain(FMOD::ChannelGroup* group, std::vector<ObservedDsp>& out) {
+    for (int depth = 0; group && depth < 16; ++depth) {
+        observeDsps(group, INT_MAX, out);
+        FMOD::ChannelGroup* parent = nullptr;
+        if (group->getParentGroup(&parent) != FMOD_OK || parent == group) break;
+        group = parent;
+    }
+}
+static void warnStageOverflow() {
+    static bool logged = false;
+    if (logged) return;
+    logged = true;
+    log::warn("more than 8 pitch shifters; OBS applies the first 8");
+}
+// The music group's stages and, for the SFX bus, the stages after the effects tap. Sampled on the
+// main thread only; the global packet carries them, so OBS applies them once to its own mix.
+static void sampleGroupStages() {
+    state.stages = {}; state.stageCount = 0;
+    state.effectsStages = {}; state.effectsStageCount = 0;
+    auto engine = FMODAudioEngine::get();
+    if (!engine || !engine->m_system) return;
+    auto& observed = dspScratch();
+    observed.clear();
+    observeGroupChain(engine->m_backgroundMusicChannel, observed);
+    auto music = pitchStages(observed);
+    state.stages = music.stages;
+    state.stageCount = music.count;
+    if (music.overflow) warnStageOverflow();
+    observed.clear();
+    const auto tap = audio_tap::dspIndex();
+    if (!tap || !engine->m_globalChannel) return;
+    observeDsps(engine->m_globalChannel, *tap, observed);
+    FMOD::ChannelGroup* parent = nullptr;
+    if (engine->m_globalChannel->getParentGroup(&parent) == FMOD_OK && parent != engine->m_globalChannel)
+        observeGroupChain(parent, observed);
+    auto effects = pitchStages(observed);
+    state.effectsStages = effects.stages;
+    state.effectsStageCount = effects.count;
+    if (effects.overflow) warnStageOverflow();
+}
 static void publish(const std::string& status, bool playing) {
     settings(state);
+    sampleGroupStages();
     state.channelID = -1;
     state.timestamp = monotonicNowNs();
     state.status = status;
     state.playing = playing;
     bridge().publish(state);
 }
-// Live positions are dated by the mixer and can be up to a block ahead of now. A stop must not
-// sort before them, or OBS would play on until they go stale. Callers decide whether to clear the path.
-static void markStopped(Snapshot& snapshot, uint64_t now) {
-    snapshot.timestamp = std::max(snapshot.timestamp, now);
-    snapshot.playing = false;
-    snapshot.epoch = ++nextEpoch;
+// A replacement song plays the OBS file, not the game's, so it follows the game's shifters only
+// when the setting says so. Everything else follows them unconditionally.
+static void applyObservedStages(Snapshot& out, const MusicVoice& voice, bool replaced) {
+    if (replaced && !pitchShiftReplacement) {
+        out.groupExcluded = true;
+        out.stageCount = 0;
+        out.stages = {};
+        return;
+    }
+    out.groupExcluded = false;
+    out.stages = voice.observedStages.stages;
+    out.stageCount = voice.observedStages.count;
 }
 static void stopVoices() {
     const auto now = monotonicNowNs();
     for (auto& [id, voice] : voices) {
-        markStopped(voice.snapshot, now);
+        voice.snapshot.markStopped(now, ++nextEpoch);
         voice.snapshot.path.clear();
         bridge().publish(voice.snapshot);
     }
@@ -228,6 +312,11 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
     voice.engineChannelID = music.m_channelID; voice.dontReset = music.m_dontReset;
     voice.channel = channel; voice.sound = sound; voice.continuing = false;
     voice.source = {std::string(music.m_filePath)};
+    auto& observed = dspScratch();
+    observed.clear();
+    observeDsps(channel, INT_MAX, observed);
+    voice.observedStages = pitchStages(observed);
+    if (voice.observedStages.overflow) warnStageOverflow();
     if (play) {
         if (auto entry = play->m_gameState.m_songChannelStates.find(id);
             entry != play->m_gameState.m_songChannelStates.end()) {
@@ -237,8 +326,10 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
     }
     out.channelID = id; out.timestamp = sampleTime;
     out.position = position;
-    out.playing = !channelPaused(channel);
-    out.rate = channelRate(channel, sound);
+    const auto rate = channelRate(channel, sound);
+    voice.rateStopped = !rate;
+    out.rate = rate.value_or(previousRate > 0 && std::isfinite(previousRate) ? std::min(previousRate, 16.) : 1.);
+    out.playing = !voice.rateStopped && !channelPaused(channel);
     double elapsed = previousTimestamp && sampleTime >= previousTimestamp ? (sampleTime - previousTimestamp) / 1e9 : 0.;
     if (newVoice || !previousTimestamp || musicPositionJump(previousPosition, out.position,
             previousPlaying ? elapsed : 0., previousRate)) out.epoch = ++nextEpoch;
@@ -275,12 +366,14 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
     settings(out);
     out.status = out.playing ? "Playing" : "Paused";
     out.level = state.level; out.attempt = state.attempt;
-    if (play) jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
+    bool replaced = false;
+    if (play) replaced = jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
     else {
         if (newVoice || out.path.empty())
             out.path = CCFileUtils::get()->fullPathForFilename(music.m_filePath.c_str(), false);
         out.song = "GD music";
     }
+    applyObservedStages(out, voice, replaced);
     if (previousPath != out.path && !newVoice) out.epoch = ++nextEpoch;
     if (id == 0 || state.song.empty()) state.song = out.song;
     bridge().publish(out);
@@ -289,7 +382,7 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
 // Publishes a stop for a voice whose channel is gone and forgets it.
 static std::map<int, MusicVoice>::iterator endVoice(std::map<int, MusicVoice>::iterator it, uint64_t now) {
     auto& out = it->second.snapshot;
-    markStopped(out, now);
+    out.markStopped(now, ++nextEpoch);
     out.path.clear();
     bridge().publish(out);
     return voices.erase(it);
@@ -303,6 +396,7 @@ static void sampleMusic(PlayLayer* play) {
     const auto now = monotonicNowNs();
     state.song.clear();
     auto engine = FMODAudioEngine::get();
+    if (!engine) return;
     std::set<int> seen;
     for (auto& [id, music] : engine->m_fmodMusic)
         if (sampleChannel(engine, id, music, play)) seen.insert(id);
@@ -323,7 +417,7 @@ static void sampleMusic(PlayLayer* play) {
             bool deathPause = play->m_player1 && play->m_player1->m_isDead &&
                 !play->m_gameState.m_audioOnDeath && !voice.dontReset &&
                 !(play->m_isPracticeMode && !play->m_practiceMusicSync);
-            out.playing = !paused && !play->m_isPaused && !deathPause;
+            out.playing = !paused && !play->m_isPaused && !deathPause && !voice.rateStopped;
             if (!paused && out.fadeCount) {
                 std::vector<MusicFade> points{{0, out.triggerGain}};
                 for (unsigned i = 0; i < out.fadeCount; ++i)
@@ -338,7 +432,8 @@ static void sampleMusic(PlayLayer* play) {
                 out.fadeCount = count;
             }
             settings(out);
-            jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
+            const bool replaced = jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
+            applyObservedStages(out, voice, replaced);
             if (id == 0 || state.song.empty()) state.song = out.song;
             bridge().publish(out); ++it;
         } else it = endVoice(it, now);
@@ -353,6 +448,15 @@ static void leaveLevel() {
     state.level.clear(); state.song.clear(); state.attempt = 0;
     publish("Ready", false);
 }
+// Share a real-time gate between level updates and the scheduler. At 0.01x, a game-time 10 ms
+// timer can wait a second, beyond OBS's 400 ms freshness window.
+static bool musicSampleDue() {
+    static uint64_t last = 0;
+    const auto now = monotonicNowNs();
+    if (now - last < 10000000) return false;
+    last = now;
+    return true;
+}
 // Outside a level OBS mirrors whatever GD plays: the menu song, shop music, editor playtests.
 // In the editor the level's OBS choice applies, as it does when the level is played.
 static void sampleMusicOutsideLevels() {
@@ -364,6 +468,7 @@ static void sampleMusicOutsideLevels() {
     if (editor) playingSongs = jukebox_link::snapshotSongs(editor->m_level);
     else playingSongs.reset();
     auto engine = FMODAudioEngine::get();
+    if (!engine) return;
     std::set<int> seen;
     for (auto& [id, music] : engine->m_fmodMusic)
         if (sampleChannel(engine, id, music, editor)) seen.insert(id);
@@ -375,8 +480,11 @@ static void sampleMusicOutsideLevels() {
 $on_mod(Loaded) {
     offset_setting::initialize();
     enabled = Mod::get()->getSettingValue<bool>("enabled");
+    pitchShiftReplacement = Mod::get()->getSettingValue<bool>("pitch-shift-replacement");
     audio_tap::enable(enabled);
     listenForSettingChanges<bool>("enabled", [](bool value) { enabled = value; audio_tap::enable(value); });
+    listenForSettingChanges<bool>("pitch-shift-replacement",
+                                  [](bool value) { pitchShiftReplacement = value; });
     SettingChangedEventV3(Mod::get(), "offset").listen([](std::shared_ptr<SettingV3> setting) {
         auto offset = std::dynamic_pointer_cast<offset_setting::OffsetSetting>(setting);
         if (!offset || loadingOffset || offsetLevel.empty()) return;
@@ -425,7 +533,6 @@ class $modify(SeparateSongMusicEvents, FMODAudioEngine) {
 class $modify(SeparateSongPlay, PlayLayer) {
     struct Fields {
         GJGameLevel* observedLevel = nullptr;
-        uint64_t lastSample = 0;
         std::optional<MusicVoice> suspendedContinuation;
         bool quit = false;
     };
@@ -437,7 +544,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         selectOffsetLevel(m_level);
         if (m_fields->suspendedContinuation) {
             auto& voice = *m_fields->suspendedContinuation;
-            markStopped(voice.snapshot, monotonicNowNs());
+            voice.snapshot.markStopped(monotonicNowNs(), ++nextEpoch);
             voices[0] = std::move(voice);
             m_fields->suspendedContinuation.reset();
         }
@@ -469,10 +576,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
             else playingSongs.reset();
             selectOffsetLevel(m_level);
         }
-        auto now = monotonicNowNs();
-        if (now - m_fields->lastSample >= 10000000) {
-            m_fields->lastSample = now; sampleMusic(this);
-        }
+        if (musicSampleDue()) sampleMusic(this);
     }
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         PlayLayer::destroyPlayer(player, object);
@@ -587,9 +691,13 @@ public:
         if (play && play == activePlayLayer) sampleMusic(play);
         else if (!outsideLevel(play)) publish("Ready", false);
     }
-    // Every 10 ms outside levels: mirror GD's menu and editor music.
-    void mirrorMenuMusic(float) {
-        if (outsideLevel(PlayLayer::get())) sampleMusicOutsideLevels();
+    // Runs each scheduler frame; the monotonic gate limits sampling to once per 10 ms of real
+    // time, independent of scaled dt. This also covers slow speedhacks with few level updates.
+    void sampleMusicEveryFrame(float) {
+        auto play = PlayLayer::get();
+        if (!musicSampleDue()) return;
+        if (outsideLevel(play)) sampleMusicOutsideLevels();
+        else sampleMusic(play);
     }
 };
 $on_mod(Loaded) {
@@ -597,7 +705,7 @@ $on_mod(Loaded) {
     auto service = new SeparateSongService();
     auto scheduler = CCDirector::get()->getScheduler();
     scheduler->scheduleSelector(schedule_selector(SeparateSongService::poll), service, .1f, false);
-    scheduler->scheduleSelector(schedule_selector(SeparateSongService::mirrorMenuMusic), service, .01f, false);
+    scheduler->scheduleSelector(schedule_selector(SeparateSongService::sampleMusicEveryFrame), service, 0.f, false);
 }
 
 class $modify(SeparateSongMenu, MenuLayer) {

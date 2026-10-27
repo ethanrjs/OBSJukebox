@@ -10,9 +10,12 @@ import time
 
 SONG = struct.Struct("<8sIIIiddd24s96s96s1024s")
 CLOCK = struct.Struct("<8sIIQQQQ")
-SONG_SIZES = {2: 1288, 3: 1296, 4: 1304, 5: 1436, 6: 1452}
+SONG_SIZES = {2: 1288, 3: 1296, 4: 1304, 5: 1436, 6: 1452, 7: 1712}
+STAGE = struct.Struct("<fHHQ")
+STAGE_OFFSET, EFFECTS_OFFSET = 1440, 1568
+FFT_SIZES = (256, 512, 1024, 2048, 4096)
 # Where each signed packet keeps its 16-byte tag (LinkKey.hpp).
-SONG_TAG, EFFECTS_TAG, CLOCK_TAG = 1436, 44, 48
+SONG_TAG, EFFECTS_TAG, CLOCK_TAG = 1696, 44, 48
 EFFECTS_HEADERS = {1: 36, 2: 44, 3: 60}
 
 
@@ -72,6 +75,7 @@ def parse_packet(packet):
         timestamp = struct.unpack_from("<Q", packet, 1296)[0] if version >= 4 else None
         session, channel, gain, fades = 0, 0, 1., []
         loop_start, loop_end = 0., 0.
+        stages, effects_stages, stage_count, effects_stage_count = [], [], 0, 0
         if version >= 5:
             session, channel, gain, count = struct.unpack_from("<QifI", packet, 1304)
             if not session or not -1 <= channel < 64 or not math.isfinite(gain) or not 0 <= gain <= 16 or count > 8:
@@ -79,7 +83,9 @@ def parse_packet(packet):
             previous = 0
             for i in range(count):
                 at, volume = struct.unpack_from("<Qf", packet, 1324 + i * 12)
-                if not previous < at <= 86_400_000_000_000 or not math.isfinite(volume) or not 0 <= volume <= 16:
+                # FMOD can report two fade points at the same DSP clock, so the times only have to
+                # be nondecreasing, as the plugin accepts them.
+                if at < previous or at > 86_400_000_000_000 or not math.isfinite(volume) or not 0 <= volume <= 16:
                     raise ValueError("invalid fade point")
                 fades.append(dict(offset_ns=at, gain=volume))
                 previous = at
@@ -87,18 +93,47 @@ def parse_packet(packet):
             if flags & 4 and (not all(map(math.isfinite, (loop_start, loop_end))) or
                               not 0 <= loop_start < loop_end <= 86400):
                 raise ValueError("invalid loop bounds")
+        if version == 7:
+            stage_count, effects_stage_count, reserved0, reserved1 = struct.unpack_from("<BBBB", packet, 1436)
+            if reserved0 or reserved1 or stage_count > 8 or effects_stage_count > 8:
+                raise ValueError("invalid pitch stage header")
+
+            def read_stages(offset, count):
+                found = []
+                for i in range(8):
+                    pitch, fft, reserved, instance = STAGE.unpack_from(packet, offset + i * 16)
+                    if i < count:
+                        if (not math.isfinite(pitch) or not .5 <= pitch <= 2 or fft not in FFT_SIZES or
+                                reserved or not instance):
+                            raise ValueError("invalid pitch stage")
+                        found.append(dict(pitch=pitch, fft=fft, instance=instance))
+                    elif packet[offset + i * 16:offset + (i + 1) * 16] != bytes(16):
+                        raise ValueError("nonzero unused pitch stage")
+                return found
+
+            stages = read_stages(STAGE_OFFSET, stage_count)
+            effects_stages = read_stages(EFFECTS_OFFSET, effects_stage_count)
+            if flags & ~15 or (channel == -1 and flags & 8) or (channel >= 0 and effects_stage_count):
+                raise ValueError("invalid pitch stage flags")
+            if flags & 8 and stage_count:
+                raise ValueError("an excluded voice cannot carry stages")
         if (not all(map(math.isfinite, (position, rate, offset, *volumes))) or
-                not -600 <= position < 86400 or not .25 <= rate <= 4 or
+                not -600 <= position < 86400 or
+                (not 0 < rate <= 16 if version == 7 else not .25 <= rate <= 4) or
                 not all(0 <= v <= 1 for v in volumes)):
             raise ValueError("invalid song position/rate/volume")
         text = lambda value: value.split(b"\0", 1)[0].decode("utf-8", errors="replace")
-        return "song", dict(version=version, flags=flags, epoch=epoch, attempt=attempt,
-                            position=position, rate=rate, offset=offset, status=text(status),
-                            level=text(level), song=text(song), song_path_present=bool(text(path)),
-                            obs_music_volume=volumes[0], obs_effects_volume=volumes[1],
-                            timestamp_ns=timestamp, session_id=session, channel_id=channel,
-                            trigger_gain=gain, fades=fades, loop_start=loop_start, loop_end=loop_end,
-                            tag=packet[SONG_TAG:].hex() if version == 6 else None)
+        fields = dict(version=version, flags=flags, epoch=epoch, attempt=attempt,
+                      position=position, rate=rate, offset=offset, status=text(status),
+                      level=text(level), song=text(song), song_path_present=bool(text(path)),
+                      obs_music_volume=volumes[0], obs_effects_volume=volumes[1],
+                      timestamp_ns=timestamp, session_id=session, channel_id=channel,
+                      trigger_gain=gain, fades=fades, loop_start=loop_start, loop_end=loop_end,
+                      tag=packet[1436 if version == 6 else SONG_TAG:].hex() if version >= 6 else None)
+        if version == 7:
+            fields.update(stage_count=stage_count, effects_stage_count=effects_stage_count,
+                          stages=stages, effects_stages=effects_stages, group_excluded=bool(flags & 8))
+        return "song", fields
     if magic in (b"GDSFX1\0\0", b"GDSFX2\0\0", b"GDSFX3\0\0"):
         declared = magic[5] - ord("0")
         size = EFFECTS_HEADERS[declared]

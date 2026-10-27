@@ -53,6 +53,19 @@ static void linkKeyChecks() {
     auto other = processLinkKey();
     other[31] ^= 1;
     assert(!signedWith(other, packet));
+    // Both stage buses and the replacement exclusion are covered by the tag, not just the v5 prefix.
+    packet.stageCount = packet.effectsStageCount = 1;
+    packet.stages[0] = {.75f, 1024, 0, 41};
+    packet.effectsStages[0] = {1.5f, 2048, 0, 42};
+    signPacket(processLinkKey(), packet);
+    assert(signedWith(processLinkKey(), packet));
+    for (auto at : {offsetof(SongLinkPacket, flags), offsetof(SongLinkPacket, stageCount),
+                    offsetof(SongLinkPacket, stages), offsetof(SongLinkPacket, effectsStages),
+                    offsetof(SongLinkPacket, tag) - 1}) {
+        changed = packet;
+        reinterpret_cast<uint8_t *>(&changed)[at] ^= 1;
+        assert(!signedWith(processLinkKey(), changed));
+    }
     // The key file holds exactly 64 lowercase hex digits.
     auto file = std::filesystem::temp_directory_path() / "obs-jukebox-key-check" / "link-key";
     assert(writeLinkKey(processLinkKey(), file) && readLinkKey(file) == processLinkKey());

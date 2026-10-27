@@ -7,7 +7,7 @@ static void receiverIsolationTest() {
     for(int i=0;i<5;++i){sim.send(second,packet,sim.now);sim.advance(10000000);}
     check(receiver->get().packet.sessionID==first.session,"fresh session rejects a competing game sender");
     packet.sessionID=first.session;
-    sim.sendRaw(packet,first.stamp(sim.now),6,50005,&first.key);
+    sim.sendRaw(packet,first.stamp(sim.now),7,50005,&first.key);
     sim.advance(20000000);
     check(receiver->get().packet.epoch!=811,"same session from another song port is rejected");
     sim.advance(2050000000);

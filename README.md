@@ -26,6 +26,14 @@ In Jukebox, check 'Game' for your in-game audio (not heard in OBS' output) and '
 Toggle between Game/OBS volume control in pause menu.
 <img width="1848" height="285" alt="image" src="https://github.com/user-attachments/assets/11024e80-051b-41e3-87dd-5e31e00a6cb8" />
 
+Update the mod and the OBS plugin together. This version of each only works with the other, and OBS's source properties say which one to update.
+
+## Speedhack and pitch shifting
+
+When another mod pitch shifts the game's audio with FMOD's pitch shifter, OBS applies the same shifters in the same order: on each music channel, on the music group and on sound effects. A replacement OBS song follows them too. To keep it at its normal pitch, turn off **Pitch shift a different OBS song** in the mod's settings.
+
+This mod utilizes [Stephan M. Bernsee's smbPitchShift algorithm](https://blogs.zynaptiq.com/bernsee/download/), the [same algorithm used by FMOD](https://www.fmod.com/docs/2.04/api/effects-reference.html#pitch-shifter), the audio middleware used in Geometry Dash, to ensure maximum parity.
+
 ## Compatibility
 
 Windows x64 and macOS 13+ (Apple Silicon) are (somewhat) supported. Linux support through Proton is experimental.

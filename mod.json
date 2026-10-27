@@ -22,6 +22,12 @@
       "name": "Enable OBS Jukebox",
       "default": true
     },
+    "pitch-shift-replacement": {
+      "type": "bool",
+      "name": "Pitch shift a different OBS song",
+      "description": "When another mod pitch shifts the game's music, OBS shifts the song it plays instead too.",
+      "default": true
+    },
     "offset": {
       "type": "custom:obs-offset",
       "name": "Song offset (seconds)",

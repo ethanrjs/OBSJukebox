@@ -2,10 +2,14 @@
 #include <iostream>
 #include <fstream>
 #include <limits>
+#include <random>
 #include "../../../src/MonotonicClock.hpp"
 #include "../../../src/Bridge.hpp"
 #include "../../../src/TapClock.hpp"
 #include "../../../src/Utf8.hpp"
+#ifdef _WIN32
+#include <timeapi.h>
+#endif
 
 static SongLinkPacket published;
 static int captureSend(SongSocket,const char* data,int size,int,const sockaddr*,
@@ -51,7 +55,7 @@ static void resetOutput(){std::lock_guard lock(capturedMutex);captured.clear();}
 // What it leaves out: music renders at output time, about 20 ms later than the real decoder thread
 // does, and clock probes have no round trip. Clock::now() is still real time, so the retry and
 // recovery timers and the "connected" test don't follow the simulated clock. The offline receiver
-// reports the game link as unavailable. run() and the decode queue only run in the real-thread tests.
+// reports the game link as unavailable. run() and its two workers only run in the real-thread tests.
 struct Simulation {
     // A game whose clock is `offset` ns from OBS's. Songs and effects come from separate ports. It
     // signs with the key in the test's key file unless a test gives it another.
@@ -94,10 +98,10 @@ struct Simulation {
     void sendRaw(SongLinkPacket p,uint64_t capture,int version,uint16_t port,const LinkKey* key=nullptr) {
         p.version=version;p.timestamp=capture;
         if(key)signPacket(*key,p);
-        deliver(&p,version==3?SONG_LINK_V3_SIZE:version==5?SONG_LINK_V5_SIZE:sizeof(p),port);
+        deliver(&p,version==3?SONG_LINK_V3_SIZE:version==4?SONG_LINK_V4_SIZE:version==5?SONG_LINK_V5_SIZE:version==6?SONG_LINK_V6_SIZE:sizeof(p),port);
     }
     void send(const Game& game,SongLinkPacket p,uint64_t capture) {
-        p.sessionID=game.session;sendRaw(p,game.stamp(capture),6,game.port,&game.key);
+        p.sessionID=game.session;sendRaw(p,game.stamp(capture),7,game.port,&game.key);
     }
     void send(SongLinkPacket p,uint64_t capture) {send(local,p,capture);}
     void sendEffects(const Game& game,EffectsPacketV3 e,uint16_t port) {
@@ -142,8 +146,9 @@ private:
         receiver->handle(static_cast<const unsigned char*>(data),size,from,now);
     }
     void renderNext() {
-        AudioBlock music{};source->renderMusic(next,music,now);
-        {std::lock_guard lock(source->musicMutex);source->musicQueue.push_back({next,music});}
+        AudioBlock music{},effects{};source->renderMusic(next,music,now);if(source->active)source->renderEffects(next,effects);
+        const auto generation=source->outputGeneration.load();
+        source->musicBlocks.push(next,music,generation,next);source->effectsBlocks.push(next,effects,generation,next);
         auto audio=source->mixBlock(next);
         output.push_back({next,now,{audio.begin(),audio.end()}});
         next+=SongSource::blockNs;
@@ -302,7 +307,7 @@ static void staleChannelTest() {
 static void staleStatusEffectsTest() {
     Simulation sim;
     auto base=sim.now;
-    SongLinkPacket p;p.flags=1;sim.send(p,base-600000000);
+    SongLinkPacket p;p.flags=1;p.channelID=-1;sim.send(p,base-600000000);
     for(int i=0;i<12;++i){
         EffectsPacketV3 e;e.frames=480;e.sampleRate=48000;e.timestamp=base+i*10000000ULL;
         std::fill_n(e.samples,960,.25f);
@@ -323,7 +328,7 @@ static void staleStatusEffectsTest() {
 static void finiteOutputTest() {
     Simulation sim;
     auto base=sim.now;
-    SongLinkPacket p;p.flags=1;sim.send(p,base);
+    SongLinkPacket p;p.flags=1;p.channelID=-1;sim.send(p,base);
     for(int i=0;i<12;++i){
         EffectsPacketV3 e;e.frames=480;e.sampleRate=48000;e.sequence=i;e.timestamp=base+i*10000000ULL;
         for(unsigned s=0;s<960;++s)e.samples[s]=(s/2)%2?std::numeric_limits<float>::max():-std::numeric_limits<float>::max();
@@ -402,7 +407,7 @@ static void protocolTest() {
     auto at=sim.now;sim.send(p,at);sim.advance(15000000);
     p.epoch=99;sim.send(p,at-1000000);sim.send(p,at+2000000000);
     sim.send(p,0);
-    auto unsupported=p;unsupported.sessionID=sim.local.session;sim.sendRaw(unsupported,sim.now,7,sim.local.port,&sim.local.key);
+    auto unsupported=p;unsupported.sessionID=sim.local.session;sim.sendRaw(unsupported,sim.now,8,sim.local.port,&sim.local.key);
     sim.advance(15000000);
     check(receiver->get().packet.timestamp==at && receiver->get().packet.epoch==0,"reordered, stale, future and unsupported packets cannot replace the latest state");
     auto before=receiver->playbackWindow(at-1,at+1);
@@ -437,7 +442,7 @@ static void networkPathTest() {
 // Mods before this one send unsigned packets: v1.0 sent v3 song packets and GDSFX1 effects, and v1.1
 // to v1.2.3 sent v5 song packets and GDSFX2 effects. OBS plays none of them and asks for a newer mod,
 // whichever arrives.
-enum class OldMod { V3Songs, V1Effects, V5Songs, V2Effects };
+enum class OldMod { V3Songs, V1Effects, V5Songs, V2Effects, V6Songs };
 static void oldModTest(OldMod sends) {
     Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;p.sessionID=sim.local.session;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
@@ -445,6 +450,7 @@ static void oldModTest(OldMod sends) {
     for(int i=0;i<10;++i){
         if(sends==OldMod::V3Songs)sim.sendRaw(p,sim.now,3,50001);
         if(sends==OldMod::V5Songs)sim.sendRaw(p,sim.now,5,50001);
+        if(sends==OldMod::V6Songs)sim.sendRaw(p,sim.now,6,50001);
         EffectsPacket e;e.frames=480;e.sampleRate=48000;e.timestamp=sim.now;std::fill_n(e.samples,960,.25f);
         if(sends==OldMod::V1Effects)sim.sendEffects(e,50001);
         if(sends==OldMod::V2Effects){
@@ -459,7 +465,7 @@ static void oldModTest(OldMod sends) {
     }
     bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
     std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
-    const char* names[]={"v3 song packets","GDSFX1 effects","v5 song packets","GDSFX2 effects"};
+    const char* names[]={"v3 song packets","GDSFX1 effects","v5 song packets","GDSFX2 effects","v6 song packets"};
     check(!receiver->get().connected && silent && detail.find("Update the OBS Jukebox mod")!=std::string::npos,
         (std::string(names[int(sends)])+" play nothing and ask for a newer mod").c_str());
 }
@@ -521,7 +527,7 @@ static void newModTest() {
     Simulation sim;
     SongLinkPacket p;p.flags=3;p.position=1;p.sessionID=sim.local.session;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
     sim.start();
-    for(int i=0;i<10;++i){sim.sendRaw(p,sim.now,7,50001);sim.advance(10000000);}
+    for(int i=0;i<10;++i){sim.sendRaw(p,sim.now,8,50001);sim.advance(10000000);}
     bool silent=true;for(const auto& b:sim.output)for(float s:b.samples)silent&=s==0;
     std::string detail;{std::lock_guard lock(sim.source->mutex);detail=sim.source->detail;}
     check(!receiver->get().connected && silent && detail.find("Update the OBS Jukebox plugin")!=std::string::npos,
@@ -728,25 +734,83 @@ static void multipleVoiceFadeTest() {
     check(survived && remainingFrames>1000,"stopping channel 7 leaves channel 0 playing");
 }
 
-static void malformedV5Test() {
+// Fresh packets are SongLinkPacket(), not SongLinkPacket{}: GCC 13 crashes (in gimple_add_tmp_var)
+// on the second `p=SongLinkPacket{}` in one function.
+static void malformedV7Test() {
     Simulation sim;
     auto game=sim.game(3600000000000LL);
     check(sim.synchronize(game),"validation test synchronizes its sender");
     SongLinkPacket p;p.flags=1;p.epoch=718;sim.send(game,p,sim.now);
     sim.advance(10000000);
-    p.epoch=999;p.fadeCount=9;sim.send(game,p,sim.now);
-    p.fadeCount=0;p.triggerGain=std::numeric_limits<float>::quiet_NaN();sim.send(game,p,sim.now);
-    p.triggerGain=1;p.channelID=SONG_LINK_MAX_CHANNELS;sim.send(game,p,sim.now);
-    p.channelID=0;p.flags=7;p.loopStart=2;p.loopEnd=1;sim.send(game,p,sim.now);
-    p.loopStart=std::numeric_limits<double>::quiet_NaN();p.loopEnd=2;sim.send(game,p,sim.now);
-    p.loopStart=1;p.loopEnd=1;sim.send(game,p,sim.now);
-    sim.advance(15000000);
-    check(receiver->get().packet.epoch==718,"v5 rejects oversized fades, nonfinite gain, invalid channels and invalid loop bounds");
-    // FMOD can hold two fade points at the same DSP clock
-    p=SongLinkPacket{};p.flags=1;p.epoch=720;p.fadeCount=2;p.fades[0]={1000000,.5f};p.fades[1]={1000000,0};
-    sim.send(game,p,sim.now);
-    sim.advance(15000000);
-    check(receiver->get().packet.epoch==720,"v5 accepts fade points that share a time");
+    unsigned epoch=800;
+    auto rejected=[&](SongLinkPacket bad,const char* what){
+        bad.epoch=++epoch;
+        sim.send(game,bad,sim.now);sim.advance(15000000);
+        check(receiver->get().packet.epoch!=bad.epoch,what);
+    };
+    p.epoch=999;p.fadeCount=9;rejected(p,"v7 rejects oversized fades");
+    p.fadeCount=0;p.triggerGain=std::numeric_limits<float>::quiet_NaN();rejected(p,"v7 rejects a nonfinite gain");
+    p.triggerGain=1;p.channelID=SONG_LINK_MAX_CHANNELS;rejected(p,"v7 rejects an invalid channel");
+    p.channelID=0;p.flags=7;p.loopStart=2;p.loopEnd=1;rejected(p,"v7 rejects inverted loop bounds");
+    p.loopStart=std::numeric_limits<double>::quiet_NaN();p.loopEnd=2;rejected(p,"v7 rejects a nonfinite loop start");
+    p.loopStart=1;p.loopEnd=1;rejected(p,"v7 rejects an empty loop");
+    p=SongLinkPacket();p.flags=1;p.epoch=720;p.fadeCount=3;
+    p.fades[0]={0,.5f};p.fades[1]={1000000,.5f};p.fades[2]={1000000,0};
+    sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==720,"v7 accepts a fade at zero and points that share a time");
+    // A stage in the list must be one FMOD would process, and every unused entry must be zero.
+    p=SongLinkPacket();p.flags=1;p.epoch=721;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
+    sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==721,"v7 accepts a valid channel stage");
+    p.stageCount=9;rejected(p,"v7 rejects more than eight stages");
+    p.stageCount=1;p.stageReserved[0]=1;rejected(p,"v7 rejects nonzero stage reserve");
+    p.stageReserved[0]=0;p.stageReserved[1]=1;rejected(p,"v7 rejects nonzero stage reserve padding");
+    // The count limit alone must reject: eight valid global stages, then a count of nine.
+    p.stageReserved[1]=0;p=SongLinkPacket();p.flags=1;p.epoch=723;p.channelID=-1;p.effectsStageCount=8;
+    for(unsigned i=0;i<8;++i)p.effectsStages[i]={.5f,4096,0,50+i};
+    sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==723,"v7 accepts eight effects stages in the global packet");
+    p.effectsStageCount=9;rejected(p,"v7 rejects more than eight effects stages");
+    p=SongLinkPacket();p.flags=1;p.epoch=722;p.stageCount=1;p.stages[0]={.75f,1024,0,41};
+    p.flags=16;rejected(p,"v7 rejects unknown flag bits");
+    p.flags=8;rejected(p,"v7 rejects an excluded voice that still lists stages");
+    p.stageCount=0;p.stages[0]={};sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==722,"v7 accepts an excluded replacement voice");
+    p.flags=1;
+    {
+        auto bad=p;bad.stageCount=1;bad.stages[0]={std::numeric_limits<float>::quiet_NaN(),1024,0,41};
+        rejected(bad,"v7 rejects a nonfinite stage pitch");
+        bad.stages[0].pitch=.4f;rejected(bad,"v7 rejects a pitch below 0.5");
+        bad.stages[0].pitch=2.1f;rejected(bad,"v7 rejects a pitch above 2");
+        bad.stages[0].pitch=.75f;bad.stages[0].fft=0;rejected(bad,"v7 rejects FFT 0");
+        bad.stages[0].fft=768;rejected(bad,"v7 rejects a non-power-of-two FFT");
+        bad.stages[0].fft=8192;rejected(bad,"v7 rejects FFT 8192");
+        bad.stages[0].fft=1024;bad.stages[0].instance=0;rejected(bad,"v7 rejects a zero instance");
+        bad.stages[0].instance=41;bad.stages[0].reserved=1;rejected(bad,"v7 rejects a nonzero stage reserve");
+        bad.stages[0].reserved=0;bad.stages[1].pitch=.5f;rejected(bad,"v7 rejects a nonzero unused stage");
+        bad=p;bad.effectsStageCount=1;bad.effectsStages[0]={.5f,4096,0,43};
+        rejected(bad,"v7 rejects effects stages on a voice packet");
+    }
+    // The global packet carries music and effects stages; flag 8 is a voice-only rule.
+    p=SongLinkPacket();p.flags=1;p.epoch=730;p.channelID=-1;p.effectsStageCount=1;
+    p.effectsStages[0]={.5f,4096,0,43};sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==730,"v7 accepts effects stages in the global packet");
+    p.flags=8;rejected(p,"v7 rejects flag 8 on the global packet");
+    p.flags=1;p.epoch=731;p.stageCount=1;p.stages[0]={1.f,256,0,44};sim.send(game,p,sim.now);sim.advance(15000000);
+    check(receiver->get().packet.epoch==731,"v7 accepts music stages beside effects stages");
+    // Size is exact: a short or long v7 packet is refused whole. These are otherwise valid, so the
+    // size is the only thing that can reject them.
+    auto shortPacket=p;shortPacket.epoch=740;shortPacket.sessionID=game.session;
+    shortPacket.timestamp=game.stamp(sim.now);
+    signPacket(game.key,shortPacket);
+    sim.deliver(&shortPacket,sizeof(shortPacket)-1,game.port);sim.advance(15000000);
+    check(receiver->get().packet.epoch!=740,"v7 rejects a truncated extension");
+    auto longPacket=p;longPacket.epoch=741;longPacket.sessionID=game.session;
+    longPacket.timestamp=game.stamp(sim.now);
+    signPacket(game.key,longPacket);
+    std::array<unsigned char,sizeof(longPacket)+1> longer{};std::memcpy(longer.data(),&longPacket,sizeof(longPacket));
+    sim.deliver(longer.data(),longer.size(),game.port);sim.advance(15000000);
+    check(receiver->get().packet.epoch!=741,"v7 rejects a trailing byte");
 }
 
 // Points that share a time are a step. A zero-width segment never reaches the division in songGainAt.
@@ -797,6 +861,26 @@ static void shortLoopTest() {
         ++count;
     }
     check(correct && count>3000,"delayed 10 ms source loop wraps before user offset at 2x while another voice continues");
+}
+
+// A loop can be farther away than size_t can count at an otherwise valid positive rate. Rendering
+// must finish a block before converting that distance, then continue to accept ordinary playback.
+static void tinyLoopRateTest() {
+    for(double rate:{1e-20,std::numeric_limits<double>::denorm_min()}){
+        Simulation sim;sim.start();
+        SongLinkPacket p;p.flags=7;p.position=.5;p.loopStart=0;p.loopEnd=1;p.rate=rate;
+        std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+        sim.send(p,sim.now);sim.advance(150000000);
+        bool audible=false;
+        for(const auto& block:sim.output)for(float sample:block.samples)audible|=sample>.1f;
+        check(audible,"an extremely slow loop completes its blocks audibly");
+        p.flags=3;p.rate=1;p.position=1;++p.epoch;
+        const auto resume=sim.now;sim.send(p,resume);sim.advance(150000000);
+        bool resumed=false;
+        for(const auto& block:sim.output)if(block.timestamp>resume+20000000)
+            for(float sample:block.samples)resumed|=sample>.19f;
+        check(resumed,"ordinary playback resumes after an extremely slow loop");
+    }
 }
 
 static void foreignEffectsTest() {
@@ -878,7 +962,7 @@ static void tapClockDriftTest() {
 static void effectsSeamTest(unsigned sampleRate) {
     Simulation sim;
     auto base=sim.now,first=base+7777;
-    SongLinkPacket p;p.flags=1;sim.send(p,base-50000000);
+    SongLinkPacket p;p.flags=1;p.channelID=-1;sim.send(p,base-50000000);
     auto tone=[&](double frame){return .25*std::sin(frame*2*3.14159265358979*3000/sampleRate);};
     unsigned frames=sampleRate/100;
     for(unsigned k=0;k<12;++k){
@@ -946,6 +1030,66 @@ static void driftCorrectionTest() {
     if(early<.015 || late>early-.0015)std::cerr<<"Drift correction: behind "<<early*1000<<" ms, then "<<late*1000<<" ms\n";
     check(early>.015 && late<early-.0015,"a 20 ms position error is steered out without a seek");
 }
+// A speedhack can move GD's music far outside [0.25, 4]. OBS must follow at the same rate, not drop
+// the packets, and it must not seek to correct a rate it should already be playing. ramp.wav plays
+// .1+seconds*.1, so a sample gives back the song position OBS played.
+static void speedhackTest(double rate,double start,unsigned reports,uint64_t measureFrom,uint64_t measureNs,double tolerance,const char* what) {
+    Simulation sim;
+    auto base=sim.now;
+    SongLinkPacket p;p.flags=3;p.epoch=40;p.position=start;p.rate=rate;std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+    sim.send(p,base);
+    sim.start();
+    for(unsigned i=1;i<=reports;++i){                    // GD reports every 50 ms
+        auto at=base+i*50000000ULL;
+        if(sim.now+60000000<at)sim.advance(at-60000000-sim.now);
+        p.position=start+double(i)*.05*rate;sim.send(p,at);
+    }
+    sim.advance(120000000);
+    // One seek starts each voice on its first block; any more means OBS could not follow the rate.
+    unsigned seeks=0,voices=0;
+    for(const auto& voice:sim.source->voices)if(voice){++voices;seeks+=voice->decoder.testSeekCount.load();}
+    double worst=0;int heard=0;
+    for(uint64_t t=base+measureFrom;t<base+measureFrom+measureNs;t+=50000000)
+        for(const auto& b:sim.output)if(t>=b.timestamp && t<b.timestamp+10000000){
+            size_t frame=size_t((t-b.timestamp)*48000/1000000000);
+            if(b.samples[frame*2]==0)break;
+            ++heard;
+            double played=(b.samples[frame*2]-.1)/.1,reported=start+double(t-base)/1e9*rate;
+            worst=std::max(worst,std::abs(reported-played));
+            break;
+        }
+    const int expected=int(measureNs/50000000);
+    if(heard<expected-1 || worst>tolerance || seeks>voices)
+        std::cerr<<what<<": heard "<<heard<<" of "<<expected<<", worst error "<<worst*1000
+                 <<" ms, "<<seeks<<" decoder seeks for "<<voices<<" voices\n";
+    check(heard>=expected-1 && worst<=tolerance && seeks<=voices,what);
+}
+// Rates below the old 0.25x floor are the issue's beat repeat; the ceiling is the decoder cache.
+static void slowSpeedhackTest(){speedhackTest(.1,1,30,200000000,1200000000,.01,"music at a 0.1x speedhack plays at 0.1x without jumps");}
+static void verySlowSpeedhackTest(){speedhackTest(.01,1,30,200000000,1200000000,.002,"music at a 0.01x speedhack plays at 0.01x without jumps");}
+// From 0.05 s, 16x reaches the end of the four-second ramp after about 250 ms of wall time.
+static void fastSpeedhackTest(){speedhackTest(16,.05,6,20000000,200000000,.1,"music at a 16x speedhack plays at 16x without jumps");}
+// At 0.0001x the ramp moves less than one PCM step, so this proves OBS accepts the packet, plays it
+// and does not seek; the speed mapping itself is covered by the faster rates.
+static void crawlSpeedhackTest(){speedhackTest(.0001,1,30,200000000,1200000000,.001,"music at a 0.0001x speedhack plays without jumps");}
+// The parser keeps a valid rate for every speedhack FMOD can play at a usable pace, and refuses a
+// stop, a negative or nonfinite rate, and the decoder-cache ceiling with one more step.
+static void rateBoundsTest() {
+    Simulation sim;
+    SongLinkPacket p;p.flags=1;p.epoch=0;
+    for(double rate:{0.,-1.,std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::infinity(),16.5}){
+        p.rate=rate;++p.epoch;
+        sim.send(p,sim.now);sim.advance(15000000);
+        std::string what="the music rate "+std::to_string(rate)+" is refused";
+        check(receiver->get().packet.epoch!=p.epoch,what.c_str());
+    }
+    for(double rate:{.0001,.01,16.}){
+        p.rate=rate;++p.epoch;
+        sim.send(p,sim.now);sim.advance(15000000);
+        std::string what="the music rate "+std::to_string(rate)+" is accepted";
+        check(receiver->get().packet.epoch==p.epoch && receiver->get().packet.rate==rate,what.c_str());
+    }
+}
 static void localFilesOnlyTest() {
     Decoder decoder;bool refused=true;
     for(const char* path:{"https://example.com/song.mp3","\\\\server\\share\\song.mp3","//server/share/song.mp3",
@@ -962,14 +1106,80 @@ static void utf8Test() {
         refused&=!validUtf8(bad);
     check(refused,"malformed, overlong, surrogate, out-of-range and truncated UTF-8 is refused");
 }
+// A worker's queue: four blocks at most, in order, and never one the output has already passed, so
+// the worker knows to start its stages over instead of carrying audio OBS played as silence.
+static void blockQueueTest() {
+    SongSource::BlockQueue queue;
+    AudioBlock block{},out{};
+    constexpr uint64_t ns=SongSource::blockNs;
+    block[0]=1;
+    check(!queue.push(1000,block,0,1000+ns),"a block the output has already passed is refused");
+    check(!queue.take(1000,0,out),"a refused block never plays");
+    bool all=true;
+    for(uint64_t i=0;i<4;++i){block[0]=float(i);all&=queue.push(2000+i*ns,block,0,2000);}
+    check(all && !queue.push(2000+4*ns,block,0,2000),"four blocks wait at most");
+    check(queue.take(2000+ns,0,out) && out[0]==1,"taking a block drops the older ones before it");
+    // Two slots wait; two more wrap around the ring and fill it.
+    block[0]=4;all=queue.push(2000+4*ns,block,0,2000+2*ns);
+    block[0]=5;all&=queue.push(2000+5*ns,block,0,2000+2*ns);
+    check(all && !queue.push(2000+6*ns,block,0,2000+2*ns),"a ring that wrapped still holds four blocks");
+    bool ordered=true;
+    for(uint64_t i=2;i<6;++i)ordered&=queue.take(2000+i*ns,0,out) && out[0]==float(i);
+    check(ordered,"a wrapped ring plays its blocks in order");
+    // The output asks for a block before it moves `wanted` on; a block it missed must not queue.
+    check(!queue.take(2000+6*ns,0,out),"the output misses a block nobody rendered");
+    check(!queue.push(2000+6*ns,block,0,2000+6*ns),"a block the output just missed is refused before it moves on");
+    // A worker clears the queue when it catches up; the missed block must stay refused after that.
+    check(!queue.take(2000+7*ns,0,out),"the output misses the next block too");
+    queue.clear();
+    check(!queue.push(2000+7*ns,block,0,2000+7*ns),"a block the output missed stays refused after a clear");
+    block[0]=8;
+    check(queue.push(2000+8*ns,block,0,2000+8*ns),"the next block queues after a miss");
+    check(!queue.take(2000+8*ns,1,out),"a block from an older generation never plays");
+}
 static void senderTest() {
     separate_song::Snapshot s;s.timestamp=monotonicNowNs();s.position=1.25;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     separate_song::Bridge b;check(b.start(),"sender opens its socket");b.publish(s);
-    check(published.version==6 && published.timestamp==s.timestamp && published.position==s.position,
+    check(published.version==7 && published.timestamp==s.timestamp && published.position==s.position,
         "sender preserves sampling time through publication delay");
     check(signedWith(processLinkKey(),published),"sender signs song packets with its link key");
     check(readLinkKey(linkKeyFile())==processLinkKey(),"sender writes its link key for OBS when it starts");
+    // A voice packet carries its stages; effects stages belong to the global packet, so the sender
+    // must drop them here.
+    s.channelID=0;s.groupExcluded=false;s.stageCount=2;
+    s.stages[0]={.75f,1024,0,41};s.stages[1]={1.5f,2048,0,42};
+    s.effectsStageCount=2;s.effectsStages[0]={1.5f,2048,0,43};s.effectsStages[1]={.5f,4096,0,44};
+    b.publish(s);
+    check(!(published.flags&8) && published.stageCount==2 && published.stages[1].instance==42 &&
+              published.effectsStageCount==0 && signedWith(processLinkKey(),published),
+        "sender carries a voice's stages and drops effects stages");
+    check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
+        "the sender's voice packet is one the plugin accepts");
+    // An excluded replacement has no stages of its own, even if the snapshot still holds some.
+    s.groupExcluded=true;s.stageCount=2;
+    b.publish(s);
+    check((published.flags&8) && published.stageCount==0 && signedWith(processLinkKey(),published),
+        "sender marks an excluded replacement voice and drops its stages");
+    check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
+        "the sender's excluded packet is one the plugin accepts");
+    // The global packet carries music and effects stages and never the voice-only flag.
+    s.channelID=-1;s.groupExcluded=true;s.stageCount=2;s.stages[0]={.75f,1024,0,41};
+    s.stages[1]={1.5f,2048,0,42};s.effectsStageCount=2;
+    b.publish(s);
+    check(!(published.flags&8) && published.stageCount==2 && published.effectsStageCount==2 &&
+              published.effectsStages[1].instance==44 && signedWith(processLinkKey(),published),
+        "sender carries a global packet's music and effects stages");
+    check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
+        "the sender's global packet is one the plugin accepts");
+    // The wire holds eight stages; a longer list keeps the first eight.
+    s.channelID=0;s.groupExcluded=false;s.stageCount=9;
+    for(unsigned i=0;i<8;++i)s.stages[i]={1.f,1024,0,100+i};
+    b.publish(s);
+    check(published.stageCount==8 && published.stages[7].instance==107,
+        "sender never publishes more stages than the wire holds");
+    check(parseSongPacket(reinterpret_cast<const unsigned char*>(&published),sizeof(published)).has_value(),
+        "the sender's capped packet is one the plugin accepts");
 }
 // A flood of datagrams at the game's clock socket would keep its thread spinning. The plugin sends 4
 // probes a second, far under the budget.
@@ -993,9 +1203,9 @@ static void senderInvalidPathTest() {
         "the sender stops playback instead of sending a path that is not UTF-8");
 }
 #include "receiver-tests.inc"
+#include "pitch-tests.inc"
 #include "deadline-tests.inc"
 #include "recovery-tests.inc"
-
 int main(int argc,char** argv){
     // --skip-timing leaves out the tests that need the machine to meet real-time audio deadlines.
     const bool timing=!(argc>1 && std::string(argv[1])=="--skip-timing");
@@ -1006,6 +1216,9 @@ int main(int argc,char** argv){
 #endif
 #ifdef _WIN32
     _putenv_s("OBS_JUKEBOX_TEST_PORT","49177");
+    // libobs's DllMain asks for 1 ms timers (util/platform-windows.c), so in OBS the audio threads
+    // wake on time. Without it Windows wakes them on 15.6 ms ticks, which OBS never does.
+    timeBeginPeriod(1);
     _putenv_s("OBS_JUKEBOX_TEST_KEY_FILE","artifacts/audio-tests/link-key");
 #else
     setenv("OBS_JUKEBOX_TEST_PORT","49177",1);
@@ -1014,20 +1227,26 @@ int main(int argc,char** argv){
     writeLinkKey(processLinkKey());
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
-    if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
+    if(auto edge=std::getenv("OBS_JUKEBOX_EDGE_ONLY")){
+        if(std::string(edge)=="loop")tinyLoopRateTest();else pitchNonfiniteRecoveryTest();
+        return failures?1:0;
+    }
+    if(std::getenv("OBS_JUKEBOX_DEADLINE_ONLY")){effectsDelayTest(true);effectsDelayTest(false);effectsLatenessTest();musicDeadlineTest(true);pitchStressTest();return failures?1:0;}
+    if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();sourceToggleRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
     pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();
-    oldModTest(OldMod::V3Songs);oldModTest(OldMod::V1Effects);oldModTest(OldMod::V5Songs);oldModTest(OldMod::V2Effects);newModTest();
+    oldModTest(OldMod::V3Songs);oldModTest(OldMod::V1Effects);oldModTest(OldMod::V5Songs);oldModTest(OldMod::V2Effects);oldModTest(OldMod::V6Songs);newModTest();
     forgedSenderTest();forgedClockTest();forgedEffectsTest();newKeyTest();senderProbeTest();senderFloodBudgetTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
-    multipleVoiceFadeTest();malformedV5Test();sharedFadeTimeTest();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
-    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();senderTest();senderInvalidPathTest();utf8Test();
-    receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
+    multipleVoiceFadeTest();malformedV7Test();sharedFadeTimeTest();shortLoopTest();tinyLoopRateTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
+    tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();
+    slowSpeedhackTest();verySlowSpeedhackTest();crawlSpeedhackTest();fastSpeedhackTest();rateBoundsTest();senderTest();senderInvalidPathTest();utf8Test();
+    blockQueueTest();pitchTests();slowPitchHeartbeatTest();receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
     sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();
     if(timing){
-        sourceResyncRecoveryTest();decoderWatchdogBackoffTest();
-        musicDeadlineTest(false);musicDeadlineTest(true);
+        sourceResyncRecoveryTest();sourceToggleRecoveryTest();decoderWatchdogBackoffTest();
+        musicDeadlineTest(false);musicDeadlineTest(true);effectsDelayTest(true);effectsDelayTest(false);effectsLatenessTest();pitchStressTest();
     }else std::cout<<"Skipped the timing tests\n";
     return failures?1:0;
 }

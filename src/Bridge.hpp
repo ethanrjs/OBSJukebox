@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <thread>
+#include <algorithm>
 #include "LinkPacket.hpp"
 #include "Socket.hpp"
 namespace separate_song {
@@ -20,6 +21,16 @@ struct Snapshot {
     std::array<SongFadePoint, 8> fades{};
     bool looping = false;
     double loopStart = 0, loopEnd = 0;
+    std::array<PitchStage, 8> stages{}, effectsStages{};
+    uint8_t stageCount = 0, effectsStageCount = 0;
+    bool groupExcluded = false;
+    // A stop must not predate the last mixer-dated sample. Keep its stages and exclusion so OBS
+    // fades the voice through the same processing, even after the game's channel disappears.
+    void markStopped(uint64_t now, unsigned newEpoch) {
+        timestamp = std::max(timestamp, now);
+        playing = false;
+        epoch = newEpoch;
+    }
 };
 class Bridge {
     SongSocket socket = BAD_SOCKET;

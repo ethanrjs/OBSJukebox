@@ -54,6 +54,7 @@ class Decoder {
     inline static std::atomic<bool> testFailOnNextSeek{false};
     inline static std::atomic<bool> testStarveAllReads{false};
     inline static std::atomic<unsigned> testOpenCount{0};
+    std::atomic<unsigned> testSeekCount{0}; // QA: how often this source sought, to catch a wandering rate
 #endif
     double position = 0;
     std::string error;
@@ -159,6 +160,7 @@ class Decoder {
             phase = 0;
             seekValid = false;
         }
+        ++testSeekCount;
 #endif
         // position describes phase within the retained PCM window, not the backend's read-ahead cursor.
         double cachedStart = position - phase / 48000.;
