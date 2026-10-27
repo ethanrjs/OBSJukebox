@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,12 +45,25 @@ uint64_t cpuTicks(){
     rusage usage{};getrusage(RUSAGE_SELF,&usage);return uint64_t(usage.ru_utime.tv_sec+usage.ru_stime.tv_sec)*10000000+uint64_t(usage.ru_utime.tv_usec+usage.ru_stime.tv_usec)*10;
 #endif
 }
+// The group reference needs many frequencies, since a pure tone's shifted level depends on its
+// starting phase. Filter the noise so fractional decoder interpolation barely changes its level;
+// the quiet 440 Hz pilot still measures the output frequency.
+struct PilotNoise {
+    std::minstd_rand random{19};
+    double filtered=0;
+    int16_t sample(uint64_t frame){
+        filtered+=.05*(double(random())/random.max()*2-1-filtered);
+        const double value=filtered*39318+900*std::sin(2*3.141592653589793*440*double(frame)/48000);
+        return int16_t(std::clamp(value,-32767.,32767.));
+    }
+};
 // A 440, 660, 880 then 1100 Hz tone, or with `constant` 440 Hz throughout.
-void wave(const std::filesystem::path& path,double frequencyScale=1,uint32_t samples=48000*6,bool constant=false) {
+void wave(const std::filesystem::path& path,double frequencyScale=1,uint32_t samples=48000*6,bool constant=false,bool pilotNoise=false) {
     std::ofstream out(path,std::ios::binary);uint32_t size=samples*4;
     auto put=[&](auto n){out.write(reinterpret_cast<const char*>(&n),sizeof(n));};
     out.write("RIFF",4);put(size+36);out.write("WAVEfmt ",8);put(uint32_t(16));put(uint16_t(1));put(uint16_t(2));put(uint32_t(48000));put(uint32_t(192000));put(uint16_t(4));put(uint16_t(16));out.write("data",4);put(size);
-    for(uint32_t i=0;i<samples;++i){double hz=(constant||i<48000?440:i<96000?660:i<192000?880:1100)*frequencyScale;int16_t v=int16_t(std::sin(2*3.141592653589793*hz*i/48000)*9000);put(v);put(v);}
+    PilotNoise noise;
+    for(uint32_t i=0;i<samples;++i){double hz=(constant||i<48000?440:i<96000?660:i<192000?880:1100)*frequencyScale;int16_t v=pilotNoise?noise.sample(i):int16_t(std::sin(2*3.141592653589793*hz*i/48000)*9000);put(v);put(v);}
     out.close();
     std::error_code error;auto written=std::filesystem::file_size(path,error);
     if(!out || error || written!=size+44){fprintf(stderr,"WAV fixture write failed: %s\n",path.string().c_str());std::exit(2);}
@@ -58,14 +72,28 @@ void wave(const std::filesystem::path& path,double frequencyScale=1,uint32_t sam
 float toneSample(uint64_t frame){return float(int16_t(std::sin(2*3.141592653589793*440*double(frame)/48000)*9000))/32768;}
 // The level the constant tone settles at through one fresh stage, from the plugin's own shifter fed
 // 10 ms blocks as OBS feeds it. The stage cases compare OBS's output with this.
-double stageRms(float pitch,uint16_t fft){
+double stageRms(float pitch,uint16_t fft,bool pilotNoise=false,double fraction=0){
     PitchShifter stage;std::vector<float> block(960);double squares=0;size_t counted=0;
+    PilotNoise noise;
+    auto sample=[&](uint64_t frame){return pilotNoise?float(noise.sample(frame))/32768:toneSample(frame);};
+    float current=sample(0);
     for(uint64_t frame=0;frame<48000*2;frame+=480){
-        for(unsigned i=0;i<480;++i)block[i*2]=block[i*2+1]=toneSample(frame+i);
+        for(unsigned i=0;i<480;++i){float next=sample(frame+i+1);block[i*2]=block[i*2+1]=float(current*(1-fraction)+next*fraction);current=next;}
         stage.process(block.data(),480,pitch,fft);
         if(frame>=48000)for(unsigned i=0;i<480;++i){squares+=double(block[i*2])*block[i*2];++counted;}
     }
     return std::sqrt(squares/double(counted));
+}
+bool validGroupFixture(){
+    const double reference=stageRms(1.25f,2048,true);
+    for(double fraction:{.25,.5,.75}){
+        const double actual=stageRms(1.25f,2048,true,fraction);
+        if(std::abs(actual-reference)>reference*.05){
+            fprintf(stderr,"Group fixture interpolation %.2f changed RMS %.6f to %.6f beyond 5%%\n",fraction,reference,actual);
+            return false;
+        }
+    }
+    return true;
 }
 // The strongest frequency from half to twice `expected`, by a DFT over the whole capture. It
 // measures a 4.4 Hz tone as well as 7 kHz, where counting zero crossings needs many cycles.
@@ -80,12 +108,14 @@ double dominantHz(const std::vector<float>& samples,double expected){
     return best;
 }
 int main(int argc,char** argv){
+    if(argc==2 && !std::strcmp(argv[1],"--check-group-fixture"))return validGroupFixture()?0:1;
     if(argc<3){fprintf(stderr,"Usage: harness plugin-path output-directory [optional-mp3 | --live [seconds]]\n");return 2;}
     bool live=argc>3 && !std::strcmp(argv[3],"--live");
     double liveSeconds=live&&argc>4?std::strtod(argv[4],nullptr):15;
     if(live && (!std::isfinite(liveSeconds)||liveSeconds<1||liveSeconds>60)){
         fprintf(stderr,"Live capture requires 1-60 seconds\n");return 2;
     }
+    if(!live && !validGroupFixture())return 2;
 
     if(!socketsReady()){fprintf(stderr,"sockets unavailable\n");return 2;}
     auto preflight=socket(AF_INET,SOCK_DGRAM,0);sockaddr_in preflightAddress{};
@@ -303,8 +333,13 @@ int main(int argc,char** argv){
         packet.stages[0]={1.f,4096,0,0x7002};expectedRms=stageRms(1.f,4096);
         phase("channel_stage_pitch_one_gain",2,440,2,3);
         packet.stageCount=0;packet.stages[0]={};
-        global.stageCount=1;global.stages[0]={1.25f,2048,0,0x7003};expectedRms=stageRms(1.25f,2048);
-        phase("group_stage_shifts_music",2,550,2,3);
+        auto groupTone=output/"group-pilot-noise.wav";wave(groupTone,1,48000*6,true,true);
+        auto groupUtf8=groupTone.u8string();std::memset(packet.path,0,sizeof(packet.path));
+        std::memcpy(packet.path,groupUtf8.data(),std::min(groupUtf8.size(),sizeof(packet.path)-1));
+        global.stageCount=1;global.stages[0]={1.25f,2048,0,0x7003};expectedRms=stageRms(1.25f,2048,true);
+        phase("group_stage_shifts_music",2,550,0,3);
+        std::memset(packet.path,0,sizeof(packet.path));
+        std::memcpy(packet.path,constantUtf8.data(),std::min(constantUtf8.size(),sizeof(packet.path)-1));
         expectedRms=0;
         phase("excluded_replacement_skips_group_stage",2,440,2,3|8);
         global.stageCount=0;global.stages[0]={};

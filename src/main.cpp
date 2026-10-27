@@ -262,8 +262,6 @@ static void publish(const std::string& status, bool playing) {
     state.playing = playing;
     bridge().publish(state);
 }
-// Live positions are dated by the mixer and can be up to a block ahead of now. A stop must not
-// sort before them, or OBS would play on until they go stale. Callers decide whether to clear the path.
 // A replacement song plays the OBS file, not the game's, so it follows the game's shifters only
 // when the setting says so. Everything else follows them unconditionally.
 static void applyObservedStages(Snapshot& out, const MusicVoice& voice, bool replaced) {
@@ -277,21 +275,10 @@ static void applyObservedStages(Snapshot& out, const MusicVoice& voice, bool rep
     out.stages = voice.observedStages.stages;
     out.stageCount = voice.observedStages.count;
 }
-static void markStopped(Snapshot& snapshot, uint64_t now) {
-    snapshot.timestamp = std::max(snapshot.timestamp, now);
-    snapshot.playing = false;
-    snapshot.epoch = ++nextEpoch;
-    // The channel is gone; a stopped packet must not name its old DSP instances.
-    snapshot.stages = {};
-    snapshot.stageCount = 0;
-    snapshot.effectsStages = {};
-    snapshot.effectsStageCount = 0;
-    snapshot.groupExcluded = false;
-}
 static void stopVoices() {
     const auto now = monotonicNowNs();
     for (auto& [id, voice] : voices) {
-        markStopped(voice.snapshot, now);
+        voice.snapshot.markStopped(now, ++nextEpoch);
         voice.snapshot.path.clear();
         bridge().publish(voice.snapshot);
     }
@@ -395,7 +382,7 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
 // Publishes a stop for a voice whose channel is gone and forgets it.
 static std::map<int, MusicVoice>::iterator endVoice(std::map<int, MusicVoice>::iterator it, uint64_t now) {
     auto& out = it->second.snapshot;
-    markStopped(out, now);
+    out.markStopped(now, ++nextEpoch);
     out.path.clear();
     bridge().publish(out);
     return voices.erase(it);
@@ -460,6 +447,15 @@ static void leaveLevel() {
     activePlayLayer = nullptr; playingSongs.reset(); stopVoices();
     state.level.clear(); state.song.clear(); state.attempt = 0;
     publish("Ready", false);
+}
+// Share a real-time gate between level updates and the scheduler. At 0.01x, a game-time 10 ms
+// timer can wait a second, beyond OBS's 400 ms freshness window.
+static bool musicSampleDue() {
+    static uint64_t last = 0;
+    const auto now = monotonicNowNs();
+    if (now - last < 10000000) return false;
+    last = now;
+    return true;
 }
 // Outside a level OBS mirrors whatever GD plays: the menu song, shop music, editor playtests.
 // In the editor the level's OBS choice applies, as it does when the level is played.
@@ -537,7 +533,6 @@ class $modify(SeparateSongMusicEvents, FMODAudioEngine) {
 class $modify(SeparateSongPlay, PlayLayer) {
     struct Fields {
         GJGameLevel* observedLevel = nullptr;
-        uint64_t lastSample = 0;
         std::optional<MusicVoice> suspendedContinuation;
         bool quit = false;
     };
@@ -549,7 +544,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         selectOffsetLevel(m_level);
         if (m_fields->suspendedContinuation) {
             auto& voice = *m_fields->suspendedContinuation;
-            markStopped(voice.snapshot, monotonicNowNs());
+            voice.snapshot.markStopped(monotonicNowNs(), ++nextEpoch);
             voices[0] = std::move(voice);
             m_fields->suspendedContinuation.reset();
         }
@@ -581,10 +576,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
             else playingSongs.reset();
             selectOffsetLevel(m_level);
         }
-        auto now = monotonicNowNs();
-        if (now - m_fields->lastSample >= 10000000) {
-            m_fields->lastSample = now; sampleMusic(this);
-        }
+        if (musicSampleDue()) sampleMusic(this);
     }
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         PlayLayer::destroyPlayer(player, object);
@@ -699,9 +691,13 @@ public:
         if (play && play == activePlayLayer) sampleMusic(play);
         else if (!outsideLevel(play)) publish("Ready", false);
     }
-    // Every 10 ms outside levels: mirror GD's menu and editor music.
-    void mirrorMenuMusic(float) {
-        if (outsideLevel(PlayLayer::get())) sampleMusicOutsideLevels();
+    // Runs each scheduler frame; the monotonic gate limits sampling to once per 10 ms of real
+    // time, independent of scaled dt. This also covers slow speedhacks with few level updates.
+    void sampleMusicEveryFrame(float) {
+        auto play = PlayLayer::get();
+        if (!musicSampleDue()) return;
+        if (outsideLevel(play)) sampleMusicOutsideLevels();
+        else sampleMusic(play);
     }
 };
 $on_mod(Loaded) {
@@ -709,7 +705,7 @@ $on_mod(Loaded) {
     auto service = new SeparateSongService();
     auto scheduler = CCDirector::get()->getScheduler();
     scheduler->scheduleSelector(schedule_selector(SeparateSongService::poll), service, .1f, false);
-    scheduler->scheduleSelector(schedule_selector(SeparateSongService::mirrorMenuMusic), service, .01f, false);
+    scheduler->scheduleSelector(schedule_selector(SeparateSongService::sampleMusicEveryFrame), service, 0.f, false);
 }
 
 class $modify(SeparateSongMenu, MenuLayer) {

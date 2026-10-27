@@ -486,6 +486,42 @@ static void playTone(Simulation &sim, SongLinkPacket p, uint64_t base, uint64_t 
         sim.advance(10000000);
     }
 }
+// A 0.01x song still needs real-time heartbeats: sparse game-time updates used to rebuild the
+// voice once a second, cutting the pitch stage's buffered output at a 480-frame boundary.
+static void slowPitchHeartbeatTest() {
+    writeTone("artifacts/audio-tests/tone.wav");
+    Simulation sim;
+    const auto base = sim.now;
+    SongLinkPacket p;
+    p.flags = 3; p.epoch = 1; p.rate = .01;
+    p.stageCount = 1; p.stages[0] = {2.f, 4096, 0, 7};
+    std::strcpy(p.path, "artifacts/audio-tests/tone.wav");
+    sim.start();
+    while (sim.now < base + 4000000000ULL) {
+        p.position = 1 + double(sim.now - base) / 1e9 * .01;
+        sim.send(p, sim.now);
+        EffectsPacketV2 effect;
+        effect.frames = 480; effect.sampleRate = 48000; effect.timestamp = sim.now;
+        effect.sequence = unsigned((sim.now - base) / 10000000);
+        sim.sendEffects(effect);
+        sim.advance(10000000);
+    }
+    double worstJump = 0, energy = 0;
+    float previous = 0;
+    size_t frames = 0;
+    for (const auto &block : sim.output) {
+        if (block.timestamp < base + 1000000000ULL) continue;
+        for (size_t i = 0; i < blockFrames; ++i) {
+            const float sample = block.samples[i * 2];
+            if (frames) worstJump = std::max(worstJump, double(std::abs(sample - previous)));
+            previous = sample; energy += sample * sample; ++frames;
+        }
+    }
+    check(frames > 100000 && energy / std::max(size_t(1), frames) > .001,
+          "a 0.01x pitch-shifted song remains audible across real-time heartbeats");
+    check(sim.source->testVoiceCount.load() == 1 && worstJump < .003,
+          "real-time heartbeats retain the slow song's pitch history without block-edge clicks");
+}
 static void pitchRenderChannelTest() {
     Simulation sim;
     const auto base = sim.now;
@@ -721,6 +757,56 @@ static double firstAudibleHz(const Simulation &sim, uint64_t at, size_t frames) 
     for (size_t i = 1; i < mono.size(); ++i)
         crossings += mono[i - 1] < 0 && mono[i] >= 0;
     return double(crossings) / (double(frames) / 48000.);
+}
+// The stage still holds pre-stop audio: its first 5 ms should match a continuing voice, not the
+// raw decoder tail. Exercise the mod's actual stopped snapshot and bridge before rendering it.
+static void pitchStoppedTailTest() {
+    auto render = [](bool stop) {
+        Simulation sim;
+        const auto base = sim.now;
+        const uint64_t stopAt = base + 500000000 + 173 * 1000000000ULL / 48000;
+        separate_song::Snapshot snapshot;
+        snapshot.playing = true; snapshot.epoch = 1;
+        snapshot.path = "artifacts/audio-tests/tone.wav";
+        snapshot.stageCount = 1; snapshot.stages[0] = {.5f, 4096, 0, 96};
+        separate_song::Bridge sender;
+        check(sender.start(), "stop-boundary sender opens its socket");
+        snapshot.timestamp = base; sender.publish(snapshot);
+        auto packet = published;
+        sim.start();
+        while (sim.now < stopAt) {
+            heartbeat(sim, packet, base);
+            sim.advance(std::min(uint64_t(10000000), stopAt - sim.now));
+        }
+        if (stop) {
+            snapshot.position = double(stopAt - base) / 1e9;
+            snapshot.markStopped(stopAt, 2);
+            snapshot.path.clear();
+            sender.publish(snapshot);
+            sim.send(published, stopAt);
+        } else {
+            heartbeat(sim, packet, base);
+        }
+        sim.advance(150000000);
+        std::vector<float> tail;
+        for (const auto &block : sim.output)
+            for (size_t frame = 0; frame < blockFrames; ++frame) {
+                const auto at = frameTime(block.timestamp, frame);
+                if (at >= stopAt && at < stopAt + 5000000) tail.push_back(block.samples[frame * 2]);
+            }
+        return tail;
+    };
+    const auto continuous = render(false), stopped = render(true);
+    double difference = 0;
+    for (size_t i = 0; i < std::min(continuous.size(), stopped.size()); ++i)
+        difference = std::max(difference, double(std::abs(continuous[i] - stopped[i])));
+    check(continuous.size() == 240 && stopped.size() == 240 && difference < 1e-5,
+          "a stopped voice keeps shifted history through its first 5 ms instead of playing a raw tail");
+    separate_song::Snapshot excluded;
+    excluded.groupExcluded = true; excluded.timestamp = 300;
+    excluded.markStopped(100, 7);
+    check(excluded.groupExcluded && !excluded.playing && excluded.timestamp == 300 && excluded.epoch == 7,
+          "a stopped replacement keeps its group exclusion and never predates its last sample");
 }
 // Pause freezes the stage, including the audio it is holding. The resumed file is a different
 // tone, so the first audio after the resume can only be the held one.
@@ -1028,6 +1114,7 @@ static void pitchRenderTests() {
     pitchStallStagesTest();
     pitchStallEffectsTest();
     pitchPauseHeldTest();
+    pitchStoppedTailTest();
     pitchVoiceReuseTest();
 }
 
