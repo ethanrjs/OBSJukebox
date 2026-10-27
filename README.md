@@ -26,25 +26,13 @@ In Jukebox, check 'Game' for your in-game audio (not heard in OBS' output) and '
 Toggle between Game/OBS volume control in pause menu.
 <img width="1848" height="285" alt="image" src="https://github.com/user-attachments/assets/11024e80-051b-41e3-87dd-5e31e00a6cb8" />
 
-## Speedhacks and pitch shifters
+Update the mod and the OBS plugin together. This version of each only works with the other, and OBS's source properties say which one to update.
 
-OBS plays the music at the game's speed up to 16x, including very slow speeds such as 0.0001x, so a speedhack sounds the same in OBS as in game.
+## Speedhack and pitch shifting
 
 When another mod pitch shifts the game's audio with FMOD's pitch shifter, OBS applies the same shifters in the same order: on each music channel, on the music group and on sound effects. A replacement OBS song follows them too. To keep it at its normal pitch, turn off **Pitch shift a different OBS song** in the mod's settings.
 
-Update the mod and the OBS plugin together. This version of each only works with the other, and OBS's source properties say which one to update.
-
-Limits:
-
-- Above 16x, OBS plays at 16x between the game's updates and jumps forward to catch up, so the music skips.
-- A pitch shifter on the master group shifts music and sound effects as one mix in game, but OBS shifts them separately. Pitch shifting isn't linear, so the results differ a little. Measured in FMOD with this repository's `fmod-pitchshift-reference` tool, for white noise plus a 440 Hz tone through one shifter at pitch 0.75 and FFT size 4096, the two shifted separately and summed correlate 0.995 with the two shifted together at a 48 kHz mixer, and 0.976 at 44.1 kHz.
-- The plugin's shifters run at 48 kHz. When GD mixes at 44.1 kHz, each FMOD shifter's window and delay last 8.8% longer than OBS's: 7.5 ms more per shifter at FFT size 4096 (4096 x (1/44100 - 1/48000) seconds), adding up along a chain.
-- Close to silence, OBS's shifters start and stop at slightly different moments than FMOD's, so they can hold a little more or less of the sound before.
-- If a mod destroys a shifter and creates a new one at the same memory address between two updates, OBS treats it as the old shifter and keeps its state.
-- With the setting off, if a replacement song plays alongside the game's own music, the music group's shifters in OBS shift only the game's music. The game shifts its whole music mix.
-- OBS applies at most 8 shifters on each channel, on the music group and on the effects path. The mod logs a warning and OBS uses the first 8.
-- OBS assumes GD's music channels play through its music group.
-- Sound effects with a shifter are processed on their own thread, one 10 ms block ahead of OBS's output. Their audio must reach OBS within 10 ms of the moment the game mixed it, instead of 30 ms for effects without a shifter, or it is dropped. The plugin's audio threads ask Windows for the same audio scheduling (MMCSS) that OBS's own audio thread uses, but if Windows wakes them more than 20 ms late, for example while OBS is minimized, a block of shifted effects can still be lost.
+This mod utilizes [Stephan M. Bernsee's smbPitchShift algorithm](https://blogs.zynaptiq.com/bernsee/download/), the [same algorithm used by FMOD](https://www.fmod.com/docs/2.04/api/effects-reference.html#pitch-shifter), the audio middleware used in Geometry Dash, to ensure maximum parity.
 
 ## Compatibility
 
