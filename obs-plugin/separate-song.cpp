@@ -897,7 +897,7 @@ struct SongSource {
                 size_t count = frames - rendered;
                 if (looping) {
                     double untilEnd = (p.loopEnd - sourcePosition) * blockRate / rate;
-                    count = std::min(count, size_t(std::max(1.0, std::ceil(untilEnd))));
+                    count = size_t(std::clamp(std::ceil(untilEnd), 1.0, double(count)));
                 }
                 decoder.render(voiceAudio.data() + rendered * 2, count, rate);
                 starved |= decoder.starvedBeforeEnd();

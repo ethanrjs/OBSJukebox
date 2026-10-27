@@ -1118,6 +1118,34 @@ static void pitchRenderTests() {
     pitchVoiceReuseTest();
 }
 
+// A corrupt float WAV must not poison a retained global chain for later healthy songs. The source
+// switches files, but the session, DSP instance and FFT stay fixed, so a reset cannot mask the bug.
+static void pitchNonfiniteRecoveryTest() {
+    for(float bad:{std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::infinity()}){
+        writeFloatWav("artifacts/audio-tests/corrupt.wav",bad);
+        writeTone("artifacts/audio-tests/tone.wav");
+        Simulation sim;sim.start();
+        const auto base=sim.now;
+        SongLinkPacket global;global.channelID=-1;global.flags=1;
+        global.stageCount=1;global.stages[0]={.5f,1024,0,808};
+        SongLinkPacket voice;voice.flags=3;
+        while(sim.now<base+1200000000){
+            const bool healthy=sim.now>=base+300000000;
+            std::strcpy(voice.path,healthy?"artifacts/audio-tests/tone.wav":"artifacts/audio-tests/corrupt.wav");
+            voice.position=double(sim.now-base)/1e9;voice.epoch=healthy?2:1;
+            sim.send(global,sim.now);sim.send(voice,sim.now);sim.advance(10000000);
+        }
+        bool finite=true;double energy=0;unsigned samples=0;
+        for(const auto& block:sim.output)for(float sample:block.samples){
+            finite&=std::isfinite(sample);
+            if(block.timestamp>base+700000000){energy+=double(sample)*sample;++samples;}
+        }
+        const auto hz=toneHz(sim,base+700000000,base+1100000000);
+        check(finite&&samples>1000&&energy/samples>.001&&std::abs(hz-220)<18,
+              "a retained global pitch chain recovers audibly after nonfinite song PCM");
+    }
+}
+
 static void pitchTests() {
     PitchShifter::prepareTables();
     pitchParityTest();
@@ -1128,5 +1156,6 @@ static void pitchTests() {
     pitchOrderTest();
     pitchAllocationTest();
     pitchInvalidInputTest();
+    pitchNonfiniteRecoveryTest();
     pitchRenderTests();
 }

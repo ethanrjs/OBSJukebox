@@ -192,8 +192,13 @@ class PitchShifter {
         const double threshold = .001 * double(frames) / double(gateFrames);
         for (size_t ch = 0; ch < 2; ++ch) {
             double sum = 0;
-            for (size_t i = 0; i < frames; ++i)
-                sum += std::abs(audio[i * 2 + ch]);
+            for (size_t i = 0; i < frames; ++i) {
+                // A corrupt float WAV must not poison this stage's retained FFT/phase history.
+                auto &sample = audio[i * 2 + ch];
+                if (!std::isfinite(sample))
+                    sample = 0;
+                sum += std::abs(sample);
+            }
             if (sum < threshold) {
                 for (size_t i = 0; i < frames; ++i)
                     audio[i * 2 + ch] = 0;

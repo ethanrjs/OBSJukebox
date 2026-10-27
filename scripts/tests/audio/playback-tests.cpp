@@ -863,6 +863,26 @@ static void shortLoopTest() {
     check(correct && count>3000,"delayed 10 ms source loop wraps before user offset at 2x while another voice continues");
 }
 
+// A loop can be farther away than size_t can count at an otherwise valid positive rate. Rendering
+// must finish a block before converting that distance, then continue to accept ordinary playback.
+static void tinyLoopRateTest() {
+    for(double rate:{1e-20,std::numeric_limits<double>::denorm_min()}){
+        Simulation sim;sim.start();
+        SongLinkPacket p;p.flags=7;p.position=.5;p.loopStart=0;p.loopEnd=1;p.rate=rate;
+        std::strcpy(p.path,"artifacts/audio-tests/ramp.wav");
+        sim.send(p,sim.now);sim.advance(150000000);
+        bool audible=false;
+        for(const auto& block:sim.output)for(float sample:block.samples)audible|=sample>.1f;
+        check(audible,"an extremely slow loop completes its blocks audibly");
+        p.flags=3;p.rate=1;p.position=1;++p.epoch;
+        const auto resume=sim.now;sim.send(p,resume);sim.advance(150000000);
+        bool resumed=false;
+        for(const auto& block:sim.output)if(block.timestamp>resume+20000000)
+            for(float sample:block.samples)resumed|=sample>.19f;
+        check(resumed,"ordinary playback resumes after an extremely slow loop");
+    }
+}
+
 static void foreignEffectsTest() {
     Simulation sim;
     auto game=sim.game(3600000000000LL);
@@ -1207,6 +1227,10 @@ int main(int argc,char** argv){
     writeLinkKey(processLinkKey());
     writeRamp("artifacts/audio-tests/ramp.wav");
     writeRamp("artifacts/audio-tests/negative.wav",true);
+    if(auto edge=std::getenv("OBS_JUKEBOX_EDGE_ONLY")){
+        if(std::string(edge)=="loop")tinyLoopRateTest();else pitchNonfiniteRecoveryTest();
+        return failures?1:0;
+    }
     if(std::getenv("OBS_JUKEBOX_DEADLINE_ONLY")){effectsDelayTest(true);effectsDelayTest(false);effectsLatenessTest();musicDeadlineTest(true);pitchStressTest();return failures?1:0;}
     if(std::getenv("OBS_JUKEBOX_RECOVERY_ONLY")){sourceRecoveryTest(false);sourceRecoveryTest(true);sourceResyncRecoveryTest();sourceToggleRecoveryTest();decoderSeekRecoveryTest();decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();decoderWatchdogBackoffTest();return failures?1:0;}
     pauseTest();equalTimestampStopTest();delayedPositionTest();transitionTest();declickTest();staleVoiceTest();staleChannelTest();staleStatusEffectsTest();finiteOutputTest();nanSongTest();clockNoiseTest();clockSlewTest();protocolTest();invalidPathTest();networkPathTest();
@@ -1214,7 +1238,7 @@ int main(int argc,char** argv){
     forgedSenderTest();forgedClockTest();forgedEffectsTest();newKeyTest();senderProbeTest();senderFloodBudgetTest();
     mainThreadStallTest(Silence::MainThreadStall);mainThreadStallTest(Silence::Crash);mainThreadStallTest(Silence::VoiceOnly);
     v5ClockCorrectedPauseTest();foreignClockTest(3600000000000LL);foreignClockTest(-3600000000000LL);
-    multipleVoiceFadeTest();malformedV7Test();sharedFadeTimeTest();shortLoopTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
+    multipleVoiceFadeTest();malformedV7Test();sharedFadeTimeTest();shortLoopTest();tinyLoopRateTest();foreignEffectsTest();changedClockTest();localFilesOnlyTest();
     tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();
     slowSpeedhackTest();verySlowSpeedhackTest();crawlSpeedhackTest();fastSpeedhackTest();rateBoundsTest();senderTest();senderInvalidPathTest();utf8Test();
     blockQueueTest();pitchTests();slowPitchHeartbeatTest();receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
