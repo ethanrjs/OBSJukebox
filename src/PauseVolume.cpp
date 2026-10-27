@@ -5,6 +5,17 @@
 using namespace geode::prelude;
 using namespace separate_song;
 
+// In OBS mode the slider thumbs call this layer directly instead of PauseLayer's slider callbacks.
+// Mega Hack 9 also hooks those callbacks, and its hook doesn't pass the call on to ours, so the
+// game volume changed and OBS didn't.
+struct SliderCallback {
+    CCObject* target = nullptr;
+    SEL_MenuHandler selector = nullptr;
+};
+static SliderThumb* thumbOf(Slider* slider) {
+    return slider->m_touchLogic ? slider->m_touchLogic->m_thumb : nullptr;
+}
+
 class $modify(ObsJukeboxPauseVolume, PauseLayer) {
     struct Fields {
         bool obs = false;
@@ -14,6 +25,8 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
         CCLabelBMFont* effectsLabel = nullptr;
         std::string gameMusicLabel;
         std::string gameEffectsLabel;
+        SliderCallback gameMusic;
+        SliderCallback gameEffects;
         ButtonSprite* button = nullptr;
     };
 
@@ -27,6 +40,11 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
         fields->musicLabel = typeinfo_cast<CCLabelBMFont*>(getChildByIDRecursive("music-label"));
         fields->effectsLabel = typeinfo_cast<CCLabelBMFont*>(getChildByIDRecursive("sfx-label"));
         if (!fields->music || !fields->effects || fields->music == fields->effects) return;
+        auto musicThumb = thumbOf(fields->music);
+        auto effectsThumb = thumbOf(fields->effects);
+        if (!musicThumb || !effectsThumb) return;
+        fields->gameMusic = {musicThumb->m_pListener, musicThumb->m_pfnSelector};
+        fields->gameEffects = {effectsThumb->m_pListener, effectsThumb->m_pfnSelector};
         if (fields->musicLabel) fields->gameMusicLabel = fields->musicLabel->getString();
         if (fields->effectsLabel) fields->gameEffectsLabel = fields->effectsLabel->getString();
 
@@ -61,15 +79,15 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
         fields->effects->setValue(fields->obs ? obs_volume::effects() : audio->getEffectsVolume());
         fields->music->updateBar();
         fields->effects->updateBar();
+        if (fields->obs) {
+            thumbOf(fields->music)->setTarget(this, menu_selector(ObsJukeboxPauseVolume::onObsMusic));
+            thumbOf(fields->effects)->setTarget(this, menu_selector(ObsJukeboxPauseVolume::onObsEffects));
+        } else {
+            thumbOf(fields->music)->setTarget(fields->gameMusic.target, fields->gameMusic.selector);
+            thumbOf(fields->effects)->setTarget(fields->gameEffects.target, fields->gameEffects.selector);
+        }
     }
 
-    void musicSliderChanged(CCObject* sender) {
-        if (m_fields->obs && m_fields->music) obs_volume::setMusic(m_fields->music->getValue());
-        else PauseLayer::musicSliderChanged(sender);
-    }
-
-    void sfxSliderChanged(CCObject* sender) {
-        if (m_fields->obs && m_fields->effects) obs_volume::setEffects(m_fields->effects->getValue());
-        else PauseLayer::sfxSliderChanged(sender);
-    }
+    void onObsMusic(CCObject*) { obs_volume::setMusic(m_fields->music->getValue()); }
+    void onObsEffects(CCObject*) { obs_volume::setEffects(m_fields->effects->getValue()); }
 };
