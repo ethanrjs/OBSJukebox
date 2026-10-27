@@ -6,8 +6,8 @@ using namespace geode::prelude;
 using namespace separate_song;
 
 // In OBS mode the slider thumbs call this layer directly instead of PauseLayer's slider callbacks.
-// Other mods hook those callbacks too (Mega Hack 9 does), and a hook that runs before ours and
-// doesn't call the original would set the game volume and never reach OBS.
+// Mega Hack 9 also hooks those callbacks, and its hook doesn't pass the call on to ours, so the
+// game volume changed and OBS didn't.
 struct SliderCallback {
     CCObject* target = nullptr;
     SEL_MenuHandler selector = nullptr;
