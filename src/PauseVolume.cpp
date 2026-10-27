@@ -27,7 +27,7 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
     struct Fields {
         bool obs = false;
         // Retained, so the toggle never touches a freed node if another mod removes or replaces
-        // these after setup.
+        // these after setup. It then only changes the detached nodes.
         Ref<Slider> music;
         Ref<Slider> effects;
         Ref<CCLabelBMFont> musicLabel;
@@ -84,8 +84,9 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
         fields->effects->setValue(fields->obs ? obs_volume::effects() : audio->getEffectsVolume());
         fields->music->updateBar();
         fields->effects->updateBar();
-        // The Game callbacks are saved here rather than at setup, so one another mod set after our
-        // setup is the one restored.
+        // The Game callbacks are saved on each switch to OBS, so a callback another mod set while in
+        // Game mode is the one restored. One set while in OBS mode is overwritten on the way back:
+        // it may forward to our OBS handler, and Game mode must never change the OBS volume.
         if (fields->obs) {
             fields->gameMusic = retarget(fields->music, {this, menu_selector(ObsJukeboxPauseVolume::onObsMusic)});
             fields->gameEffects = retarget(fields->effects, {this, menu_selector(ObsJukeboxPauseVolume::onObsEffects)});
