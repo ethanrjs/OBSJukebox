@@ -1,3 +1,4 @@
+#include "../../src/LinkKey.hpp"
 #include "../../src/LinkPacket.hpp"
 #include <cstddef>
 #include <cstring>
@@ -42,6 +43,7 @@ int main() {
  FIELD(SongLinkPacket, stageReserved)
  FIELD(SongLinkPacket, stages)
  FIELD(SongLinkPacket, effectsStages)
+ FIELD(SongLinkPacket, tag)
  std::cout << "size ClockSyncPacket " << sizeof(ClockSyncPacket) << "\n";
  FIELD(ClockSyncPacket, magic)
  FIELD(ClockSyncPacket, version)
@@ -50,6 +52,7 @@ int main() {
  FIELD(ClockSyncPacket, t1)
  FIELD(ClockSyncPacket, t2)
  FIELD(ClockSyncPacket, t3)
+ FIELD(ClockSyncPacket, tag)
  std::cout << "size EffectsPacket " << sizeof(EffectsPacket) << "\n";
  FIELD(EffectsPacket, magic)
  FIELD(EffectsPacket, version)
@@ -59,31 +62,41 @@ int main() {
  FIELD(EffectsPacket, timestamp)
  FIELD(EffectsPacket, stream)
  FIELD(EffectsPacket, samples)
- std::cout << "size EffectsPacketV2 " << sizeof(EffectsPacketV2) << "\n";
- FIELD(EffectsPacketV2, magic)
- FIELD(EffectsPacketV2, version)
- FIELD(EffectsPacketV2, sequence)
- FIELD(EffectsPacketV2, sampleRate)
- FIELD(EffectsPacketV2, frames)
- FIELD(EffectsPacketV2, timestamp)
- FIELD(EffectsPacketV2, stream)
- FIELD(EffectsPacketV2, sessionID)
- FIELD(EffectsPacketV2, samples)
+ std::cout << "size EffectsPacketV3 " << sizeof(EffectsPacketV3) << "\n";
+ FIELD(EffectsPacketV3, magic)
+ FIELD(EffectsPacketV3, version)
+ FIELD(EffectsPacketV3, sequence)
+ FIELD(EffectsPacketV3, sampleRate)
+ FIELD(EffectsPacketV3, frames)
+ FIELD(EffectsPacketV3, timestamp)
+ FIELD(EffectsPacketV3, stream)
+ FIELD(EffectsPacketV3, sessionID)
+ FIELD(EffectsPacketV3, tag)
+ FIELD(EffectsPacketV3, samples)
+ // test_protocol_layout.py checks each tag with this key.
+ LinkKey key; key.fill(0x11);
  SongLinkPacket song; song.flags=4; song.epoch=17; song.attempt=-3; song.position=1.25; song.rate=1.5; song.offset=-2.5;
  std::memcpy(song.status,"playing",sizeof("playing")); std::memcpy(song.level,"fixture level",sizeof("fixture level")); std::memcpy(song.song,"fixture song",sizeof("fixture song")); std::memcpy(song.path,"fixture.ogg",sizeof("fixture.ogg"));
  song.musicVolume=.25f; song.effectsVolume=.5f; song.timestamp=123456; song.sessionID=765432; song.channelID=7; song.triggerGain=2.f;
  song.fadeCount=8; for(unsigned i=0;i<8;++i) { song.fades[i].offsetNs=(i+1)*100; song.fades[i].gain=float(i+1)/2; }
  song.loopStart=3.25; song.loopEnd=9.5;
- song.version=6; song.stageCount=2; song.stages[0]={.75f,1024,0,41}; song.stages[1]={1.5f,2048,0,42};
- fixture("song6",song);
+ song.stageCount=2; song.stages[0]={.75f,1024,0,41}; song.stages[1]={1.5f,2048,0,42};
+ signPacket(key,song); fixture("song7",song);
  auto global=song; global.channelID=-1; global.stageCount=1; global.stages[0]={1.f,256,0,44}; global.stages[1]={};
  global.effectsStageCount=1; global.effectsStages[0]={.5f,4096,0,43};
- fixture("song6global",global);
+ signPacket(key,global); fixture("song7global",global);
  song.stageCount=0; song.effectsStageCount=0; song.stages[0]={}; song.stages[1]={};
+ // Historical v6 kept its tag at 1436, before v7's stage extension.
+ song.version=6;
+ link_key::HmacSha256 legacyMac(key.data(),key.size()); legacyMac.update(&song,1436);
+ auto legacyTag=legacyMac.finish();
+ std::memcpy(reinterpret_cast<unsigned char*>(&song)+1436,legacyTag.data(),16);
+ fixture("song6",song,SONG_LINK_V6_SIZE);
+ std::memset(reinterpret_cast<unsigned char*>(&song)+1436,0,16);
  song.version=5; fixture("song5",song,SONG_LINK_V5_SIZE); song.version=4; fixture("song4",song,SONG_LINK_V4_SIZE); song.version=3; fixture("song3",song,SONG_LINK_V3_SIZE); song.version=2; fixture("song2",song,SONG_LINK_V2_SIZE);
- ClockSyncPacket clock; clock.kind=2; clock.sessionID=765432; clock.t1=11; clock.t2=22; clock.t3=33; fixture("clock",clock);
+ ClockSyncPacket clock; clock.kind=2; clock.sessionID=765432; clock.t1=11; clock.t2=22; clock.t3=33; signPacket(key,clock); fixture("clock",clock);
  EffectsPacket effects; effects.sequence=19; effects.sampleRate=48000; effects.frames=512; effects.timestamp=123456; effects.stream=1;
  for(unsigned i=0;i<1024;++i) effects.samples[i]=float(i)/1024; fixture("effects1",effects);
- EffectsPacketV2 modern; modern.sequence=19; modern.sampleRate=48000; modern.frames=512; modern.timestamp=123456; modern.stream=1; modern.sessionID=765432;
- for(unsigned i=0;i<1024;++i) modern.samples[i]=float(i)/1024; fixture("effects2",modern);
+ EffectsPacketV3 modern; modern.sequence=19; modern.sampleRate=48000; modern.frames=512; modern.timestamp=123456; modern.stream=1; modern.sessionID=765432;
+ for(unsigned i=0;i<1024;++i) modern.samples[i]=float(i)/1024; signPacket(key,modern); fixture("effects3",modern);
 }

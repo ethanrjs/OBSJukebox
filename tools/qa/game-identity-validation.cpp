@@ -49,6 +49,11 @@ int main() {
     auto ids = levelSongIDs(-1, "123,456,123,-2,0,invalid,12oops,2147483648,");
     check(ids == std::vector<int>({-1, 123, 456, -2}), "candidate list supports built-in IDs and rejects malformed entries");
     check(levelSongIDs(123, "") == std::vector<int>({123}), "empty extra-song list preserves the initial ID");
+    std::string declaredSongs;
+    for (int id = 1; id <= 100000; ++id) declaredSongs += std::to_string(id) + ",";
+    auto capped = levelSongIDs(-1, declaredSongs);
+    check(capped.size() == 128 && capped.front() == -1 && capped.back() == 127,
+        "a level declaring 100000 songs is cut to its first 128 IDs");
     std::vector<MusicCandidate> songs{{123, "/songs/a.mp3"}, {456, "/nongs/song-b.mp3"}};
     check(songForPath("/songs/a.mp3", songs) == 123, "initial sound selects initial song");
     check(songForPath("/nongs/song-b.mp3", songs) == 456, "Song trigger selects B's replacement and offsets through B's ID");

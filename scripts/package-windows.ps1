@@ -51,20 +51,14 @@ try {
     foreach ($file in @($exe, $ModPath, $PluginPath)) { $hashes[(Split-Path $file -Leaf)] = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash }
     $hashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'SHA256.json') -Encoding utf8
     Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $OutputDirectory -Force
+    # Source comes from the commit, so untracked files in a developer's tree never ship.
+    if (& git -C $projectRoot status --porcelain) { Write-Warning 'Source is taken from HEAD; uncommitted changes are not in it.' }
     $source = Join-Path $OutputDirectory 'Source'
-    New-Item -ItemType Directory -Path $source -Force | Out-Null
-    foreach ($name in @('src','obs-plugin','vendor','installer','scripts','tools/qa','.github')) {
-        $dest = Join-Path $source $name
-        New-Item -ItemType Directory -Path $dest -Force | Out-Null
-        Get-ChildItem -LiteralPath (Join-Path $projectRoot $name) -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj|__pycache__)[\\/]' -and $_.Name -ne 'payload.zip' } | ForEach-Object {
-            $sourcePrefix = [IO.Path]::GetFullPath((Join-Path $projectRoot $name)).TrimEnd([char[]]@('\','/')) + [IO.Path]::DirectorySeparatorChar
-            $relative = $_.FullName.Substring($sourcePrefix.Length)
-            $target = Join-Path $dest $relative
-            New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
-            Copy-Item -LiteralPath $_.FullName -Destination $target -Force
-        }
-    }
-    foreach ($name in @('CMakeLists.txt','mod.json','logo.png','LICENSE','README.md')) { Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $source -Force }
+    if (Test-Path -LiteralPath $source) { Remove-Item -LiteralPath $source -Recurse -Force }
+    $sourceArchive = Join-Path $staging 'source.zip'
+    & git -C $projectRoot archive --format=zip -o $sourceArchive HEAD -- src obs-plugin vendor installer scripts tools/qa .github CMakeLists.txt mod.json logo.png LICENSE README.md
+    if ($LASTEXITCODE -ne 0) { throw "git archive failed: $LASTEXITCODE" }
+    Expand-Archive -LiteralPath $sourceArchive -DestinationPath $source
     Write-Output "Installer: $exe"
     Write-Output ('SHA256: ' + $hashes[(Split-Path $exe -Leaf)])
 } finally {

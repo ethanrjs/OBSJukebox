@@ -21,7 +21,8 @@ class InstallerTransactionTests(unittest.TestCase):
         self.data = self.root / "data"
         self.package = self.root / "package"
         self.bin = self.root / "bin"
-        for path in (self.game / "geode/mods", self.prefix / "drive_c", self.package / "payload", self.bin):
+        self.local = self.prefix / "drive_c/users/steamuser/AppData/Local"
+        for path in (self.game / "geode/mods", self.local / "GeometryDash", self.package / "payload", self.bin):
             path.mkdir(parents=True)
         (self.game / "GeometryDash.exe").touch()
         (self.game / "Geode.dll").touch()
@@ -51,7 +52,7 @@ class InstallerTransactionTests(unittest.TestCase):
         self.wrapper("pgrep", "exit 1")
         self.wrapper("install", 'if [[ "$FAIL_AT" == stage-mod && "$*" == *payload/local.separate_song.geode* ]]; then exit 71; fi\nexec /usr/bin/install "$@"')
         self.wrapper("mv", 'target="${!#}"\nsource="${@: -2:1}"\nif [[ "$source" == *obs-jukebox-new* ]] && { [[ "$FAIL_AT" == commit-mod && "$target" == */local.separate_song.geode ]] || [[ "$FAIL_AT" == commit-paths && "$target" == */paths ]]; }; then exit 72; fi\nexec /usr/bin/mv "$@"')
-        self.wrapper("flatpak", '[[ "$1" != info ]] || exit 0\nprintf "[Context]\\nfilesystems=host;\\n" > "$XDG_DATA_HOME/flatpak/overrides/com.obsproject.Studio"\n[[ "$FAIL_AT" != flatpak ]]')
+        self.wrapper("flatpak", '[[ "$1" != info ]] || exit 0\nprintf "%s\\n" "$@" >> "$XDG_DATA_HOME/flatpak-calls"\n[[ "$FAIL_AT" != flatpak ]] || { printf "[Context]\\nfilesystems=host;\\n" > "$XDG_DATA_HOME/flatpak/overrides/com.obsproject.Studio"; exit 1; }')
         self.env = dict(os.environ, HOME=str(self.root / "home"), XDG_CONFIG_HOME=str(self.config), XDG_DATA_HOME=str(self.data), PATH=str(self.bin) + os.pathsep + os.environ["PATH"], FAIL_AT="")
 
     def tearDown(self):
@@ -139,6 +140,35 @@ class InstallerTransactionTests(unittest.TestCase):
         self.targets[3].unlink()
         self.run_installer("flatpak", flatpak=True)
         self.assert_originals(missing=(3,))
+
+    def test_flatpak_grants_only_what_the_plugin_reads(self):
+        result = self.run_installer(flatpak=True)
+        calls = (self.data / "flatpak-calls").read_text().splitlines()
+        grants = sorted(call for call in calls if call.startswith("--filesystem="))
+        self.assertEqual(grants, sorted("--filesystem=" + grant for grant in (
+            f"{self.game}/Resources:ro", f"{self.prefix}/dosdevices:ro",
+            f"{self.local}/GeometryDash:ro", f"{self.local}/OBS Jukebox:ro")))
+        self.assertIn(f"{self.local}/GeometryDash", result.stdout)
+
+    def test_flatpak_removes_the_old_prefix_grant_and_undo_restores_it(self):
+        legacy = f"[Context]\nfilesystems=xdg-pictures:ro;{self.prefix}:ro;{self.game}:ro;\n".encode()
+        self.targets[3].write_bytes(legacy)
+        self.originals[3] = legacy
+        self.run_installer(flatpak=True)
+        self.assertEqual(self.targets[3].read_text(), "[Context]\nfilesystems=xdg-pictures:ro;\n")
+        self.undo()
+        self.assertEqual(self.targets[3].read_bytes(), legacy)
+
+    def test_key_folder_is_owner_only(self):
+        # Including for a Wine user that hasn't run the game yet: Wine would create the folder with
+        # default permissions when the game first writes its key.
+        fresh = self.prefix / "drive_c/users/other/AppData/Local"
+        fresh.mkdir(parents=True)
+        (self.prefix / "drive_c/users/Public").mkdir()
+        self.run_installer()
+        for local in (self.local, fresh):
+            self.assertEqual((local / "OBS Jukebox").stat().st_mode & 0o777, 0o700)
+        self.assertFalse((self.prefix / "drive_c/users/Public/AppData").exists())
 
     def test_fresh_install_failure_removes_partial_files(self):
         for path in self.targets:

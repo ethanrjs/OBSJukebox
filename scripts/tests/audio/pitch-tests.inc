@@ -500,7 +500,7 @@ static void slowPitchHeartbeatTest() {
     while (sim.now < base + 4000000000ULL) {
         p.position = 1 + double(sim.now - base) / 1e9 * .01;
         sim.send(p, sim.now);
-        EffectsPacketV2 effect;
+        EffectsPacketV3 effect;
         effect.frames = 480; effect.sampleRate = 48000; effect.timestamp = sim.now;
         effect.sequence = unsigned((sim.now - base) / 10000000);
         sim.sendEffects(effect);
@@ -573,7 +573,7 @@ static void pitchRenderEffectsTest() {
         sim.start();
         for (int i = 0; i < 120; ++i) {
             heartbeat(sim, global, base);
-            EffectsPacketV2 effect;
+            EffectsPacketV3 effect;
             effect.frames = 480; effect.sampleRate = 48000; effect.sequence = i;
             effect.timestamp = base + uint64_t(i) * 10000000;
             for (unsigned f = 0; f < 480; ++f)
@@ -845,7 +845,7 @@ static void pitchRenderNoEffectsWithoutGlobalTest() {
     sim.send(voice, base);
     sim.start();
     for (int i = 0; i < 30; ++i) {
-        EffectsPacketV2 effect;
+        EffectsPacketV3 effect;
         effect.frames = 480; effect.sampleRate = 48000; effect.sequence = i;
         effect.timestamp = base + uint64_t(i) * 10000000;
         for (unsigned f = 0; f < 480; ++f)
@@ -1031,7 +1031,7 @@ static void pitchStallStagesTest() {
             heartbeat(sim, global, base);
             heartbeat(sim, voice, base);
         }
-        EffectsPacketV2 effect;
+        EffectsPacketV3 effect;
         effect.frames = 480; effect.sampleRate = 48000; effect.sequence = i;
         effect.timestamp = sim.now;
         sim.sendEffects(effect);
@@ -1055,7 +1055,7 @@ static void pitchStallEffectsTest() {
     sim.start();
     for (int i = 0; i < 90; ++i) {
         if (sim.now < base + 300000000) heartbeat(sim, global, base);
-        EffectsPacketV2 effect;
+        EffectsPacketV3 effect;
         effect.frames = 480; effect.sampleRate = 48000; effect.sequence = i;
         effect.timestamp = sim.now;
         for (unsigned f = 0; f < 480; ++f)

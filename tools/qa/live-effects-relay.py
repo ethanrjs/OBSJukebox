@@ -4,18 +4,23 @@ from pathlib import Path
 import socket
 import time
 
-from link_protocol import AGE_SCOPE, RelayRoutes, now_ns, parse_packet
+from link_protocol import AGE_SCOPE, SONG_TAG, RelayRoutes, default_key_file, now_ns, parse_packet, read_key, sign
 
 parser = argparse.ArgumentParser(description="Relay game effects to a test OBS receiver; clears song paths")
 parser.add_argument("--seconds", type=float, default=15)
 parser.add_argument("--listen-port", type=int, default=39022)
 parser.add_argument("--destination-port", type=int, default=39023)
 parser.add_argument("--output", type=Path, required=True)
+parser.add_argument("--key-file", type=Path, default=default_key_file(),
+                    help="the mod's link key, to sign song packets again after clearing their paths")
 args = parser.parse_args()
 if not 1 <= args.seconds <= 60:
     parser.error("seconds must be between 1 and 60")
 if not all(1024 <= p <= 65535 for p in (args.listen_port, args.destination_port)) or args.listen_port == args.destination_port:
     parser.error("ports must be distinct and in 1024..65535")
+if args.key_file is None:
+    parser.error("--key-file is required on Linux: the key is in the game's Wine prefix")
+key = read_key(args.key_file)
 
 routes = RelayRoutes(("127.0.0.1", args.destination_port))
 songs = effects = nonzero_packets = nonzero_samples = invalid = unroutable = probes = replies = modern_songs = 0
@@ -44,6 +49,8 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             continue
         if kind == "song":
             packet = packet[:264] + bytes(1024) + packet[1288:]
+            if fields["version"] >= 6:
+                packet = sign(key, packet, 1436 if fields["version"] == 6 else SONG_TAG)
             songs += 1
             modern_songs += fields["version"] >= 5
         elif kind == "effects":

@@ -57,14 +57,15 @@ static uint64_t pitchStressRun(const StressRun& run) {
             uint64_t sent=0;unsigned sequence=0;
             while(!stopEffects){
                 const auto stamp=start+separate_song::framesToNs(sent,run.effectsRate);
-                EffectsPacketV2 effect;effect.sessionID=sender.session;effect.frames=run.effectsFrames;
+                EffectsPacketV3 effect;effect.sessionID=sender.session;effect.frames=run.effectsFrames;
                 effect.sampleRate=run.effectsRate;effect.sequence=sequence++;effect.timestamp=stamp;
                 for(unsigned i=0;i<run.effectsFrames;++i)
                     effect.samples[i*2]=effect.samples[i*2+1]=
                         float(.2*std::sin(2*3.14159265358979*440*double(sent+i)/run.effectsRate));
                 while(!stopEffects && os_gettime_ns()<stamp+run.effectsLatenessNs)std::this_thread::yield();
                 if(stopEffects)break;
-                const int size=int(44+effect.frames*8);
+                const int size=int(offsetof(EffectsPacketV3,samples)+effect.frames*8);
+                signPacket(processLinkKey(),effect,size);
                 if(sendto(effects,reinterpret_cast<const char*>(&effect),size,0,
                           reinterpret_cast<sockaddr*>(&addr),sizeof(addr))!=size)sendFailed=true;
                 if(measuring)sendLateNs=std::max(sendLateNs,os_gettime_ns()-stamp-run.effectsLatenessNs);
@@ -177,9 +178,10 @@ static void effectsDelayTest(bool staged) {
             if(k==60){delayFrom=now;source.testEffectsDelayMs=int(delayNs/1000000);}
             music.position=.1+std::fmod(double(k)*.01,.8);
             sender.send(global,now);sender.send(music,now);
-            EffectsPacketV2 effect;effect.sessionID=sender.session;effect.frames=480;effect.sampleRate=48000;
+            EffectsPacketV3 effect;effect.sessionID=sender.session;effect.frames=480;effect.sampleRate=48000;
             effect.sequence=k;effect.timestamp=now;std::fill_n(effect.samples,960,marker(k));
-            sendto(socketFd,reinterpret_cast<const char*>(&effect),44+effect.frames*8,0,
+            auto size=offsetof(EffectsPacketV3,samples)+effect.frames*8;signPacket(processLinkKey(),effect,size);
+            sendto(socketFd,reinterpret_cast<const char*>(&effect),int(size),0,
                    reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
             sentAt.push_back(now);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -261,9 +263,10 @@ static void musicDeadlineTest(bool delayedOpen) {
             p.flags=i%10==4?1:3;
             if(i>40){p.flags=7;p.loopStart=190;p.loopEnd=190.02;p.position=190;}
             sender.send(p,now);
-            EffectsPacketV2 effect;effect.sessionID=sender.session;effect.frames=480;effect.timestamp=now;
+            EffectsPacketV3 effect;effect.sessionID=sender.session;effect.frames=480;effect.timestamp=now;
             std::fill_n(effect.samples,960,.02f);
-            sendto(effects,reinterpret_cast<const char*>(&effect),44+effect.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+            auto size=offsetof(EffectsPacketV3,samples)+effect.frames*8;signPacket(processLinkKey(),effect,size);
+            sendto(effects,reinterpret_cast<const char*>(&effect),int(size),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }

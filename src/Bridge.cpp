@@ -1,4 +1,5 @@
 #include "Bridge.hpp"
+#include "LinkKey.hpp"
 #include "MonotonicClock.hpp"
 #include "Utf8.hpp"
 #include <cstring>
@@ -19,6 +20,23 @@ template <size_t N> void copyText(char (&out)[N], const std::string &text) {
     std::memcpy(out, text.data(), length);
 }
 } // namespace
+// Lets at most 32 datagrams through per 50 ms, so a flood can't keep the clock thread spinning.
+struct DatagramBudget {
+    unsigned used = 0;
+    uint64_t window = 0;
+    bool spend(uint64_t now) {
+        if (now - window >= 50000000) {
+            window = now;
+            used = 0;
+        }
+        return used++ < 32;
+    }
+};
+bool answersProbe(const ClockSyncPacket &p, long size, const sockaddr_in &peer) {
+    return size == sizeof(p) && !std::memcmp(p.magic, "GDCLK1\0", 8) && p.version == 2 && p.kind == 1 &&
+           p.sessionID == processSessionID() && peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK) &&
+           signedWith(processLinkKey(), p);
+}
 Bridge::~Bridge() { shutdown(); }
 void Bridge::shutdown() {
     stop = true;
@@ -34,11 +52,24 @@ bool Bridge::start() {
     socket = openLoopbackSocket();
     if (socket == BAD_SOCKET)
         return false;
+    if (!writeLinkKey(processLinkKey())) {
+#if __has_include(<Geode/Geode.hpp>)
+        geode::log::error("OBS Jukebox could not write its link key, so OBS will ignore the game");
+#else
+        std::fprintf(stderr, "OBS Jukebox could not write its link key, so OBS will ignore the game\n");
+#endif
+    }
     stop = false;
     worker = std::thread([this] {
+        DatagramBudget budget;
         while (!stop) {
             if (!waitSocketReadable(socket, 50))
                 continue;
+            // Over budget, the rest wait in the socket buffer, and the system drops what doesn't fit.
+            if (!budget.spend(monotonicNowNs())) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
             ClockSyncPacket p{};
             sockaddr_in peer{};
 #ifdef _WIN32
@@ -49,11 +80,11 @@ bool Bridge::start() {
             auto size = recvfrom(socket, reinterpret_cast<char *>(&p), sizeof(p), 0,
                                  reinterpret_cast<sockaddr *>(&peer), &length);
             auto received = monotonicNowNs();
-            if (size == sizeof(p) && !std::memcmp(p.magic, "GDCLK1\0", 8) && p.version == 1 && p.kind == 1 &&
-                p.sessionID == processSessionID() && peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK)) {
+            if (answersProbe(p, long(size), peer)) {
                 p.kind = 2;
                 p.t2 = received;
                 p.t3 = monotonicNowNs();
+                signPacket(processLinkKey(), p);
                 sendto(socket, reinterpret_cast<const char *>(&p), sizeof(p), 0,
                        reinterpret_cast<sockaddr *>(&peer), length);
             }
@@ -120,6 +151,7 @@ void Bridge::publish(const Snapshot &s) {
         }
 #endif
     }
+    signPacket(processLinkKey(), p);
     send(&p, sizeof(p));
 }
 void Bridge::send(const void *packet, size_t size) {

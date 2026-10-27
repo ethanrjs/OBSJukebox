@@ -17,7 +17,7 @@ checks = {}
 driver = (args.directory / "trigger-smoke.log").read_text()
 checks["isolated_driver_completed"] = "ISOLATION_OK" in driver and "FINISHED" in driver
 checks["actual_pause_resume_control"] = "actual_pause_layer=1" in driver
-checks["v6_native_sender"] = bool(songs) and all(r["version"] == 6 for r in songs)
+checks["v7_native_sender"] = bool(songs) and all(r["version"] == 7 for r in songs)
 checks["three_music_channels"] = {0, 1, 2}.issubset(channels)
 checks["channel_1_source_switch"] = len({r["path"] for r in channels[1] if r["path"]}) >= 2
 checks["song_trigger_volume_0_7"] = any(abs(r.get("gain", 1) - .7) < .001 for r in channels[1])

@@ -1,4 +1,5 @@
 #include "../../src/Socket.hpp"
+#include "../../src/LinkKey.hpp"
 #include "../../src/LinkPacket.hpp"
 #include "PitchShifter.hpp"
 #include <obs.h>
@@ -126,6 +127,16 @@ int main(int argc,char** argv){
     closeSocket(preflight);
     std::filesystem::path output=std::filesystem::u8path(argv[2]);std::filesystem::create_directories(output);
     auto wav=output/std::filesystem::path(u8"runtime-曲-é.wav");if(!live)wave(wav);auto utf8=wav.u8string();
+    // Synthetic packets are signed with this process's key; live capture uses the key the real mod wrote.
+    if(!live){
+        auto keyFile=(output/"link-key").string();
+#ifdef _WIN32
+        _putenv_s("OBS_JUKEBOX_TEST_KEY_FILE",keyFile.c_str());
+#else
+        setenv("OBS_JUKEBOX_TEST_KEY_FILE",keyFile.c_str(),1);
+#endif
+        if(!writeLinkKey(processLinkKey(),keyFile)){fprintf(stderr,"could not write the test link key\n");return 2;}
+    }
     if(!obs_startup("en-US",nullptr,nullptr)){fprintf(stderr,"obs_startup failed\n");return 2;}
 
 #ifdef _WIN32
@@ -185,7 +196,7 @@ int main(int argc,char** argv){
 #endif
             auto size=recvfrom(sock,reinterpret_cast<char*>(&reply),sizeof(reply),0,reinterpret_cast<sockaddr*>(&from),&length);
             if(size==sizeof(reply)&&!memcmp(reply.magic,"GDCLK1\0",8)&&reply.kind==1){
-                reply.kind=2;reply.t2=os_gettime_ns();reply.t3=os_gettime_ns();
+                reply.kind=2;reply.t2=os_gettime_ns();reply.t3=os_gettime_ns();signPacket(processLinkKey(),reply);
                 sendto(sock,reinterpret_cast<const char*>(&reply),sizeof(reply),0,reinterpret_cast<sockaddr*>(&from),length);
             } else { waitSocketReadable(sock, 50); }
         }
@@ -210,24 +221,26 @@ int main(int argc,char** argv){
             global.sessionID=packet.sessionID;global.timestamp=packet.timestamp;global.flags=flags&1;
             global.musicVolume=packet.musicVolume;global.effectsVolume=packet.effectsVolume;
             if(transmit){
+                signPacket(processLinkKey(),global);signPacket(processLinkKey(),packet);
                 sendto(sock,reinterpret_cast<const char*>(&global),sizeof(global),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
                 sendto(sock,reinterpret_cast<const char*>(&packet),sizeof(packet),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
             }
-            if(effects==1){EffectsPacketV2 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),44+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
+            auto sendEffects=[&](EffectsPacketV3& e){auto size=offsetof(EffectsPacketV3,samples)+e.frames*8;signPacket(processLinkKey(),e,size);sendto(sock,reinterpret_cast<const char*>(&e),int(size),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));};
+            if(effects==1){EffectsPacketV3 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.timestamp=os_gettime_ns();for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendEffects(e);}
             if(effects==2){
 
                 double jitter=(effectFrames/1024)%2?.006:0;
                 while(elapsed>=double(effectFrames)/44100+jitter){
-                    for(unsigned part=0;part<2;++part){EffectsPacketV2 e;e.sessionID=packet.sessionID;e.frames=512;e.sampleRate=44100;e.sequence=sequence++;e.timestamp=effectClock+effectFrames*1000000000/44100;effectFrames+=512;for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendto(sock,reinterpret_cast<const char*>(&e),44+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));}
+                    for(unsigned part=0;part<2;++part){EffectsPacketV3 e;e.sessionID=packet.sessionID;e.frames=512;e.sampleRate=44100;e.sequence=sequence++;e.timestamp=effectClock+effectFrames*1000000000/44100;effectFrames+=512;for(unsigned i=0;i<e.frames*2;++i)e.samples[i]=.15f;sendEffects(e);}
                     jitter=(effectFrames/1024)%2?.006:0;
                 }
             }
             while(effects==3 && elapsed+.03>=double(effectFrames)/48000){
-                EffectsPacketV2 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.sequence=sequence++;
+                EffectsPacketV3 e;e.sessionID=packet.sessionID;e.frames=480;e.sampleRate=48000;e.sequence=sequence++;
                 e.timestamp=effectClock+effectFrames*1000000000/48000;
                 for(unsigned i=0;i<e.frames;++i)e.samples[i*2]=e.samples[i*2+1]=toneSample(effectFrames+i);
                 effectFrames+=480;
-                sendto(sock,reinterpret_cast<const char*>(&e),44+e.frames*8,0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
+                sendEffects(e);
             }
             if(!reset&&elapsed>settleSeconds){capture.reset();reset=true;}std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
@@ -313,7 +326,7 @@ int main(int argc,char** argv){
         phase("failed_seek_restart_recovery",1,-1,0,3);
     }
     std::memset(packet.path,0,sizeof(packet.path));std::memcpy(packet.path,utf8.data(),std::min(utf8.size(),sizeof(packet.path)-1));
-    // v6 speed and pitch stages on a constant 440 Hz tone. It lasts 32 s, so 16x for 1.5 s still has
+    // v7 speed and pitch stages on a constant 440 Hz tone. It lasts 32 s, so 16x for 1.5 s still has
     // audio after settling. Each case clears its stages, and the previous path comes back after.
     {
         auto constant=output/"constant-440.wav";wave(constant,1,48000*32,true);
