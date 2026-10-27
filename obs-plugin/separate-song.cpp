@@ -1099,8 +1099,9 @@ struct SongSource {
                 renderEffects(t, audio);
         }, [&] { resetEffectsChain(); });
     }
-    // Adds the game's effects for each run of the global window. Only the global packet carries the
-    // game's effects state; a voice packet never does, so with no global history nothing is mixed.
+    // Adds the game's effects for each run of the global window. The effects volume, enabled flag
+    // and stages used here come from the global packet only; voice packets carry the same settings
+    // but are not read for effects, so with no global history nothing is mixed.
     // SFX never waits for music decoding, opening, seeking or path resolution. Effects ignore
     // staleness: they arrive from FMOD's mixer thread even while GD's main thread (which sends
     // status packets) stalls, and stop on their own when GD does.

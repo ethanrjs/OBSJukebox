@@ -160,8 +160,6 @@ class Decoder {
             phase = 0;
             seekValid = false;
         }
-#endif
-#ifdef OBS_JUKEBOX_QA
         ++testSeekCount;
 #endif
         // position describes phase within the retained PCM window, not the backend's read-ahead cursor.
