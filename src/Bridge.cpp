@@ -151,16 +151,13 @@ void Bridge::publish(const Snapshot &s) {
         }
 #endif
     }
-    signPacket(processLinkKey(), p);
-    send(&p, sizeof(p));
-}
-void Bridge::send(const void *packet, size_t size) {
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(receiverPort());
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sendto(socket, reinterpret_cast<const char *>(packet), static_cast<int>(size), 0,
-           reinterpret_cast<sockaddr *>(&address), sizeof(address));
+    signPacket(processLinkKey(), p);
+    sendto(socket, reinterpret_cast<const char *>(&p), sizeof(p), 0, reinterpret_cast<sockaddr *>(&address),
+           sizeof(address));
 }
 // Shutdown is explicit before FMOD/application teardown, never under DLL loader lock.
 Bridge &bridge() {

@@ -37,7 +37,6 @@ class Bridge {
     std::atomic<bool> stop{false};
     std::thread worker;
     bool longPathLogged = false, invalidPathLogged = false;
-    void send(const void *packet, size_t size);
 
   public:
     ~Bridge();

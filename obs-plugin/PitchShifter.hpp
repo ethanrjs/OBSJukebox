@@ -193,9 +193,11 @@ class PitchShifter {
         for (size_t ch = 0; ch < 2; ++ch) {
             double sum = 0;
             for (size_t i = 0; i < frames; ++i) {
-                // A corrupt float WAV must not poison this stage's retained FFT/phase history.
+                // A corrupt float WAV must not poison this stage's retained FFT/phase history: NaN,
+                // Inf, or a finite sample so large (FLT_MAX) that a frame of it overflows the FFT.
+                // 1e6 is 120 dB above full scale, far beyond any mix this plugin builds.
                 auto &sample = audio[i * 2 + ch];
-                if (!std::isfinite(sample))
+                if (!(std::abs(sample) <= 1e6f))
                     sample = 0;
                 sum += std::abs(sample);
             }
