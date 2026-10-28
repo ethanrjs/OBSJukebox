@@ -136,7 +136,9 @@ if (( song_update )); then
             2) sleep 2; continue ;;
             3) write_result failed "$song_message" repair ;;
             4) ;;
-            *) write_result failed "$song_message" ;;
+            1) write_result failed "$song_message" ;;
+            # A killed child (128 and above) can't run its own rollback, so treat it as a repair case.
+            *) write_result failed "$song_message" repair ;;
         esac
         /bin/rm -f "$song_reason"
         song_success=1

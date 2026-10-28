@@ -249,3 +249,13 @@ cp "$qa_root/install-state.pl.real" "$qa_payload/install-state.pl"
 cp "$qa_root/before-failure.geode" "$qa_mods/local.separate_song.geode"
 [[ "$(qa_status)" == failed ]] && /usr/bin/perl -MJSON::PP -e 'local $/; open my $f, "<", shift or exit 1; exit(decode_json(<$f>)->{repair} ? 0 : 1)' "$qa_result"
 print 'update-repair-result: pass'
+# A child killed mid-install can't roll back, so its files are treated as possibly half-installed.
+print -r -- '#!/usr/bin/perl
+kill "KILL", getppid();
+sleep 5;' > "$qa_payload/install-state.pl"
+rm -f "$qa_result"
+run_update > /dev/null 2>&1
+cp "$qa_root/install-state.pl.real" "$qa_payload/install-state.pl"
+cp "$qa_root/before-failure.geode" "$qa_mods/local.separate_song.geode"
+[[ "$(qa_status)" == failed ]] && /usr/bin/perl -MJSON::PP -e 'local $/; open my $f, "<", shift or exit 1; exit(decode_json(<$f>)->{repair} ? 0 : 1)' "$qa_result"
+print 'update-killed-child-repair: pass'

@@ -952,8 +952,13 @@ static class UpdateMode
     }
     static bool TakeReopenFlag(Options o)
     {
-        if(o.ReopenFlag==null || !File.Exists(o.ReopenFlag)) return false;
-        File.Delete(o.ReopenFlag); return true;
+        // A flag that can't be read or deleted is not worth failing a finished install over.
+        try
+        {
+            if(o.ReopenFlag==null || !File.Exists(o.ReopenFlag)) return false;
+            File.Delete(o.ReopenFlag); return true;
+        }
+        catch(Exception ex) when(ex is IOException or UnauthorizedAccessException) { return false; }
     }
     static bool CancelledElevation(Exception? ex)
     {
