@@ -25,7 +25,7 @@ static class Program
         try
         {
             if(args.Length>0 && args[0]=="--plugin-helper")return Engine.PluginHelper(args);
-            if(args.Contains("--update"))return UpdateMode.Main(args);
+            if(args.Contains("--update"))return UpdateMode.Entry(args);
             var options = Options.Parse(args);
             if (options.Silent)
             {
@@ -593,6 +593,9 @@ static class Engine
             // A journal that can't be written counts as unfinished, instead of escaping as a plain error.
             try { WriteManifest(manifest,record); }
             catch(Exception ex) when(ex is IOException or UnauthorizedAccessException) { log("Could not record the recovery: "+ex.Message); incomplete++; }
+            // Update mode stops at the first unfinished session. Continuing could hide this one behind an
+            // app that opens for a later session, and the retry would skip a session already marked.
+            if (incomplete>0 && o.Update) break;
         }
         return incomplete;
     }
@@ -878,7 +881,7 @@ static class UpdateMode
     internal const string LockName=@"Local\OBSJukeboxUpdate";
     internal sealed record Host(Func<string,bool> Running,Action Sleep,Action Install,Action StartGD,Func<string?> InstalledVersion);
 
-    internal static int Main(string[] args)
+    internal static int Entry(string[] args)
     {
         // Found by a plain scan, so a parsing error still reaches the mod.
         int at=Array.IndexOf(args,"--result");
@@ -903,9 +906,15 @@ static class UpdateMode
     static Host RealHost(Options o) => new(
         name => { var found=Process.GetProcessesByName(name); foreach(var p in found) p.Dispose(); return found.Length>0; },
         () => Thread.Sleep(2000),
-        () => Engine.Execute(o,Console.WriteLine),
-        () => Engine.RestartApps([Path.Combine(o.GD,"GeometryDash.exe")],Console.WriteLine),
+        () => Engine.Execute(o,s=>Log(o,s)),
+        () => Engine.RestartApps([Path.Combine(o.GD,"GeometryDash.exe")],s=>Log(o,s)),
         () => Engine.InstalledVersion(o.GD));
+    // No console is attached in update mode, so every line also goes to a file the player can send.
+    static void Log(Options o,string line)
+    {
+        try { Directory.CreateDirectory(o.StateRoot); File.AppendAllText(Path.Combine(o.StateRoot,"update.log"),DateTimeOffset.Now.ToString("O")+" "+line+Environment.NewLine); }
+        catch(Exception ex) when(ex is IOException or UnauthorizedAccessException) { }
+    }
 
     internal static int Run(Options o,Host host)
     {
@@ -917,7 +926,7 @@ static class UpdateMode
             if(gd || obs)
             {
                 // "Update now" closed GD but OBS is open: give GD back now, install later.
-                if(!gd && TakeReopenFlag(o)) host.StartGD();
+                if(!gd && TakeReopenFlag(o)) StartGD(host);
                 host.Sleep(); continue;
             }
             try { host.Install(); }
@@ -931,9 +940,15 @@ static class UpdateMode
                 return 1;
             }
             Write(o,"installed");
-            if(TakeReopenFlag(o)) host.StartGD();
+            if(TakeReopenFlag(o)) StartGD(host);
             return 0;
         }
+    }
+    // Reopening can fail (the game moved, the shell refused); that must not turn a finished install into a failure.
+    static void StartGD(Host host)
+    {
+        try { host.StartGD(); }
+        catch(Exception ex) when(ex is IOException or System.ComponentModel.Win32Exception) { }
     }
     static bool TakeReopenFlag(Options o)
     {

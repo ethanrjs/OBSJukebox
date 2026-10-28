@@ -141,6 +141,8 @@ std::optional<std::filesystem::path> stage(const Offer& o, std::function<void(fl
     std::filesystem::create_directories(paths.staging, error);
     if (error || update_platform::pathHasLink(paths.staging)) return std::nullopt;
     auto entry = *ur::entryFor(o.manifest, platform());
+    // The size is signed, so refuse an impossible setup before any request is made.
+    if (entry.size > MAX_SETUP) return std::nullopt;
     auto name = ur::assetName(o.manifest.version, platform());
     auto setup = paths.staging / name;
     if (!matches(setup, entry)) {
@@ -157,7 +159,7 @@ std::optional<std::filesystem::path> stage(const Offer& o, std::function<void(fl
         if (auto length = head.header("Content-Length")) {
             uint64_t size = 0;
             std::string_view text = *length;
-            if (std::from_chars(text.data(), text.data() + text.size(), size).ec != std::errc{} || size > MAX_SETUP) return std::nullopt;
+            if (std::from_chars(text.data(), text.data() + text.size(), size).ec != std::errc{} || size != entry.size) return std::nullopt;
         }
         auto response = web::WebRequest().userAgent(userAgent()).timeout(std::chrono::seconds(600))
             .onProgress([progress](web::WebProgress const& p) { if (auto percent = p.downloadProgress()) progress(*percent); })
@@ -194,7 +196,10 @@ std::optional<Launch> prepareLaunch(ur::Version version, const std::filesystem::
                    "--reopen-flag", utils::string::pathToString(paths.reopenFlag)};
 #elif defined(GEODE_IS_ARM_MAC)
     auto folder = paths.staging / fmt::format("{}-{:08x}", ur::toString(version), std::random_device{}());
-    if (!update_platform::unzip(setup, folder)) return std::nullopt;
+    std::error_code folderError;
+    // Reserve the folder first, so ditto can never merge into an existing tree.
+    if (!std::filesystem::create_directory(folder, folderError) || folderError) return std::nullopt;
+    if (!update_platform::unzip(setup, folder)) { std::filesystem::remove_all(folder, folderError); return std::nullopt; }
     launch.program = "/bin/zsh";
     launch.args = {(folder / "OBS Jukebox Setup.app/Contents/Resources/Install.command").string(), "--update", "--result", paths.result.string(),
                    "--reopen-flag", paths.reopenFlag.string(), gdFolder.string()};
@@ -248,6 +253,9 @@ void startUpdate(bool restart, bool viaNotice) {
                     auto r = readResult();
                     ready = r && r->version == version && r->status == ur::Status::Waiting;
                 }
+                // A first run on a cold start can take longer than 10 seconds. If the setup holds its
+                // lock it has started and will honour the wait; don't call that a failure.
+                if (!ready && update_platform::setupWaiting()) ready = true;
                 Loader::get()->queueInMainThread([ready, version, restart, viaNotice, startedOn] {
                     if (!ready) { panel = Panel::None; refreshPanel(); notify("Update failed: the setup didn't start."); return; }
                     if (!restart) {
@@ -280,7 +288,11 @@ void exitForUpdate(ur::Version version, unsigned startedOn) {
         notify(fmt::format("OBS Jukebox {} installs after you close GD and OBS. GD won't reopen by itself.", ur::toString(version)));
         return;
     }
-    if (file::writeString(paths.reopenFlag, "").isErr()) return;
+    if (file::writeString(paths.reopenFlag, "").isErr()) {
+        refreshPanel();
+        notify(fmt::format("OBS Jukebox {} installs after you close GD and OBS. GD won't reopen by itself.", ur::toString(version)));
+        return;
+    }
     utils::game::exit(true);
 }
 
@@ -290,7 +302,16 @@ void showLinkPanel(ur::Version version) { panel = Panel::Link; panelVersion = ve
 void decide(Offer o, bool obsRunning, ur::Mode mode) {
     auto saved = loadSaved();
     auto hasEntry = ur::entryFor(o.manifest, platform()).has_value();
-    switch (ur::planOffer({mode, platform(), running(), o.manifest.version, hasEntry, obsRunning, onMainMenu(), saved})) {
+    auto choice = ur::planOffer({mode, platform(), running(), o.manifest.version, hasEntry, obsRunning, onMainMenu(), saved});
+    // A setup started in this job would die with GD. That can't be fixed later, so link to the download.
+    if (choice != ur::Offer::None && choice != ur::Offer::LinkPanel && platform() == ur::Platform::Windows
+        && update_platform::job() == update_platform::Job::Trapped) {
+        saved.notified = o.manifest.version;
+        store(saved);
+        showLinkPanel(o.manifest.version);
+        return;
+    }
+    switch (choice) {
     case ur::Offer::None: return;
     case ur::Offer::LinkPanel: saved.notified = o.manifest.version; store(saved); showLinkPanel(o.manifest.version); return;
     case ur::Offer::AskPanel: offer = std::move(o); panel = Panel::Ask; panelVersion = offer->manifest.version; refreshPanel(); return;

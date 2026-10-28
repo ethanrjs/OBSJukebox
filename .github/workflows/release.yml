@@ -36,6 +36,8 @@ jobs:
           mkdir release
           cp "dist/windows/OBS-Jukebox-$version-Windows-Setup.exe" "dist/macos/OBS-Jukebox-$version-macOS-arm64.zip" dist/linux/OBS-Jukebox-Linux-x86_64.tar.gz release/
           python3 scripts/make-update-manifest.py --tag "$GITHUB_REF_NAME" --out update.json "release/OBS-Jukebox-$version-Windows-Setup.exe" "release/OBS-Jukebox-$version-macOS-arm64.zip"
+      - name: Check the committed public key matches UpdateKey.hpp
+        run: python3 tools/qa/test_update_manifest.py
       - name: Write the approver's summary
         run: |
           previous=$(git tag --list 'v*.*.*' --sort=-v:refname | grep -vxF "$GITHUB_REF_NAME" | head -n 1 || true)
@@ -48,9 +50,9 @@ jobs:
             echo "### SHA-256 of the release files"
             echo '```'; (cd release && sha256sum -- *); echo '```'
             echo "### .github changes since ${previous:-the first release}"
-            echo '```diff'
+            echo '~~~~~~~~~~~~~~~~'
             if [ -n "$previous" ]; then changes=$(git diff "$previous" "$GITHUB_SHA" -- .github); echo "${changes:-(no changes)}"; else echo "(no earlier release tag)"; fi
-            echo '```'
+            echo '~~~~~~~~~~~~~~~~'
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

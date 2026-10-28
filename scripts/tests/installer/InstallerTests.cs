@@ -333,8 +333,8 @@ static class InstallerTests
             UpdateMode.Run(o,FakeHost([],[(false,false)],()=>throw new NewerVersionInstalledException()));
             Check(ReadResult(result)["status"]!.ToString()=="waiting","a newer mod installed during the wait stops the update without a final result");
             File.Delete(result);
-            Check(UpdateMode.Main(["--update","--result",result,"--bogus"])==1 && ReadResult(result)["status"]!.ToString()=="failed","a parsing error in update mode reaches the result file without a dialog");
-            Check(UpdateMode.Main(["--update","--result",Path.Combine(updates,"missing-folder","r.json"),"--bogus"])==1,"an unwritable result path doesn't throw out of update mode");
+            Check(UpdateMode.Entry(["--update","--result",result,"--bogus"])==1 && ReadResult(result)["status"]!.ToString()=="failed","a parsing error in update mode reaches the result file without a dialog");
+            Check(UpdateMode.Entry(["--update","--result",Path.Combine(updates,"missing-folder","r.json"),"--bogus"])==1,"an unwritable result path doesn't throw out of update mode");
             var parsed=Options.Parse(["--update","--close-apps","--restart","--integrate","--result",result,"--reopen-flag",flag]);
             Check(parsed.Update && parsed.Silent && !parsed.CloseApps && !parsed.Restart && !parsed.CreateScene && parsed.ResultPath==result && parsed.ReopenFlag==flag,"update mode never closes or reopens apps by itself and never edits scenes");
             string state=Path.Combine(updates,"state"),recordedObs=Path.Combine(updates,"OBS Studio");
@@ -345,6 +345,15 @@ static class InstallerTests
             Check(Engine.RecordedOBS(state)==recordedObs,"update mode finds OBS through the last install record");
             File.Delete(Path.Combine(recordedObs,"bin","64bit","obs64.exe"));
             Check(Engine.RecordedOBS(state)==null,"a recorded OBS folder without obs64.exe is ignored");
+            // A second update setup exits without touching the first one's result file.
+            File.Delete(result);
+            using(var held=new ManualResetEventSlim()) using(var release=new ManualResetEventSlim())
+            {
+                var other=new Thread(()=>{ using var running=new Mutex(false,UpdateMode.LockName); running.WaitOne(); held.Set(); release.Wait(); running.ReleaseMutex(); });
+                other.Start(); held.Wait();
+                Check(UpdateMode.Entry(["--update","--result",result,"--state-root",state])==0 && !File.Exists(result),"a second update exits at once");
+                release.Set(); other.Join();
+            }
         }
         finally { Directory.Delete(updates,true); }
         Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");

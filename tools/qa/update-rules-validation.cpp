@@ -50,6 +50,7 @@ static void rulesPart1(const std::filesystem::path& fixtures) {
     check(windowsOnly && windowsOnly->windows && !windowsOnly->macArm64 && !entryFor(*windowsOnly, Platform::MacArm64), "a missing platform has no entry");
     std::string danglingComma = "{\"files\":{\"macos-arm64\":{\"sha256\":\"" + std::string(64, 'a') + "\",\"size\":2},},\"schema\":1,\"version\":\"1.0.0\"}\n";
     check(!parseManifest(danglingComma), "refuses a comma without a second entry");
+    check(!parseManifest("{\"files\":{},\"schema\":1,\"version\":\"1.0.0\"}\n"), "refuses a manifest with no files");
     check(assetName({1, 2, 5}, Platform::Windows) == "OBS-Jukebox-1.2.5-Windows-Setup.exe", "builds the Windows asset name");
     check(assetName({1, 2, 5}, Platform::MacArm64) == "OBS-Jukebox-1.2.5-macOS-arm64.zip", "builds the macOS asset name");
 
@@ -59,6 +60,7 @@ static void rulesPart1(const std::filesystem::path& fixtures) {
     auto mutate = [&](auto change) { auto copy = plain; change(copy); return derToRaw(copy).has_value(); };
     check(!mutate([](auto& d) { d.pop_back(); }), "refuses a truncated signature");
     check(!mutate([](auto& d) { d.push_back(0); }), "refuses trailing bytes");
+    check([&] { auto d = plain; d.push_back(0); d[1] += 1; return derToRaw(d).has_value(); }() == false, "refuses a trailing byte inside the SEQUENCE");
     check(!mutate([](auto& d) { d[1] = 0x81; }), "refuses a long-form length");
     check(!mutate([](auto& d) { d[4] |= 0x80; }), "refuses a negative INTEGER");
     check(!mutate([](auto& d) { d[2] = 0x03; }), "refuses a non-INTEGER");
@@ -68,6 +70,8 @@ static void rulesPart1(const std::filesystem::path& fixtures) {
     check(!derToRaw(tooLong), "refuses a signature over 72 bytes");
     std::vector<uint8_t> wide{0x30, 0x26, 0x02, 0x21}; wide.insert(wide.end(), 33, 0x01); wide.insert(wide.end(), {0x02, 0x01, 0x01});
     check(!derToRaw(wide), "refuses a 33-byte INTEGER without a pad");
+    std::vector<uint8_t> over{0x30, 0x27, 0x02, 0x22}; over.insert(over.end(), 34, 0x01); over.insert(over.end(), {0x02, 0x01, 0x01});
+    check(!derToRaw(over), "refuses an INTEGER over 33 bytes");
 
     auto hex = text(fixtures / "test-public.hex");
     while (!hex.empty() && (hex.back() == '\n' || hex.back() == '\r')) hex.pop_back();
@@ -99,6 +103,7 @@ static void rulesPart2() {
     check(third.message == "disk full", "the plan carries the failure message");
     auto repair = launch({v124, false, v125, Result{v125, Status::Installed, true}, {}});
     check(repair.notice == Notice::Repair && repair.saved.blocked == v125 && repair.stop && repair.deleteStaging && repair.deleteResult, "repair overrides the status and blocks");
+    check(launch({v124, false, v125, Result{v125, Status::Failed, true}, {}}).notice == Notice::Repair && launch({v124, false, v125, Result{v125, Status::Declined, true}, {}}).notice == Notice::Repair, "repair overrides a failed or declined result too");
     auto forged = launch({v124, false, v125, Result{Version{999, 0, 0}, Status::Failed, true}, {}});
     check(forged.notice == Notice::None && !forged.saved.blocked && forged.deleteResult && !forged.stop, "a result for another version is deleted unread");
     auto shutdown = launch({v124, false, v125, Result{v125, Status::Waiting}, {}});

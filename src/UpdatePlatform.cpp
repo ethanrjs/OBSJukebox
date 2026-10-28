@@ -112,7 +112,9 @@ static bool spawn(const char* program, std::vector<std::string> args, pid_t* chi
     posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
-    if (detach) posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSID);
+    if (detach) posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT);
+    // The waiting wrapper must not inherit GD's sockets or logs, including ones without FD_CLOEXEC.
+    else posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
     int error = posix_spawn(child, program, &actions, &attributes, argv.data(), environ);
     posix_spawn_file_actions_destroy(&actions);
     posix_spawnattr_destroy(&attributes);

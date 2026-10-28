@@ -5,18 +5,20 @@ song_root="${0:A:h}"
 song_uninstall=0 song_update=0 song_no_downgrade=0 song_result_file='' song_reopen_flag=''
 # Exit codes the update wrapper reads: 0 installed, 1 failed, 2 busy or apps open, 3 rollback
 # incomplete, 4 a newer mod is installed. 2 and 4 mean nothing was changed.
-song_exit=1 song_success=0 song_repair=0
+song_exit=1 song_success=0 song_repair=0 song_failure=''
 typeset -a song_targets song_previous
 finish() { print -r -- "$1"; if [[ -t 0 ]]; then read 'song_reply?Press Return to close. '; fi; }
-fail() { finish "$1"; exit 1; }
+fail() { song_failure="$1"; exit 1; }
 # Stops before changing anything, with a code the update wrapper acts on.
 stop() { song_exit=$1; finish "$2"; exit "$1"; }
 # An fcntl lock the shell holds until it exits; the kernel releases it even after a crash.
+# Returns 0 on success, 1 when another process holds it, 3 when the support folder can't be used.
 take_lock() {
     local song_dir="$HOME/Library/Application Support/OBS Jukebox"
-    /bin/mkdir -p "$song_dir"
-    : >> "$song_dir/$1"
-    zsystem flock -t 0 "$song_dir/$1" 2>/dev/null
+    /bin/mkdir -p "$song_dir" 2>/dev/null || return 3
+    : >> "$song_dir/$1" 2>/dev/null || return 3
+    zsystem flock -t 0 "$song_dir/$1" 2>/dev/null || return 1
+    return 0
 }
 # True when $1 is a release version above $2 ("v" prefixes allowed). Anything else isn't newer.
 version_newer() {
@@ -40,6 +42,11 @@ finalize() {
                 /usr/bin/ditto "$song_audit/Backups/$song_i" "${song_targets[$song_i]}" || { song_repair=1; print -r -- "Restore manually: $song_audit/Backups/$song_i -> ${song_targets[$song_i]}"; }
             fi
         done
+    fi
+    # The reason comes last, after the restore notes, so the update wrapper and the player see it.
+    if (( ! song_success )) && [[ -n "$song_failure" ]]; then
+        [[ -z "${SONG_REASON_FILE:-}" ]] || print -r -- "$song_failure" > "$SONG_REASON_FILE"
+        finish "$song_failure"
     fi
     if (( song_success )); then exit 0
     elif (( song_repair )); then exit 3
@@ -65,7 +72,11 @@ song_app="${song_app:A}"
 song_obs="${song_obs:A}"
 [[ "$(/usr/bin/uname -s)" == Darwin ]] || fail 'Run this installer on macOS.'
 if (( song_uninstall )); then
-    take_lock install.lock || stop 2 'Another OBS Jukebox setup is running. Let it finish, then try again.'
+    song_lock=0; take_lock install.lock || song_lock=$?
+    if (( song_lock != 0 )); then
+        if (( song_lock == 1 )); then stop 2 'Another OBS Jukebox setup is running. Let it finish, then try again.'; fi
+        fail 'The OBS Jukebox support folder is not writable.'
+    fi
     if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x obs >/dev/null; then stop 2 'Close Geometry Dash and OBS before undoing installation.'; fi
     /usr/bin/perl "$song_root/install-state.pl" undo-latest "$HOME/Library/Application Support/OBS Jukebox/Install Logs"
     song_success=1
@@ -83,6 +94,14 @@ if (( song_update )); then
             print JSON::PP->new->canonical->encode(\%r)' > "$song_result_file.tmp"
         /bin/mv -f "$song_result_file.tmp" "$song_result_file"
     }
+    # The lock comes before anything that writes the result, so a second wrapper can't overwrite it.
+    song_lock=0; take_lock update.lock || song_lock=$?
+    if (( song_lock != 0 )); then
+        if (( song_lock == 1 )); then song_success=1; exit; fi
+        write_result failed 'The OBS Jukebox support folder is not writable.'
+        song_success=1
+        exit
+    fi
     # OBS: the second argument, else the first installed copy Spotlight knows, else the defaults.
     if [[ $# -lt 2 ]]; then
         song_obs=''
@@ -93,8 +112,8 @@ if (( song_update )); then
         done
         [[ -n "$song_obs" ]] || { write_result failed 'OBS Studio was not found.'; song_success=1; exit; }
     fi
-    take_lock update.lock || { song_success=1; exit; }
     song_obs_executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$song_obs/Contents/Info.plist")
+    song_reason=$(/usr/bin/mktemp -t obs-jukebox-reason)
     write_result waiting
     while true; do
         song_gd_running=0 song_obs_running=0
@@ -107,14 +126,19 @@ if (( song_update )); then
         fi
         song_log=$(/usr/bin/mktemp -t obs-jukebox-update)
         song_code=0
-        /bin/zsh "$song_root/Install.command" --no-downgrade "$song_app" "$song_obs" </dev/null >"$song_log" 2>&1 || song_code=$?
+        /usr/bin/env SONG_REASON_FILE="$song_reason" /bin/zsh "$song_root/Install.command" --no-downgrade "$song_app" "$song_obs" </dev/null >"$song_log" 2>&1 || song_code=$?
+        # The child writes its own reason last; the log tail is only a fallback.
+        song_message=$(/bin/cat "$song_reason" 2>/dev/null || true)
+        [[ -n "$song_message" ]] || song_message=$(/usr/bin/tail -n 1 "$song_log")
+        /bin/rm -f "$song_log"
         case $song_code in
             0) write_result installed; if take_reopen_flag; then /usr/bin/open "$song_app" || true; fi ;;
             2) sleep 2; continue ;;
-            3) write_result failed "$(/usr/bin/tail -n 1 "$song_log")" repair ;;
+            3) write_result failed "$song_message" repair ;;
             4) ;;
-            *) write_result failed "$(/usr/bin/tail -n 1 "$song_log")" ;;
+            *) write_result failed "$song_message" ;;
         esac
+        /bin/rm -f "$song_reason"
         song_success=1
         exit
     done
@@ -131,7 +155,11 @@ done
 song_arch=$(/usr/bin/uname -m)
 /usr/bin/lipo "$song_plugin" -verify_arch "$song_arch" >/dev/null 2>&1 || fail "This installer does not include a plugin for $song_arch."
 /usr/bin/lipo "$song_obs/Contents/MacOS/$song_obs_executable" -verify_arch "$song_arch" >/dev/null 2>&1 || fail 'Install the native OBS Studio build for this Mac before continuing.'
-take_lock install.lock || stop 2 'Another OBS Jukebox setup is running. Let it finish, then try again.'
+song_lock=0; take_lock install.lock || song_lock=$?
+if (( song_lock != 0 )); then
+    if (( song_lock == 1 )); then stop 2 'Another OBS Jukebox setup is running. Let it finish, then try again.'; fi
+    fail 'The OBS Jukebox support folder is not writable.'
+fi
 if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x "$song_obs_executable" >/dev/null; then
     stop 2 'Finish any OBS recording, close Geometry Dash and OBS, then click Install again.'
 fi

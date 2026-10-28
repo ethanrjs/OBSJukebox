@@ -10,7 +10,10 @@ qa_payload="$qa_root/package/OBS Jukebox Setup.app/Contents/Resources"
 qa_script="$qa_payload/Install.command"
 cp "$qa_payload/payload/geode/Geode.dylib" "$qa_gd/Contents/Frameworks/Geode.dylib"
 print 'original-fmod' > "$qa_gd/Contents/Frameworks/libfmod.dylib"
-touch "$qa_gd/Contents/MacOS/Geometry Dash"
+# A launchable fake GD: the reopen flag test checks that the wrapper actually opens it.
+printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict>' '<key>CFBundleExecutable</key><string>Geometry Dash</string>' '<key>CFBundleIdentifier</key><string>com.example.geometrydash</string>' '<key>CFBundleName</key><string>Geometry Dash</string>' '<key>CFBundlePackageType</key><string>APPL</string>' '</dict></plist>' > "$qa_gd/Contents/Info.plist"
+printf '#!/bin/sh\necho launched >> "%s"\n' "$qa_root/reopened" > "$qa_gd/Contents/MacOS/Geometry Dash"
+chmod +x "$qa_gd/Contents/MacOS/Geometry Dash"
 qa_mods="$qa_gd/Contents/geode/mods"
 qa_plugin="$qa_home/Library/Application Support/obs-studio/plugins/separate-song.plugin"
 qa_logs="$qa_home/Library/Application Support/OBS Jukebox/Install Logs"
@@ -175,11 +178,13 @@ print 'no-downgrade-exit-4: pass'
 # A command that fails mid-install with its own status 2 must still end as 1, after a full rollback.
 # install-state.pl runs after each copy, so a stand-in that fails makes a deterministic mid-install error.
 cp "$qa_payload/install-state.pl" "$qa_root/install-state.pl.real"
+# The mod must be a different version, so a passing comparison proves the rollback put it back.
+make_mod "$qa_mods/local.separate_song.geode" local.separate_song 0.9.0
 cp "$qa_mods/local.separate_song.geode" "$qa_root/before-failure.geode"
 print -r -- '#!/usr/bin/perl
 exit 2;' > "$qa_payload/install-state.pl"
 qa_code=0; run_install > "$qa_root/raw-two.log" 2>&1 || qa_code=$?
-(( qa_code == 1 )) || { print "A command exiting 2 mid-install gave $qa_code"; exit 1; }
+(( qa_code == 1 )) || { print "A command exiting 2 mid-install gave $qa_code"; cat "$qa_root/raw-two.log"; exit 1; }
 cmp "$qa_mods/local.separate_song.geode" "$qa_root/before-failure.geode"
 print 'raw-status-normalized-exit-1: pass'
 # The same failure, after deleting this run's backups, leaves the rollback unable to finish: exit 3.
@@ -211,9 +216,11 @@ kill $qa_fake_gd; wait $qa_fake_gd 2>/dev/null || true
 wait $qa_wrapper
 [[ "$(qa_status)" == installed ]] || { print 'The wrapper did not install'; cat "$qa_root/update.log"; exit 1; }
 print 'update-waits-then-installs: pass'
+rm -f "$qa_root/reopened"
 : > "$qa_root/reopen"
 run_update > "$qa_root/update-reopen.log" 2>&1
-[[ "$(qa_status)" == installed && ! -e "$qa_root/reopen" ]]
+for qa_try in {1..30}; do [[ -e "$qa_root/reopened" ]] && break; sleep 0.1; done
+[[ "$(qa_status)" == installed && ! -e "$qa_root/reopen" && -e "$qa_root/reopened" ]]
 print 'update-reopen-flag-consumed: pass'
 /bin/zsh -c 'zmodload zsh/system; : >> "$1"; zsystem flock "$1"; sleep 4' qa-holder "$qa_lock_dir/update.lock" & qa_holder=$!
 sleep 1

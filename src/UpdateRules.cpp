@@ -38,6 +38,8 @@ std::optional<Manifest> parseManifest(std::string_view bytes) {
     if (!std::regex_match(bytes.data(), bytes.data() + bytes.size(), m, shape)) return std::nullopt;
     // The comma belongs between two entries, and only there.
     if (m[3].length() != (m[1].matched && m[4].matched ? 1 : 0)) return std::nullopt;
+    // A manifest with no file at all is not a valid release.
+    if (!m[1].matched && !m[4].matched) return std::nullopt;
     Manifest out{*parseVersion(m[6].str()), {}, {}};
     auto entry = [](const std::csub_match& sha, const std::csub_match& size) {
         FileEntry e{*hash(sha.str()), std::stoull(size.str())};
