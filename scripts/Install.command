@@ -243,36 +243,39 @@ copy_item() {
     local song_source="$1" song_destination="$2" song_index=$(( ${#song_targets} + 1 )) song_existed=0
     [[ ! -L "$song_destination" ]] || fail "Refusing to replace a symbolic link: $song_destination"
     if [[ -e "$song_destination" ]]; then
-        /usr/bin/ditto "$song_destination" "$song_audit/Backups/$song_index"
+        /usr/bin/ditto "$song_destination" "$song_audit/Backups/$song_index" || return 1
         song_existed=1
     fi
     song_targets+=("$song_destination")
     song_previous+=("$song_existed")
-    /bin/mkdir -p "${song_destination:h}"
+    /bin/mkdir -p "${song_destination:h}" || return 1
     # Replace complete bundles rather than merging stale files into new payloads.
-    if [[ -e "$song_destination" ]]; then /bin/mv "$song_destination" "$song_audit/Failed/replaced-$song_index"; fi
-    /usr/bin/ditto --noextattr --noqtn "$song_source" "$song_destination"
-    /usr/bin/perl "$song_root/install-state.pl" record "$song_audit" "$song_destination" "$song_audit/Backups/$song_index"
+    if [[ -e "$song_destination" ]]; then /bin/mv "$song_destination" "$song_audit/Failed/replaced-$song_index" || return 1; fi
+    /usr/bin/ditto --noextattr --noqtn "$song_source" "$song_destination" || return 1
+    /usr/bin/perl "$song_root/install-state.pl" record "$song_audit" "$song_destination" "$song_audit/Backups/$song_index" || return 1
     print -r -- "Installed: $song_destination"
     if [[ -f "$song_destination" ]]; then /usr/bin/shasum -a 256 "$song_destination"; fi
+    return 0
 }
+# A command failure inside a function skips the EXIT trap in zsh, so restore here explicitly.
+copy_or_repair() { copy_item "$@" || { trap - EXIT; finalize; }; }
 if (( song_install_geode )); then
-    copy_item "$song_frameworks/libfmod.dylib" "$song_frameworks/restore_fmod.dylib"
-    copy_item "$song_root/payload/geode/Geode.dylib" "$song_frameworks/Geode.dylib"
-    copy_item "$song_root/payload/geode/GeodeBootstrapper.dylib" "$song_frameworks/GeodeBootstrapper.dylib"
-    copy_item "$song_root/payload/geode/resources/geode.loader" "$song_app/Contents/geode/resources/geode.loader"
-    copy_item "$song_root/payload/geode/libfmod.dylib" "$song_frameworks/libfmod.dylib"
+    copy_or_repair "$song_frameworks/libfmod.dylib" "$song_frameworks/restore_fmod.dylib"
+    copy_or_repair "$song_root/payload/geode/Geode.dylib" "$song_frameworks/Geode.dylib"
+    copy_or_repair "$song_root/payload/geode/GeodeBootstrapper.dylib" "$song_frameworks/GeodeBootstrapper.dylib"
+    copy_or_repair "$song_root/payload/geode/resources/geode.loader" "$song_app/Contents/geode/resources/geode.loader"
+    copy_or_repair "$song_root/payload/geode/libfmod.dylib" "$song_frameworks/libfmod.dylib"
     print -r -- "Installed Geode $song_geode_version."
 else
     print -r -- "Keeping your compatible Geode $song_geode_version installation."
 fi
 if [[ "$song_jukebox" == - ]]; then
-    copy_item "$song_root/payload/fleym.nongd.geode" "$song_mods/fleym.nongd.geode"
+    copy_or_repair "$song_root/payload/fleym.nongd.geode" "$song_mods/fleym.nongd.geode"
 else
     print -r -- "Keeping your compatible Jukebox 3.8.0 installation: $song_jukebox"
 fi
-copy_item "$song_root/payload/local.separate_song.geode" "$song_mod_destination"
-copy_item "$song_root/payload/separate-song.plugin" "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
+copy_or_repair "$song_root/payload/local.separate_song.geode" "$song_mod_destination"
+copy_or_repair "$song_root/payload/separate-song.plugin" "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
 /usr/bin/shasum -a 256 "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin/Contents/MacOS/separate-song"
 /usr/bin/touch "$song_audit/complete"
 song_success=1
