@@ -31,22 +31,29 @@ version_newer() {
 # first, so no failure, however early, passes its raw status on.
 finalize() {
     trap - EXIT
-    if (( ! song_success && ${#song_targets} )); then
+    # Take the state once: the trap can be reached twice when finalize runs from inside a function,
+    # and a second restore must not move files again.
+    local -a song_saved_targets song_saved_previous
+    song_saved_targets=("${song_targets[@]}")
+    song_saved_previous=("${song_previous[@]}")
+    local song_message="$song_failure"
+    song_targets=() song_previous=() song_failure=''
+    if (( ! song_success && ${#song_saved_targets} )); then
         print 'Installation failed. Restoring changed files.'
         local song_i
-        for (( song_i=${#song_targets}; song_i>=1; song_i-- )); do
-            if [[ -e "${song_targets[$song_i]}" ]]; then
-                /bin/mv "${song_targets[$song_i]}" "$song_audit/Failed/$song_i" || song_repair=1
+        for (( song_i=${#song_saved_targets}; song_i>=1; song_i-- )); do
+            if [[ -e "${song_saved_targets[$song_i]}" ]]; then
+                /bin/mv "${song_saved_targets[$song_i]}" "$song_audit/Failed/$song_i" || song_repair=1
             fi
-            if [[ "${song_previous[$song_i]}" == 1 ]]; then
-                /usr/bin/ditto "$song_audit/Backups/$song_i" "${song_targets[$song_i]}" || { song_repair=1; print -r -- "Restore manually: $song_audit/Backups/$song_i -> ${song_targets[$song_i]}"; }
+            if [[ "${song_saved_previous[$song_i]}" == 1 ]]; then
+                /usr/bin/ditto "$song_audit/Backups/$song_i" "${song_saved_targets[$song_i]}" || { song_repair=1; print -r -- "Restore manually: $song_audit/Backups/$song_i -> ${song_saved_targets[$song_i]}"; }
             fi
         done
     fi
     # The reason comes last, after the restore notes, so the update wrapper and the player see it.
-    if (( ! song_success )) && [[ -n "$song_failure" ]]; then
-        [[ -z "${SONG_REASON_FILE:-}" ]] || print -r -- "$song_failure" > "$SONG_REASON_FILE" || true
-        finish "$song_failure"
+    if (( ! song_success )) && [[ -n "$song_message" ]]; then
+        [[ -z "${SONG_REASON_FILE:-}" ]] || print -r -- "$song_message" > "$SONG_REASON_FILE" || true
+        finish "$song_message"
     fi
     if (( song_success )); then exit 0
     elif (( song_repair )); then exit 3
