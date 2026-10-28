@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Diagnostics;
 
 namespace SeparateSongSetup;
 
@@ -17,6 +18,25 @@ static class InstallerTests
         using(var writer=new StreamWriter(zip.CreateEntry("mod.json").Open())) writer.Write($$"""{"id":"{{id}}","version":"v{{version}}"}""");
         zip.CreateEntry(binary).Open().Dispose();
     }
+    // A process with the given name, from a copy of ping.exe, for tests that need an app "running".
+    static Process FakeApp(string folder,string name)
+    {
+        string exe=Path.Combine(folder,name+".exe");
+        File.Copy(Path.Combine(Environment.SystemDirectory,"PING.EXE"),exe,true);
+        return Process.Start(new ProcessStartInfo(exe,"-n 120 127.0.0.1"){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true})!;
+    }
+    // A fake update host. Each loop reads one (GD, OBS) state; the last one repeats.
+    static UpdateMode.Host FakeHost(List<string> events,(bool Gd,bool Obs)[] states,Action install,string? installed=null)
+    {
+        int at=-1;
+        return new(
+            name => { if(name=="GeometryDash") at=Math.Min(at+1,states.Length-1); return name=="GeometryDash" ? states[at].Gd : states[at].Obs; },
+            () => events.Add("sleep"),
+            () => { events.Add("install"); install(); },
+            () => events.Add("start-gd"),
+            () => installed);
+    }
+    static JsonNode ReadResult(string path) => JsonNode.Parse(File.ReadAllText(path))!;
     static void Main()
     {
         byte[] original=Encoding.UTF8.GetBytes("""
@@ -171,7 +191,7 @@ static class InstallerTests
                 other.Start(); held.Wait();
                 bool refused=false;
                 try { Engine.Execute(new Options { DryRun=true,StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{}); }
-                catch(IOException ex) when(ex.Message.Contains("Another OBS Jukebox setup")) { refused=true; }
+                catch(SetupBusyException) { refused=true; }
                 release.Set(); other.Join();
                 Check(refused,"setup refuses to run while another setup is running");
             }
@@ -229,6 +249,104 @@ static class InstallerTests
             Check(reported && !File.Exists(added),"a file that can't be written is reported after the rest of the transaction is restored");
         }
         finally { Directory.Delete(rollback,true); }
+        Check(Engine.IsNewer("1.2.10","1.2.9") && Engine.IsNewer("v2.0.0","1.9.9"),"a higher installed release counts as newer");
+        Check(!Engine.IsNewer("1.2.9","1.2.9") && !Engine.IsNewer(null,"1.2.9") && !Engine.IsNewer("1.2.10-beta.1","1.2.9") && !Engine.IsNewer("1.2.3.4","1.2.3") && !Engine.IsNewer("1.2","1.2.9"),"equal, missing, malformed and prerelease versions don't count as newer");
+        string repairRoot=Path.Combine(Path.GetTempPath(),"obs-jukebox-repair-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(repairRoot);
+        try
+        {
+            string target=Path.Combine(repairRoot,"mod.geode");File.WriteAllText(target,"installed");
+            var unrestorable=new InstallRecord { Files=[ new ChangedFile { Destination=target,Backup=Path.Combine(repairRoot,"missing.bak"),OriginalHash="00",InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("installed")),Applied=true } ] };
+            var error=new IOException("write failed");
+            Engine.RollBack(unrestorable,error,_=>{});
+            Check(error.Data["repair"] is true,"a rollback that can't finish marks the error for repair");
+            var clean=new IOException("write failed");
+            Engine.RollBack(new InstallRecord(),clean,_=>{});
+            Check(clean.Data["repair"]==null,"a finished rollback doesn't mark the error");
+            File.WriteAllText(target,"installed");
+            var unlogged=new IOException("write failed");
+            try { Engine.RollBack(unrestorable,unlogged,line=>{ if(line.StartsWith("Rollback incomplete")) throw new IOException("log is full"); }); } catch(IOException) { }
+            Check(unlogged.Data["repair"] is true,"the repair mark survives a log write that fails after it");
+            // A log that fails on every line must not stop a restore that can finish.
+            string restorable=Path.Combine(repairRoot,"restorable.geode"),restorableBackup=Path.Combine(repairRoot,"restorable.bak");
+            File.WriteAllText(restorable,"installed");File.WriteAllText(restorableBackup,"original");
+            var restorableRecord=new InstallRecord { Files=[ new ChangedFile { Destination=restorable,Backup=restorableBackup,OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("original")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("installed")),Applied=true } ] };
+            var silenced=new IOException("write failed");
+            Engine.RollBack(restorableRecord,silenced,Engine.QuietLog(_=>throw new IOException("log is full")));
+            Check(File.ReadAllText(restorable)=="original" && silenced.Data["repair"]==null,"a failing log doesn't stop the restore or mark repair");
+            // Recovery must wait, not give up, when an app opens just before it restores anything.
+            string obsFolder=Path.Combine(repairRoot,"obs"),repairSession=Path.Combine(repairRoot,"state","20260101-000000-abcdef");
+            Directory.CreateDirectory(Path.Combine(obsFolder,"bin","64bit"));Directory.CreateDirectory(repairSession);
+            string plugin=Path.Combine(obsFolder,"plugin.dll");File.WriteAllText(plugin,"half-installed");
+            string manifest=Path.Combine(repairSession,"manifest.json");
+            File.WriteAllText(manifest,System.Text.Json.JsonSerializer.Serialize(new InstallRecord { GD=Path.Combine(repairRoot,"gd"),OBS=obsFolder,Files=[
+                new ChangedFile { Destination=plugin,InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("half-installed")),Applied=true }] }));
+            using var fakeObs=FakeApp(repairRoot,"obs64");
+            try
+            {
+                bool waited=false;
+                try { Engine.RecoverInterrupted(new Options { Update=true,StateRoot=Path.Combine(repairRoot,"state"),GD=Path.Combine(repairRoot,"gd"),OBS=obsFolder },_=>{},[]); }
+                catch(AppRunningException) { waited=true; }
+                Check(waited && File.ReadAllText(manifest).Contains("\"installing\"") && File.ReadAllText(plugin)=="half-installed","recovery leaves a session for later when an app is open in update mode");
+            }
+            finally { fakeObs.Kill(); fakeObs.WaitForExit(); }
+            // A newer mod installed by hand: the update stops before recovery touches anything.
+            string newerGd=Path.Combine(repairRoot,"gd-newer");
+            Directory.CreateDirectory(Path.Combine(newerGd,"geode","mods"));
+            WriteMod(Path.Combine(newerGd,"geode","mods","local.separate_song.geode"),"local.separate_song","999.0.0","local.separate_song.dll");
+            bool stopped=false;
+            try { Engine.Execute(new Options { Update=true,StateRoot=Path.Combine(repairRoot,"state"),GD=newerGd,OBS=obsFolder },_=>{}); }
+            catch(NewerVersionInstalledException) { stopped=true; }
+            Check(stopped && File.ReadAllText(manifest).Contains("\"installing\"") && File.ReadAllText(plugin)=="half-installed","a newer installed mod stops the update before recovery runs");
+        }
+        finally { Directory.Delete(repairRoot,true); }
+        string updates=Path.Combine(Path.GetTempPath(),"obs-jukebox-update-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(updates);
+        try
+        {
+            string result=Path.Combine(updates,"result.json"),flag=Path.Combine(updates,"reopen");
+            var o=new Options { Update=true,ResultPath=result,ReopenFlag=flag };
+            var events=new List<string>();
+            Check(UpdateMode.Run(o,FakeHost(events,[(true,false),(false,true),(false,false)],()=>{}))==0 && events.SequenceEqual(["sleep","sleep","install"]) && ReadResult(result)["status"]!.ToString()=="installed","an update waits for GD and OBS, then installs");
+            Check(!events.Contains("start-gd"),"without the reopen flag, GD stays closed");
+            File.WriteAllText(flag,"");events.Clear();
+            UpdateMode.Run(o,FakeHost(events,[(false,false)],()=>{}));
+            Check(events.SequenceEqual(["install","start-gd"]) && !File.Exists(flag),"the reopen flag starts GD after the install, once");
+            File.WriteAllText(flag,"");events.Clear();
+            UpdateMode.Run(o,FakeHost(events,[(false,true),(false,true),(false,false)],()=>{}));
+            Check(events.SequenceEqual(["start-gd","sleep","sleep","install"]),"OBS still open after GD exits: GD comes back at once and the later install leaves it closed");
+            events.Clear();int tries=0;
+            UpdateMode.Run(o,FakeHost(events,[(false,false)],()=>{ if(++tries==1) throw new AppRunningException("GD opened"); }));
+            Check(events.SequenceEqual(["install","sleep","install"]) && ReadResult(result)["status"]!.ToString()=="installed","an app opening at the last moment sends the update back to waiting");
+            tries=0;events.Clear();
+            UpdateMode.Run(o,FakeHost(events,[(false,false)],()=>{ if(++tries==1) throw new SetupBusyException("busy"); }));
+            Check(events.Count(e=>e=="install")==2,"a setup opened by hand makes the update wait, not fail");
+            UpdateMode.Run(o,FakeHost([],[(false,false)],()=>throw new IOException("Plugin copy",new System.ComponentModel.Win32Exception(1223))));
+            Check(ReadResult(result)["status"]!.ToString()=="declined" && ReadResult(result)["repair"]==null,"a cancelled UAC prompt gives declined");
+            var unfinished=new IOException("copy failed",new System.ComponentModel.Win32Exception(1223));unfinished.Data["repair"]=true;
+            UpdateMode.Run(o,FakeHost([],[(false,false)],()=>throw unfinished));
+            Check(ReadResult(result)["status"]!.ToString()=="failed" && ReadResult(result)["repair"]!.GetValue<bool>(),"an unfinished rollback gives repair, even after a cancelled UAC prompt");
+            UpdateMode.Run(o,FakeHost([],[(false,false)],()=>throw new IOException("disk full")));
+            Check(ReadResult(result)["status"]!.ToString()=="failed" && ReadResult(result)["message"]!.ToString()=="disk full","any other error gives failed with its message");
+            File.Delete(result);
+            Check(UpdateMode.Run(o,FakeHost([],[(false,false)],()=>{},installed:"999.0.0"))==0 && !File.Exists(result),"a newer installed mod stops the update before it writes anything");
+            UpdateMode.Run(o,FakeHost([],[(false,false)],()=>throw new NewerVersionInstalledException()));
+            Check(ReadResult(result)["status"]!.ToString()=="waiting","a newer mod installed during the wait stops the update without a final result");
+            File.Delete(result);
+            Check(UpdateMode.Main(["--update","--result",result,"--bogus"])==1 && ReadResult(result)["status"]!.ToString()=="failed","a parsing error in update mode reaches the result file without a dialog");
+            Check(UpdateMode.Main(["--update","--result",Path.Combine(updates,"missing-folder","r.json"),"--bogus"])==1,"an unwritable result path doesn't throw out of update mode");
+            var parsed=Options.Parse(["--update","--close-apps","--restart","--integrate","--result",result,"--reopen-flag",flag]);
+            Check(parsed.Update && parsed.Silent && !parsed.CloseApps && !parsed.Restart && !parsed.CreateScene && parsed.ResultPath==result && parsed.ReopenFlag==flag,"update mode never closes or reopens apps by itself and never edits scenes");
+            string state=Path.Combine(updates,"state"),recordedObs=Path.Combine(updates,"OBS Studio");
+            Directory.CreateDirectory(Path.Combine(recordedObs,"bin","64bit"));File.WriteAllText(Path.Combine(recordedObs,"bin","64bit","obs64.exe"),"");
+            Directory.CreateDirectory(state);string record=Path.Combine(state,"manifest.json");
+            File.WriteAllText(record,$$"""{"Product":"OBS Jukebox 1.2.3","OBS":{{System.Text.Json.JsonSerializer.Serialize(recordedObs)}},"Status":"installed","Files":[]}""");
+            File.WriteAllText(Path.Combine(state,"latest-manifest.txt"),record);
+            Check(Engine.RecordedOBS(state)==recordedObs,"update mode finds OBS through the last install record");
+            File.Delete(Path.Combine(recordedObs,"bin","64bit","obs64.exe"));
+            Check(Engine.RecordedOBS(state)==null,"a recorded OBS folder without obs64.exe is ignored");
+        }
+        finally { Directory.Delete(updates,true); }
         Check(!new Options().CreateScene && Options.Parse(["--integrate"]).CreateScene,"scene edits require explicit opt-in");
         Check(Engine.ObsSetupMessage(new Options{CreateScene=true,ScenesFound=true}).StartsWith("OBS: GD Sounds is in your existing scenes.") &&
               Engine.ObsSetupMessage(new Options{CreateScene=true}).StartsWith("OBS: add Sources > GD Sounds once in OBS.") &&
