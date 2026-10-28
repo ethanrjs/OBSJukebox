@@ -29,7 +29,7 @@ Toggle between Game/OBS volume control in pause menu.
 
 Update the mod and the OBS plugin together. This version of each only works with the other, and OBS's source properties say which one to update.
 
-## Speedhack and pitch shifting (To be released in 1.2.5)
+## Speedhack and pitch shifting (To be released in 1.2.4)
 
 When another mod pitch shifts the game's audio with FMOD's pitch shifter, OBS applies the same shifters in the same order: on each music channel, on the music group and on sound effects. A replacement OBS song follows them too. To keep it at its normal pitch, turn off **Pitch shift a different OBS song** in the mod's settings.
 
