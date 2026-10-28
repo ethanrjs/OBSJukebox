@@ -1,0 +1,114 @@
+name: Release
+on:
+  push:
+    tags: ['v*.*.*']
+permissions: {}
+jobs:
+  build:
+    # A called workflow can't raise the caller's permissions, so grant read here.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/native.yml
+  manifest:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Windows-installer
+          path: dist/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: macOS-installer
+          path: dist/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Linux-installer
+          path: dist/linux
+      - name: Collect the release files and write update.json
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir release
+          cp "dist/windows/OBS-Jukebox-$version-Windows-Setup.exe" "dist/macos/OBS-Jukebox-$version-macOS-arm64.zip" dist/linux/OBS-Jukebox-Linux-x86_64.tar.gz release/
+          python3 scripts/make-update-manifest.py --tag "$GITHUB_REF_NAME" --out update.json "release/OBS-Jukebox-$version-Windows-Setup.exe" "release/OBS-Jukebox-$version-macOS-arm64.zip"
+      - name: Write the approver's summary
+        run: |
+          previous=$(git tag --list 'v*.*.*' --sort=-v:refname | grep -vxF "$GITHUB_REF_NAME" | head -n 1 || true)
+          {
+            echo "## Release $GITHUB_REF_NAME"
+            echo "Commit: \`$GITHUB_SHA\`"
+            if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then echo "On main: yes"; else echo "On main: **NO, do not approve**"; fi
+            echo "### update.json"
+            echo '```json'; cat update.json; echo '```'
+            echo "### SHA-256 of the release files"
+            echo '```'; (cd release && sha256sum -- *); echo '```'
+            echo "### .github changes since ${previous:-the first release}"
+            echo '```diff'
+            if [ -n "$previous" ]; then changes=$(git diff "$previous" "$GITHUB_SHA" -- .github); echo "${changes:-(no changes)}"; else echo "(no earlier release tag)"; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: update-json
+          path: update.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-files
+          path: release/
+          if-no-files-found: error
+  sign:
+    needs: manifest
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: update-json
+      - name: Sign update.json
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
+          openssl dgst -sha256 -sign "$RUNNER_TEMP/key.pem" -out update.json.sig update.json
+      - name: Remove the key file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/key.pem"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: update-signature
+          path: update.json.sig
+          if-no-files-found: error
+  draft:
+    needs: [manifest, sign]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-files
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: update-json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: update-signature
+      - name: Verify the signature against the committed key
+        run: openssl dgst -sha256 -verify scripts/update-signing-public.pem -signature update.json.sig update.json
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="release-notes/$GITHUB_REF_NAME.txt"
+          test -f "$notes" || { echo "Missing $notes"; exit 1; }
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "OBS Jukebox $GITHUB_REF_NAME" --notes-file "$notes" release/* update.json update.json.sig
