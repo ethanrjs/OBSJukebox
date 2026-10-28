@@ -1,6 +1,6 @@
 #pragma once
-// Signature and hash checks through the operating system's own crypto (spec 5.2): BCrypt on
-// Windows, Security and CommonCrypto on macOS.
+// Signature and hash checks through the operating system's own crypto: BCrypt on Windows,
+// Security and CommonCrypto on macOS.
 #include <array>
 #include <cstdint>
 #include <filesystem>

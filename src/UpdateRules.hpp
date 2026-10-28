@@ -1,6 +1,5 @@
 #pragma once
-// Updater decisions with no Geode or OS calls, so QA tests can build them. Spec:
-// artifacts/specs/2026-10-27-auto-updater-design.md.
+// Updater decisions with no Geode or OS calls, so QA tests can build them.
 #include <array>
 #include <compare>
 #include <cstdint>
@@ -56,7 +55,7 @@ struct Result {
     bool repair = false;
     std::string message;
 };
-// The mod's saved values (spec 6.3, 4.4).
+// The mod's saved values.
 struct Saved {
     std::optional<Version> blocked;          // update-blocked-version
     std::optional<Version> attemptsVersion;  // update-attempts-version
@@ -81,7 +80,7 @@ struct LaunchPlan {
     Saved saved;
     std::string message; // a failed result's message, for noticeText
 };
-// Spec 6.3 steps 1 and 2.
+// What a launch does with a result and a staged update.
 LaunchPlan planLaunch(const LaunchInput& in);
 
 enum class Offer { None, LinkPanel, AskPanel, StartAfterClose, StartNow };
@@ -92,6 +91,6 @@ struct OfferInput {
     bool hasEntry = false, obsRunning = false, onMainMenu = false;
     Saved saved;
 };
-// Spec 6.3 step 4 and 4.1. A LinkPanel result means the caller saves latest as notified.
+// A LinkPanel result means the caller saves latest as notified.
 Offer planOffer(const OfferInput& in);
 } // namespace update_rules

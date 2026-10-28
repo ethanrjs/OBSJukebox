@@ -66,7 +66,7 @@ std::optional<Offer> offer;
 std::vector<std::string> pendingNotices;
 bool launched = false;
 // Counts main menus. GD builds a new MenuLayer each time the player returns to it, so a changed count
-// means the player left the menu at least once since an update attempt started (spec 4.2).
+// means the player left the menu at least once since an update attempt started.
 unsigned menuGeneration = 0;
 
 ur::Version running() {
@@ -77,7 +77,7 @@ bool onMainMenu() {
     auto scene = CCDirector::get()->getRunningScene();
     return scene && scene->getChildByType<MenuLayer>(0);
 }
-// Notifications appear only on the main menu (spec 4.3); others wait for the next visit.
+// Notifications appear only on the main menu; others wait for the next visit.
 void notify(std::string text) {
     if (onMainMenu()) Notification::create(text, NotificationIcon::Info, 5.f)->show();
     else pendingNotices.push_back(std::move(text));
@@ -99,7 +99,7 @@ void store(const ur::Saved& saved) {
 bool authentic(std::string_view bytes, std::span<const uint8_t> signature) {
     return update_crypto::verifyP256(publicKey(), {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()}, signature);
 }
-// The staged manifest, only if its signature still holds (spec 6.2, "authentic").
+// The staged manifest, only if its signature still holds.
 std::optional<Offer> readStaged() {
     auto read = file::readString(paths.staging / "update.json");
     auto readSignature = file::readBinary(paths.staging / "update.json.sig");
@@ -180,7 +180,7 @@ struct Launch {
     std::vector<std::string> args;
     update_platform::Job job = update_platform::Job::Free;
 };
-// Re-checks what is about to run (spec 6.4) and prepares its command. Background thread: it hashes
+// Re-checks what is about to run and prepares its command. Background thread: it hashes
 // the whole setup and, on macOS, unzips it. gdFolder comes from the main thread.
 std::optional<Launch> prepareLaunch(ur::Version version, const std::filesystem::path& gdFolder) {
     auto staged = readStaged();
@@ -213,7 +213,7 @@ std::optional<Launch> prepareLaunch(ur::Version version, const std::filesystem::
 void startUpdate(bool restart, bool viaNotice) {
     if (!offer) return;
     auto o = *offer;
-    // Only the panel's "Update now" shows progress; the automatic mode shows no panel (spec 4.1).
+    // Only the panel's "Update now" shows progress; the automatic mode shows no panel.
     bool showProgress = restart && !viaNotice;
     if (showProgress) { panel = Panel::Progress; panelVersion = o.manifest.version; progressText = "Downloading..."; refreshPanel(); }
     unsigned startedOn = menuGeneration;
@@ -245,7 +245,7 @@ void startUpdate(bool restart, bool viaNotice) {
                 notify("Update failed: the download or the setup didn't start.");
                 return;
             }
-            // Wait for the setup to say it is ready before reporting anything (spec 6.5, waiting).
+            // Wait for the setup to say it is ready before reporting anything.
             std::thread([version, restart, viaNotice, startedOn] {
                 bool ready = false;
                 for (int i = 0; i < 40 && !ready; ++i) {
@@ -279,7 +279,7 @@ void startUpdate(bool restart, bool viaNotice) {
     }).detach();
 }
 
-// The last check before leaving: only from the main menu, and only then the reopen flag (spec 6.4).
+// Leaves the game so the setup can install: only from the main menu, and only once the reopen flag is written.
 void exitForUpdate(ur::Version version, unsigned startedOn) {
     panel = Panel::None;
     // Leaving the menu at any point since the click, even after coming back, turns this into after-close.
@@ -322,7 +322,7 @@ void decide(Offer o, bool obsRunning, ur::Mode mode) {
     }
 }
 
-// Background thread: fetch and verify the latest manifest (spec 6.3 step 3).
+// Background thread: fetch and verify the latest manifest.
 void check(ur::Mode mode) {
     auto get = [](const std::string& url, size_t cap) -> std::optional<ByteVector> {
         auto response = web::WebRequest().userAgent(userAgent()).timeout(std::chrono::seconds(15)).getSync(url);
@@ -346,7 +346,7 @@ void firstLaunch() {
     auto mode = ur::parseMode(Mod::get()->getSettingValue<std::string>("update-mode"));
     if (mode == ur::Mode::Off) return;
     paths = {Mod::get()->getSaveDir() / "update", Mod::get()->getSaveDir() / "update-result.json", Mod::get()->getSaveDir() / "update-reopen-gd"};
-    // A waiting setup owns staging and the result file; touch nothing (spec 6.3 step 1).
+    // A waiting setup owns staging and the result file; touch nothing.
     if (update_platform::setupWaiting()) return;
     if (update_platform::pathHasLink(paths.staging)) { log::warn("The update folder is a link; skipping updates this launch"); return; }
     std::error_code error;
@@ -368,7 +368,7 @@ CCMenuItemSpriteExtra* button(const char* text, std::function<void()> action) {
     sprite->setScale(.5f);
     return CCMenuItemExt::createSpriteExtra(sprite, [action](CCMenuItemSpriteExtra*) { action(); });
 }
-// A small panel in the top-right corner. It takes no input outside its own buttons (spec 4.2).
+// A small panel in the top-right corner. It takes no input outside its own buttons.
 void drawPanel(MenuLayer* menu) {
     if (auto old = menu->getChildByID("update-panel"_spr)) old->removeFromParent();
     if (panel == Panel::None) return;

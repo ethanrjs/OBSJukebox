@@ -7,13 +7,13 @@
 namespace update_platform {
 // Any process named obs64.exe (Windows) or OBS (macOS), from any path.
 bool obsRunning();
-// An update setup holds its lock (spec 6.3 step 1).
+// An update setup holds its lock.
 bool setupWaiting();
 // GD runs under Wine or Proton.
 bool underWine();
 // Some existing part of the path is a symlink, junction or other reparse point.
 bool pathHasLink(const std::filesystem::path& path);
-// Whether a setup started now would survive GD's exit (spec 6.4).
+// Whether a setup started now would survive GD's exit.
 enum class Job { Free, Breakaway, Trapped };
 Job job();
 // Starts program with args, no shell. On macOS program is /bin/zsh and args[0] the script.
