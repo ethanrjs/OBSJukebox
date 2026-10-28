@@ -926,7 +926,7 @@ static class UpdateMode
             if(gd || obs)
             {
                 // "Update now" closed GD but OBS is open: give GD back now, install later.
-                if(!gd && TakeReopenFlag(o)) StartGD(host);
+                if(!gd && TakeReopenFlag(o)) StartGD(o,host);
                 host.Sleep(); continue;
             }
             try { host.Install(); }
@@ -940,15 +940,15 @@ static class UpdateMode
                 return 1;
             }
             Write(o,"installed");
-            if(TakeReopenFlag(o)) StartGD(host);
+            if(TakeReopenFlag(o)) StartGD(o,host);
             return 0;
         }
     }
     // Reopening can fail (the game moved, the shell refused); that must not turn a finished install into a failure.
-    static void StartGD(Host host)
+    static void StartGD(Options o,Host host)
     {
         try { host.StartGD(); }
-        catch(Exception ex) when(ex is IOException or System.ComponentModel.Win32Exception) { }
+        catch(Exception ex) when(ex is IOException or System.ComponentModel.Win32Exception) { Log(o,"Could not reopen Geometry Dash: "+ex.Message); }
     }
     static bool TakeReopenFlag(Options o)
     {

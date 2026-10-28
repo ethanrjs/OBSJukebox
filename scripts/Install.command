@@ -45,7 +45,7 @@ finalize() {
     fi
     # The reason comes last, after the restore notes, so the update wrapper and the player see it.
     if (( ! song_success )) && [[ -n "$song_failure" ]]; then
-        [[ -z "${SONG_REASON_FILE:-}" ]] || print -r -- "$song_failure" > "$SONG_REASON_FILE"
+        [[ -z "${SONG_REASON_FILE:-}" ]] || print -r -- "$song_failure" > "$SONG_REASON_FILE" || true
         finish "$song_failure"
     fi
     if (( song_success )); then exit 0

@@ -303,9 +303,11 @@ void decide(Offer o, bool obsRunning, ur::Mode mode) {
     auto saved = loadSaved();
     auto hasEntry = ur::entryFor(o.manifest, platform()).has_value();
     auto choice = ur::planOffer({mode, platform(), running(), o.manifest.version, hasEntry, obsRunning, onMainMenu(), saved});
-    // A setup started in this job would die with GD. That can't be fixed later, so link to the download.
+    // A setup started in this job would die with GD. That can't be fixed later, so link to the download,
+    // once per version; after that there is nothing more this launch can do.
     if (choice != ur::Offer::None && choice != ur::Offer::LinkPanel && platform() == ur::Platform::Windows
         && update_platform::job() == update_platform::Job::Trapped) {
+        if (saved.notified == o.manifest.version) return;
         saved.notified = o.manifest.version;
         store(saved);
         showLinkPanel(o.manifest.version);
