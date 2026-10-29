@@ -47,7 +47,7 @@ if [[ ! -f "$song_frameworks/Geode.dylib" ]]; then
 else
     song_geode_library="$song_frameworks/Geode.dylib"
 fi
-song_geode_version=$(/usr/bin/perl "$song_root/check-geode-version.pl" "$song_geode_library") || fail 'Geode compatibility could not be verified. Update or repair Geode with the official installer from https://geode-sdk.org (Geode >=5.10.1 and <6.0.0), then try again. No installation files have been changed.'
+song_geode_version=$(/usr/bin/perl "$song_root/check-geode-version.pl" "$song_geode_library") || fail 'Geode compatibility could not be verified. Update or repair Geode with the official installer from https://geode-sdk.org (Geode >=5.11.2 and <6.0.0), then try again. No installation files have been changed.'
 song_mods="$song_app/Contents/geode/mods"
 song_packages=$(/usr/bin/perl -MJSON::PP - "$song_mods" <<'PERL'
 use strict;

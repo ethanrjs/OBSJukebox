@@ -28,7 +28,7 @@ try {
         throw "The mod package does not match mod.json ($($metadata.id) $releaseVersion). Rebuild the mod before packaging."
     }
 } finally { $modArchive.Dispose() }
-if (!(Test-Path -LiteralPath (Join-Path $GeodeRoot 'geode/resources/geode.loader'))) { throw 'Complete official Geode 5.10.1 resources are required.' }
+if (!(Test-Path -LiteralPath (Join-Path $GeodeRoot 'geode/resources/geode.loader'))) { throw 'Complete official Geode 5.11.2 resources are required.' }
 $staging = Join-Path $projectRoot ('artifacts/windows/package-' + [Guid]::NewGuid().ToString('N'))
 $installerRoot = Join-Path $projectRoot 'installer/windows'
 New-Item -ItemType Directory -Path $staging, $OutputDirectory -Force | Out-Null

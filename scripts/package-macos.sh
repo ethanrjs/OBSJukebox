@@ -5,7 +5,7 @@ cd "$song_root"
 : ${MAC_ARCH:=$(uname -m)}
 : ${DEPENDENCY_ROOT:="$song_root/tools/pinned"}
 python3 scripts/fetch-dependencies.py mac --destination "$DEPENDENCY_ROOT"
-: ${GEODE_PAYLOAD:="$DEPENDENCY_ROOT/geode-macos-5.10.1"}
+: ${GEODE_PAYLOAD:="$DEPENDENCY_ROOT/geode-macos-5.11.2"}
 : ${JUKEBOX_PACKAGE:="$DEPENDENCY_ROOT/fleym.nongd.geode"}
 : ${MOD_PACKAGE:="$song_root/build-mac/local.separate_song.geode"}
 song_version=$(/usr/bin/plutil -extract version raw -o - mod.json)

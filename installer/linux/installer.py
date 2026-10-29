@@ -87,7 +87,7 @@ class SetupWindow:
         selection = ttk.Combobox(obs_row, textvariable=self.obs, values=("Native OBS Studio", "Flatpak OBS Studio"), state="readonly")
         selection.grid(row=1, column=0, sticky="ew", pady=(3, 0))
         self.inputs.append(selection)
-        ttk.Label(outer, text="Jukebox 3.8.0 is required. Install it through Geode in GD.\nGeode >=5.10.1 and <6.0.0 must already be installed for Proton.", wraplength=680).grid(row=4, column=0, sticky="w", pady=(12, 8))
+        ttk.Label(outer, text="Jukebox 3.8.0 is required. Install it through Geode in GD.\nGeode >=5.11.2 and <6.0.0 must already be installed for Proton.", wraplength=680).grid(row=4, column=0, sticky="w", pady=(12, 8))
         choices = ttk.Frame(outer)
         choices.grid(row=5, column=0, sticky="ew")
         reopen = ttk.Checkbutton(choices, text="Reopen GD and OBS afterward", variable=self.reopen)
