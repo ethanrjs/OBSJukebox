@@ -12,7 +12,8 @@ This mod works only together with the OBS Jukebox plugin for OBS Studio, which a
 
 ## Using it
 
-- In a level's Jukebox list, tick **Game** for the song you hear and **OBS** for the song your stream hears. Right-clicking a row also picks it for OBS.- In the pause menu, the **Game / OBS** button switches the volume sliders between the game and OBS.
+- In a level's Jukebox list, tick **Game** for the song you hear and **OBS** for the song your stream hears. Right-clicking a row also picks it for OBS.
+- In the pause menu, the **Game / OBS** button switches the volume sliders between the game and OBS.
 - GD Sounds shows what it is playing, or what it is waiting for, in its properties in OBS.
 
 ## Updates

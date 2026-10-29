@@ -63,7 +63,7 @@ struct Saved {
     std::optional<Version> notified;         // last-notified-version
 };
 enum class Notice { None, Installed, Declined, Failed, ThirdFailure, Repair };
-std::string noticeText(Notice notice, Version version, std::string_view message);
+std::string noticeText(Notice notice, Version version);
 
 struct LaunchInput {
     Version running;
@@ -78,7 +78,7 @@ struct LaunchPlan {
     std::optional<Version> linkPanel;
     bool deleteStaging = false, deleteResult = false, deleteReopenFlag = false;
     Saved saved;
-    std::string message; // a failed result's message, for noticeText
+    std::string message; // a failed result's message, for the log
 };
 // What a launch does with a result and a staged update.
 LaunchPlan planLaunch(const LaunchInput& in);

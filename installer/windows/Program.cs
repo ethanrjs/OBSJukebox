@@ -920,6 +920,7 @@ static class UpdateMode
     {
         if(Engine.IsNewer(host.InstalledVersion(),Program.ReleaseVersion)) return 0;
         Write(o,"waiting");
+        Log(o,"Waiting for Geometry Dash and OBS to close");
         while(true)
         {
             bool gd=host.Running("GeometryDash"),obs=host.Running("obs64");
@@ -941,6 +942,7 @@ static class UpdateMode
             }
             Write(o,"installed");
             if(TakeReopenFlag(o)) StartGD(o,host);
+            else Log(o,"No reopen flag, so Geometry Dash stays closed");
             return 0;
         }
     }

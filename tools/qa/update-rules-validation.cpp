@@ -130,8 +130,8 @@ static void rulesPart2() {
     check(offer([&](auto& in) { in.saved.blocked = v125; in.running = v125; in.latest = v126; }) == Offer::LinkPanel, "while blocked, only the link panel appears");
     check(offer([&](auto& in) { in.saved.blocked = v125; in.running = v124; in.latest = v125; }) == Offer::None, "the blocked version itself isn't offered");
 
-    check(noticeText(Notice::Installed, v125, "") == "OBS Jukebox updated to 1.2.5.", "installed text");
-    check(noticeText(Notice::Failed, v125, "disk full.") == "Update failed: disk full. It will be offered again.", "failed text drops a doubled period");
+    check(noticeText(Notice::Installed, v125) == "OBS Jukebox updated to 1.2.5.", "installed text");
+    check(noticeText(Notice::Failed, v125) == "Update failed. It'll be offered again.", "failed text leaves the reason to the log");
 }
 static void cryptoChecks(const std::filesystem::path& fixtures) {
     auto hex = text(fixtures / "test-public.hex");

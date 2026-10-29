@@ -116,16 +116,14 @@ std::optional<Status> parseStatus(std::string_view text) {
     if (text == "failed") return Status::Failed;
     return std::nullopt;
 }
-std::string noticeText(Notice notice, Version version, std::string_view message) {
-    while (!message.empty() && message.back() == '.') message.remove_suffix(1);
+// Kept to one short line: a toast doesn't wrap, and a longer one runs off the screen.
+std::string noticeText(Notice notice, Version version) {
     switch (notice) {
     case Notice::Installed: return "OBS Jukebox updated to " + toString(version) + ".";
-    case Notice::Declined: return "The OBS Jukebox update was cancelled. It will be offered again.";
-    case Notice::Failed: return "Update failed: " + std::string(message) + ". It will be offered again.";
-    case Notice::ThirdFailure: return "Update failed again. Use the download page to update.";
-    case Notice::Repair:
-        return "Update failed and couldn't undo every change. Reinstall from the download page. "
-               "Automatic updates resume after you install the next release from there too.";
+    case Notice::Declined: return "OBS Jukebox update cancelled.";
+    case Notice::Failed: return "Update failed. It'll be offered again.";
+    case Notice::ThirdFailure: return "Update failed again. Use the download page.";
+    case Notice::Repair: return "Update failed. Reinstall from the download page.";
     case Notice::None: break;
     }
     return {};

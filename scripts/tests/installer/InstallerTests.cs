@@ -305,7 +305,8 @@ static class InstallerTests
         try
         {
             string result=Path.Combine(updates,"result.json"),flag=Path.Combine(updates,"reopen");
-            var o=new Options { Update=true,ResultPath=result,ReopenFlag=flag };
+            // StateRoot too, so update.log lines go here and not into the real one.
+            var o=new Options { Update=true,ResultPath=result,ReopenFlag=flag,StateRoot=Path.Combine(updates,"state") };
             var events=new List<string>();
             Check(UpdateMode.Run(o,FakeHost(events,[(true,false),(false,true),(false,false)],()=>{}))==0 && events.SequenceEqual(["sleep","sleep","install"]) && ReadResult(result)["status"]!.ToString()=="installed","an update waits for GD and OBS, then installs");
             Check(!events.Contains("start-gd"),"without the reopen flag, GD stays closed");

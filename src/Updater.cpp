@@ -77,9 +77,14 @@ bool onMainMenu() {
     auto scene = CCDirector::get()->getRunningScene();
     return scene && scene->getChildByType<MenuLayer>(0);
 }
-// Notifications appear only on the main menu; others wait for the next visit.
+bool inLevel() {
+    auto gm = GameManager::get();
+    return gm->m_playLayer || gm->m_levelEditorLayer;
+}
+void showToast(const std::string& text) { Notification::create(text, NotificationIcon::Info, 3.f)->show(); }
+// Nothing pops up over a level or the editor; those notifications wait for the next main menu.
 void notify(std::string text) {
-    if (onMainMenu()) Notification::create(text, NotificationIcon::Info, 5.f)->show();
+    if (!inLevel()) showToast(text);
     else pendingNotices.push_back(std::move(text));
 }
 
@@ -132,7 +137,7 @@ bool matches(const std::filesystem::path& file, const ur::FileEntry& entry) {
 std::string userAgent() { return "OBSJukebox/" + ur::toString(running()); }
 
 void refreshPanel();
-void exitForUpdate(ur::Version version, unsigned startedOn);
+void exitForUpdate(bool reopen, unsigned startedOn);
 
 // Downloads (or reuses) the setup for offer and saves its manifest next to it. Background thread.
 std::optional<std::filesystem::path> stage(const Offer& o, std::function<void(float)> progress) {
@@ -149,14 +154,16 @@ std::optional<std::filesystem::path> stage(const Offer& o, std::function<void(fl
         // Anything else in staging belongs to another version.
         // Collect first: removing entries while iterating is unspecified. This also deletes a setup that failed matches().
         std::vector<std::filesystem::path> old;
-        for (auto& item : std::filesystem::directory_iterator(paths.staging, error)) old.push_back(item.path());
+        // increment(error), not ++: a throw on this thread would end GD.
+        for (std::filesystem::directory_iterator it(paths.staging, error), end; !error && it != end; it.increment(error)) old.push_back(it->path());
         for (auto& item : old) std::filesystem::remove_all(item, error);
         // rename() on Windows won't replace it. The error_code overload, since a throw here would end GD.
         bool remains = std::filesystem::exists(setup, error);
         if (error || remains) return std::nullopt;
         auto url = fmt::format("{}/download/v{}/{}", baseUrl(), ur::toString(o.manifest.version), name);
         auto head = web::WebRequest().userAgent(userAgent()).timeout(std::chrono::seconds(15)).transferBody(false).getSync(url);
-        if (auto length = head.header("Content-Length")) {
+        // An error page has its own length, so only a successful answer's length counts.
+        if (auto length = head.ok() ? head.header("Content-Length") : std::nullopt) {
             uint64_t size = 0;
             std::string_view text = *length;
             if (std::from_chars(text.data(), text.data() + text.size(), size).ec != std::errc{} || size != entry.size) return std::nullopt;
@@ -239,41 +246,47 @@ void startUpdate(bool restart, bool viaNotice) {
                 panel = Panel::Link; panelVersion = version; refreshPanel();
                 return;
             }
+            // The player asked for a restart, so GD comes back after the install even if they leave the menu
+            // and close GD themselves. Written before the setup starts, so no slow start can skip it.
+            bool reopen = restart && file::writeString(paths.reopenFlag, "").isOk();
+            if (restart && !reopen) log::warn("Could not write the reopen flag; GD won't reopen after the update");
             if (!launch || !update_platform::startSetup(launch->program, launch->args, launch->job == update_platform::Job::Breakaway)) {
+                log::warn("The update setup didn't start (download or launch failed)");
                 if (panel == Panel::Progress) panel = Panel::None;
                 refreshPanel();
-                notify("Update failed: the download or the setup didn't start.");
+                notify("The OBS Jukebox update couldn't start.");
                 return;
             }
             // A cold start of the setup takes several seconds; say so, or the panel looks stuck at 100%.
             if (panel == Panel::Progress) { progressText = "Starting the setup..."; refreshPanel(); }
-            // Wait for the setup to say it is ready before reporting anything.
-            std::thread([version, restart, viaNotice, startedOn] {
+            std::thread([version, restart, viaNotice, startedOn, reopen] {
+                // Unpacking, a virus scan, or GD loading a level can slow the setup's first start a lot.
+                // Either sign counts: its "waiting" result, or the lock it holds while it waits.
+                auto start = std::chrono::steady_clock::now();
                 bool ready = false;
-                for (int i = 0; i < 40 && !ready; ++i) {
+                for (int i = 0; i < 240 && !ready; ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(250));
                     auto r = readResult();
-                    ready = r && r->version == version && r->status == ur::Status::Waiting;
+                    ready = (r && r->version == version && r->status == ur::Status::Waiting) || update_platform::setupWaiting();
                 }
-                // A first run on a cold start can take longer than 10 seconds. If the setup holds its
-                // lock it has started and will honour the wait; don't call that a failure.
-                if (!ready && update_platform::setupWaiting()) ready = true;
-                Loader::get()->queueInMainThread([ready, version, restart, viaNotice, startedOn] {
-                    if (!ready) { panel = Panel::None; refreshPanel(); notify("Update failed: the setup didn't start."); return; }
+                auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+                log::info("Update setup {} after {} ms", ready ? "is waiting" : "never reported in", waited);
+                Loader::get()->queueInMainThread([ready, restart, viaNotice, startedOn, reopen] {
+                    if (!ready) { panel = Panel::None; refreshPanel(); notify("The OBS Jukebox update couldn't start."); return; }
                     if (!restart) {
-                        notify(fmt::format("OBS Jukebox {} installs after you close GD and OBS.", ur::toString(version)));
+                        notify("Update installs after you close GD and OBS.");
                         return;
                     }
                     if (!viaNotice) {
                         progressText = "Restarting...";
                         refreshPanel();
-                        exitForUpdate(version, startedOn);
+                        exitForUpdate(reopen, startedOn);
                         return;
                     }
-                    notify(fmt::format("Updating OBS Jukebox to {}. GD will restart shortly.", ur::toString(version)));
-                    std::thread([version, startedOn] {
+                    notify("Updating OBS Jukebox. GD restarts shortly.");
+                    std::thread([reopen, startedOn] {
                         std::this_thread::sleep_for(std::chrono::seconds(3));
-                        Loader::get()->queueInMainThread([version, startedOn] { exitForUpdate(version, startedOn); });
+                        Loader::get()->queueInMainThread([reopen, startedOn] { exitForUpdate(reopen, startedOn); });
                     }).detach();
                 });
             }).detach();
@@ -281,21 +294,18 @@ void startUpdate(bool restart, bool viaNotice) {
     }).detach();
 }
 
-// Leaves the game so the setup can install: only from the main menu, and only once the reopen flag is written.
-void exitForUpdate(ur::Version version, unsigned startedOn) {
+// Leaves the game so the setup can install: only from the main menu, and only with the reopen flag in place.
+void exitForUpdate(bool reopen, unsigned startedOn) {
     panel = Panel::None;
-    // The player asked for a restart, so GD comes back after the install even if they close GD themselves.
-    if (file::writeString(paths.reopenFlag, "").isErr()) {
-        refreshPanel();
-        notify(fmt::format("OBS Jukebox {} installs after you close GD and OBS. GD won't reopen by itself.", ur::toString(version)));
-        return;
-    }
     // Leaving the menu at any point since the click, even after coming back, turns this into after-close.
-    if (!onMainMenu() || menuGeneration != startedOn || update_platform::obsRunning()) {
+    bool left = !onMainMenu() || menuGeneration != startedOn;
+    if (left || !reopen || update_platform::obsRunning()) {
+        log::info("Not closing GD for the update (left the menu: {}, reopen flag: {})", left, reopen);
         refreshPanel();
-        notify(fmt::format("OBS Jukebox {} installs after you close GD and OBS. GD reopens by itself.", ur::toString(version)));
+        notify(reopen ? "Close GD and OBS to update. GD reopens after." : "Close GD and OBS to finish the update.");
         return;
     }
+    log::info("Closing GD for the update");
     utils::game::exit(true);
 }
 
@@ -360,7 +370,8 @@ void firstLaunch() {
     if (plan.deleteResult) std::filesystem::remove(paths.result, error);
     if (plan.deleteStaging) std::filesystem::remove_all(paths.staging, error);
     store(plan.saved);
-    if (plan.notice != ur::Notice::None) notify(ur::noticeText(plan.notice, staged ? staged->manifest.version : running(), plan.message));
+    if (!plan.message.empty()) log::warn("The update setup reported: {}", plan.message);
+    if (plan.notice != ur::Notice::None) notify(ur::noticeText(plan.notice, staged ? staged->manifest.version : running()));
     if (plan.linkPanel) showLinkPanel(*plan.linkPanel);
     if (plan.stop) return;
     std::thread(check, mode).detach();
@@ -376,21 +387,25 @@ void drawPanel(MenuLayer* menu) {
     if (auto old = menu->getChildByID("update-panel"_spr)) old->removeFromParent();
     if (panel == Panel::None) return;
     auto win = CCDirector::get()->getWinSize();
+    bool progress = panel == Panel::Progress;
     auto root = CCNode::create();
     root->setID("update-panel"_spr);
-    root->setContentSize({230.f, 52.f});
+    // Progress has no buttons, so it is a single line.
+    root->setContentSize({230.f, progress ? 28.f : 52.f});
     root->setAnchorPoint({1.f, 1.f});
+    root->setScale(.7f);
     root->setPosition({win.width - 4.f, win.height - 4.f});
     auto background = CCScale9Sprite::create("square02b_001.png");
     background->setColor({0, 0, 0});
-    background->setOpacity(140);
+    // Dark enough that the GD logo underneath doesn't show through the text.
+    background->setOpacity(200);
     background->setContentSize(root->getContentSize());
     background->setAnchorPoint({0.f, 0.f});
     root->addChild(background);
     auto title = CCLabelBMFont::create(
-        panel == Panel::Progress ? progressText.c_str() : fmt::format("OBS Jukebox {} is out.", ur::toString(panelVersion)).c_str(), "bigFont.fnt");
+        progress ? progressText.c_str() : fmt::format("OBS Jukebox {} is out.", ur::toString(panelVersion)).c_str(), "bigFont.fnt");
     title->limitLabelWidth(210.f, .4f, .1f);
-    title->setPosition({115.f, 38.f});
+    title->setPosition({115.f, progress ? 14.f : 38.f});
     root->addChild(title);
     auto buttons = CCMenu::create();
     buttons->setContentSize({220.f, 22.f});
@@ -421,8 +436,26 @@ void refreshPanel() {
 namespace updater {
 void onMainMenu(MenuLayer* menu) {
     ++menuGeneration;
+#ifdef OBS_JUKEBOX_QA
+    // Visual checks: OBS_JUKEBOX_UPDATE_PREVIEW=toasts queues every update toast; link, ask or progress draws that panel.
+    if (auto preview = std::getenv("OBS_JUKEBOX_UPDATE_PREVIEW"); preview && !launched) {
+        launched = true;
+        std::string_view what = preview;
+        panelVersion = {1, 2, 4};
+        if (what == "toasts") {
+            for (auto notice : {ur::Notice::Installed, ur::Notice::Declined, ur::Notice::Failed, ur::Notice::ThirdFailure, ur::Notice::Repair})
+                pendingNotices.push_back(ur::noticeText(notice, panelVersion));
+            for (auto text : {"The OBS Jukebox update couldn't start.", "Update installs after you close GD and OBS.",
+                              "Updating OBS Jukebox. GD restarts shortly.", "Close GD and OBS to update. GD reopens after.",
+                              "Close GD and OBS to finish the update."})
+                pendingNotices.push_back(text);
+        }
+        panel = what == "link" ? Panel::Link : what == "ask" ? Panel::Ask : what == "progress" ? Panel::Progress : Panel::None;
+        progressText = "Downloading... 42%";
+    }
+#endif
     if (!launched) { launched = true; firstLaunch(); }
-    for (auto& text : pendingNotices) Notification::create(text, NotificationIcon::Info, 5.f)->show();
+    for (auto& text : pendingNotices) showToast(text);
     pendingNotices.clear();
     drawPanel(menu);
 }
