@@ -93,8 +93,9 @@ class PitchShifter {
     std::array<float, maxFft> real{}, imaginary{}; // the spectrum
 
     // Combines `half` pairs: each low point a and high point b become a + bw and a - bw. It rounds as
-    // std::complex<float> does: each product is its own statement, so no compiler fuses it into a
-    // multiply-add. The halves never overlap, which lets the compiler vectorize the loop.
+    // std::complex<float> does: each product is its own statement, as in libc++, so clang's default
+    // contraction can't fuse it into a multiply-add (x86-64 builds have no FMA to fuse with). The
+    // halves never overlap, which lets the compiler vectorize the loop.
     static void butterflies(float *__restrict lowRe, float *__restrict lowIm, float *__restrict highRe,
                             float *__restrict highIm, size_t half, const float *__restrict cosines,
                             const float *__restrict sines) {
@@ -151,7 +152,8 @@ class PitchShifter {
         shiftedMagnitude.fill(0.f);
         shiftedFrequency.fill(0.f);
         // FMOD rounds the destination bin; Bernsee's code truncates, which does not sound the same.
-        // A bin shifted past the top is dropped, so its magnitude is never needed.
+        // A bin shifted past the top is dropped, so its magnitude is never needed. Doubling is exact,
+        // so a compiler fusing it into the sum rounds as the separate steps did.
         for (size_t k = 0; k <= bins; ++k) {
             const size_t target = size_t(float(k) * pitch + .5f);
             if (target > bins)

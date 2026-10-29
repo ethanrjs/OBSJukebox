@@ -566,8 +566,8 @@ class Receiver {
     // Fills `window` in place, so an audio thread that keeps it allocates nothing once it has grown.
     void playbackWindow(uint64_t start, uint64_t end, int channel, std::vector<SongLinkPacket> &window) {
         std::lock_guard lock(mutex);
-        window.assign(1, SongLinkPacket{});
-        window.front().channelID = channel;
+        window.clear();
+        window.emplace_back().channelID = channel;
         if (channel < -1 || channel >= SONG_LINK_MAX_CHANNELS)
             return;
         auto &voice = playback[channel + 1];
