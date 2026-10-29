@@ -462,8 +462,9 @@ class Receiver {
   public:
 #ifdef OBS_JUKEBOX_QA
     // The audio tests run a receiver without its socket or thread and feed it packets on
-    // simulated time.
+    // simulated time. The benchmark times its packet handling and its thread.
     friend struct Simulation;
+    friend struct BenchAccess;
     struct Offline {};
     explicit Receiver(Offline) {}
 #endif

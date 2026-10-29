@@ -6,6 +6,7 @@
 #ifdef _WIN32
 #include <malloc.h>
 #endif
+#include "reference/PitchShifter-41b8647.hpp"
 static thread_local bool pitchCountingAllocations = false;
 static thread_local size_t pitchAllocationCount = 0, pitchFreeCount = 0;
 void *operator new(size_t size) {
@@ -446,6 +447,145 @@ static void pitchInvalidInputTest() {
     chain.process(nullptr, 256, nullptr, 0);
     check(audio == untouched, "invalid stage lists are ignored without touching audio");
 }
+// Held-out signals the FMOD recordings don't cover, for checking the shipping stage against the
+// frozen 41b8647 reference. Interleaved stereo at 48 kHz, the same on every run.
+namespace heldout {
+using Signal = std::vector<float>;
+constexpr double tau = 2 * 3.14159265358979323846;
+static Signal noise(size_t frames, unsigned seed) {
+    Signal audio(frames * 2);
+    std::mt19937 generator(seed);
+    std::uniform_real_distribution<float> value(-.3f, .3f);
+    for (auto &sample : audio)
+        sample = value(generator);
+    return audio;
+}
+static Signal mono(size_t frames) {
+    auto audio = noise(frames, 10);
+    for (size_t i = 0; i < frames; ++i)
+        audio[i * 2 + 1] = audio[i * 2];
+    return audio;
+}
+static Signal multitone(size_t frames) {
+    Signal audio(frames * 2);
+    for (size_t i = 0; i < frames; ++i) {
+        const double t = double(i) / 48000;
+        audio[i * 2] = float(.15 * std::sin(tau * 220 * t) + .1 * std::sin(tau * 1375 * t) + .05 * std::sin(tau * 7040 * t));
+        audio[i * 2 + 1] =
+            float(.12 * std::sin(tau * 330 * t + 1) + .1 * std::sin(tau * 2489 * t) + .04 * std::sin(tau * 11025 * t));
+    }
+    return audio;
+}
+// Decaying clicks with digital silence between them, at different times on each side.
+static Signal transients(size_t frames) {
+    Signal audio(frames * 2, 0.f);
+    for (size_t ch = 0; ch < 2; ++ch)
+        for (size_t at = 1000 + ch * 3337; at < frames; at += 9000 + ch * 1234)
+            for (size_t i = 0; i < 2000 && at + i < frames; ++i)
+                audio[(at + i) * 2 + ch] = float((i % 2 ? -.8 : .8) * std::exp(-double(i) / 300));
+    return audio;
+}
+// A left tone that stops and starts while the right one plays throughout.
+static Signal oneSidedGaps(size_t frames) {
+    Signal audio(frames * 2);
+    for (size_t i = 0; i < frames; ++i) {
+        const double t = double(i) / 48000;
+        audio[i * 2] = (i / 7000) % 3 == 1 ? 0.f : float(.25 * std::sin(tau * 440 * t));
+        audio[i * 2 + 1] = float(.2 * std::sin(tau * 523 * t));
+    }
+    return audio;
+}
+// Identical channels for the first half, as centred SFX are, then different ones.
+static Signal monoThenStereo(size_t frames) {
+    auto audio = noise(frames, 11);
+    for (size_t i = 0; i < frames / 2; ++i)
+        audio[i * 2 + 1] = audio[i * 2];
+    return audio;
+}
+// Spans of -0, denormals, levels at the silence gate, identical channels, and samples the stage
+// must scrub (NaN and 2e6).
+static Signal edgeValues(size_t frames) {
+    auto audio = noise(frames, 12);
+    for (size_t i = 0; i < frames; ++i) {
+        auto &left = audio[i * 2], &right = audio[i * 2 + 1];
+        switch ((i / 3000) % 6) {
+        case 0: left = -0.f; break;
+        case 1: left = right = 1e-40f; break;
+        case 2: left *= 2e-5f; break;
+        case 3:
+            if (i % 7 == 0) left = std::numeric_limits<float>::quiet_NaN();
+            if (i % 11 == 0) right = 2e6f;
+            break;
+        case 4: right = left; break;
+        default: break;
+        }
+    }
+    return audio;
+}
+static std::vector<std::pair<const char *, Signal>> suite(size_t frames) {
+    return {{"stereo noise", noise(frames, 9)},     {"mono noise", mono(frames)},
+            {"multitone", multitone(frames)},       {"transients", transients(frames)},
+            {"one-sided gaps", oneSidedGaps(frames)}, {"mono then stereo", monoThenStereo(frames)},
+            {"edge values", edgeValues(frames)}};
+}
+// Runs a stage over the signal in calls of the given sizes, cycling through them.
+template <class Shifter>
+static Signal shift(Signal audio, float pitch, uint32_t fft, size_t gateFrames, const std::vector<size_t> &calls) {
+    Shifter shifter(gateFrames);
+    for (size_t at = 0, call = 0; at < audio.size() / 2; ++call) {
+        const size_t count = std::min(calls[call % calls.size()], audio.size() / 2 - at);
+        shifter.process(audio.data() + at * 2, count, pitch, fft);
+        at += count;
+    }
+    return audio;
+}
+// Samples that differ; +0 and -0 count as the same sample.
+struct Difference {
+    size_t samples = 0;
+    double max = 0;
+    void add(const Signal &a, const Signal &b) {
+        for (size_t i = 0; i < a.size(); ++i)
+            if (!(a[i] == b[i])) {
+                ++samples;
+                max = std::max(max, std::abs(double(a[i]) - b[i]));
+            }
+    }
+};
+const std::vector<std::vector<size_t>> callPatterns{{480}, {256}, {64, 113, 256, 480, 31, 1}};
+// Stage lists a chain goes through: added, pitch changed, removed, back, moved to another FFT.
+template <class Chain> static Signal chain(Signal audio) {
+    Chain stages(true, 480);
+    const PitchStage a{.75f, 1024, 0, 71}, b{1.25f, 2048, 0, 72}, bFaster{1.5f, 2048, 0, 72}, aWider{.75f, 4096, 0, 71};
+    const std::vector<std::vector<PitchStage>> lists{{a}, {a, b}, {a, bFaster}, {a}, {a, b}, {aWider, b}, {b}, {}};
+    const size_t frames = audio.size() / 2, span = frames / lists.size();
+    for (size_t at = 0; at < frames; at += 480) {
+        const auto &list = lists[std::min(at / span, lists.size() - 1)];
+        stages.process(audio.data() + at * 2, std::min<size_t>(480, frames - at), list.data(), uint8_t(list.size()));
+    }
+    return audio;
+}
+} // namespace heldout
+
+// The shipping stage must give the frozen reference's samples for every size, pitch, call pattern and
+// gate, so an optimization can't trade away any of the error margin against FMOD.
+static void pitchReferenceTest() {
+    heldout::Difference difference;
+    size_t run = 0;
+    for (const auto &[name, signal] : heldout::suite(72000))
+        for (uint32_t fft : {256u, 512u, 1024u, 2048u, 4096u})
+            for (float pitch : {.5f, .75f, 1.f, 1.5f, 2.f}) {
+                const auto &calls = heldout::callPatterns[run % heldout::callPatterns.size()];
+                const size_t gate = run++ % 2 ? 256 : 480;
+                difference.add(heldout::shift<PitchShifter>(signal, pitch, fft, gate, calls),
+                               heldout::shift<reference_41b8647::PitchShifter>(signal, pitch, fft, gate, calls));
+            }
+    for (const auto &signal : {heldout::noise(96000, 13), heldout::mono(96000)})
+        difference.add(heldout::chain<PitchChain>(signal), heldout::chain<reference_41b8647::PitchChain>(signal));
+    if (difference.samples)
+        std::cerr << difference.samples << " samples differ from the reference, by up to " << difference.max << '\n';
+    check(difference.samples == 0, "the pitch stage gives the 41b8647 reference's samples on held-out audio");
+}
+
 // A four-second tone at `hz`, so a render test can tell frequencies apart by counting crossings.
 static void writeTone(const char *path, double hz = 440) {
     std::ofstream out(path, std::ios::binary);
@@ -1151,6 +1291,7 @@ static void pitchNonfiniteRecoveryTest() {
 static void pitchTests() {
     PitchShifter::prepareTables();
     pitchParityTest();
+    pitchReferenceTest();
     pitchChannelTest();
     pitchSplitTest();
     pitchResetTest();
