@@ -18,7 +18,7 @@ if not args.perl:
     parser.error("Perl with its core JSON::PP module is required")
 
 
-def binary(version="5.10.1", kind="pe", **metadata):
+def binary(version="5.11.2", kind="pe", **metadata):
     if kind == "pe":
         header = bytearray(128)
         header[:2] = b"MZ"
@@ -50,19 +50,19 @@ with tempfile.TemporaryDirectory(prefix="obs-jukebox-geode-check-") as temporary
         return subprocess.run([args.perl, str(ROOT / "scripts/check-geode-version.pl"), str(fixture)], capture_output=True, text=True)
 
     for kind in ("pe", "mach"):
-        for version in ("5.10.1", "5.11.0", "5.100.1"):
+        for version in ("5.11.2", "5.11.3", "5.12.0", "5.100.1"):
             result = verify(binary(version, kind))
             check(result.returncode == 0 and result.stdout.strip() == version, f"{kind} accepts {version}")
-        for version in ("5.10.0", "5.9.9", "4.99.9", "6.10.1", "invalid", "5.10.1-beta.1", "5.010.1", "5.10"):
+        for version in ("5.11.1", "5.11.0", "5.10.1", "5.9.9", "4.99.9", "6.11.2", "invalid", "5.11.2-beta.1", "5.011.2", "5.11"):
             check(verify(binary(version, kind)).returncode != 0, f"{kind} rejects {version}")
     check(verify(binary(geode="5.9.0")).returncode != 0, "rejects conflicting embedded version fields")
     check(verify(binary(id="other.dependency")).returncode != 0, "ignores dependency metadata")
-    check(verify(binary() + binary("5.11.0")).returncode != 0, "rejects ambiguous embedded loader versions")
+    check(verify(binary() + binary("5.11.3")).returncode != 0, "rejects ambiguous embedded loader versions")
     check(verify(binary() + binary()).returncode == 0, "accepts repeated identical universal-binary metadata")
     check(verify(b"MZ" + bytes(126) + binary()[128:]).returncode != 0, "rejects invalid PE header")
     check(verify(b"MZ").returncode != 0, "rejects truncated library")
-    check(verify(b'{"id":"geode.loader","version":"5.10.1","geode":"5.10.1"}\0').returncode != 0, "rejects metadata outside a library")
-    check(verify(binary("5.9.0") + b'5.10.1\0{"version":"5.10.1","id":"dependency"}\0').returncode != 0, "does not accept unrelated version strings")
+    check(verify(b'{"id":"geode.loader","version":"5.11.2","geode":"5.11.2"}\0').returncode != 0, "rejects metadata outside a library")
+    check(verify(binary("5.9.0") + b'5.11.2\0{"version":"5.11.2","id":"dependency"}\0').returncode != 0, "does not accept unrelated version strings")
     if args.loader:
         result = verify(args.loader.read_bytes())
         check(result.returncode == 0, f"official loader {args.loader.name}: {result.stdout.strip()} {result.stderr.strip()}")
@@ -90,14 +90,14 @@ with tempfile.TemporaryDirectory(prefix="obs-jukebox-geode-check-") as temporary
         def snapshot():
             return {str(p.relative_to(root)): p.read_bytes() if p.is_file() else None for p in root.rglob("*")}
 
-        for version in ("5.10.0", "5.9.9", "4.99.9", "6.10.1", "invalid", "5.10.1-beta.1"):
+        for version in ("5.11.1", "5.11.0", "5.10.1", "5.9.9", "4.99.9", "6.11.2", "invalid", "5.11.2-beta.1"):
             (game / "Geode.dll").write_bytes(binary(version))
             before = snapshot()
             result = subprocess.run(command, env=env, capture_output=True, text=True)
             check(result.returncode != 0 and "compatibility could not be verified" in result.stderr and snapshot() == before, f"Linux rejects {version} before any file mutations")
-        (game / "Geode.dll").write_bytes(binary("5.10.1"))
+        (game / "Geode.dll").write_bytes(binary("5.11.2"))
         result = subprocess.run(command, env=env, capture_output=True, text=True)
-        check(result.returncode == 0 and (game / "geode/mods/local.separate_song.geode").read_bytes() == b"fixture mod", "Linux installs with compatible 5.10.1")
+        check(result.returncode == 0 and (game / "geode/mods/local.separate_song.geode").read_bytes() == b"fixture mod", "Linux installs with compatible 5.11.2")
     else:
         print("SKIP Linux installer integration: requires a non-root native Linux test process")
 print(f"{checks} checks passed")

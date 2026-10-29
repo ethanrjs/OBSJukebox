@@ -28,7 +28,7 @@ class InstallerTransactionTests(unittest.TestCase):
         (self.game / "Geode.dll").touch()
         shutil.copyfile(ROOT / "scripts/install-linux.sh", self.package / "Install.sh")
         shutil.copyfile(ROOT / "scripts/install-state.pl", self.package / "install-state.pl")
-        (self.package / "check-geode-version.pl").write_text('print "5.10.1\\n";')
+        (self.package / "check-geode-version.pl").write_text('print "5.11.2\\n";')
         (self.package / "payload/separate-song.so").write_bytes(b"NEWPLUGIN")
         (self.package / "payload/local.separate_song.geode").write_bytes(b"NEWMOD")
         self.targets = [

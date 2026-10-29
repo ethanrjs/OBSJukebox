@@ -37,8 +37,8 @@ reject_mods() {
     [[ "$before" == "$after" && ! -e "$qa_logs" && ! -e "$qa_plugin" ]]
     print -r -- "$name: pass"
 }
-for qa_version in 5.10.0 5.9.9 4.10.1 6.10.1 invalid 5.10.1-beta.1; do
-    /usr/bin/env QA_VERSION="$qa_version" /usr/bin/perl -0pe 's/"5\.10\.1"/"$ENV{QA_VERSION}"/g' "$qa_payload/payload/geode/Geode.dylib" > "$qa_gd/Contents/Frameworks/Geode.dylib"
+for qa_version in 5.11.1 5.11.0 5.10.1 5.9.9 4.11.2 6.11.2 invalid 5.11.2-beta.1; do
+    /usr/bin/env QA_VERSION="$qa_version" /usr/bin/perl -0pe 's/"5\.11\.2"/"$ENV{QA_VERSION}"/g' "$qa_payload/payload/geode/Geode.dylib" > "$qa_gd/Contents/Frameworks/Geode.dylib"
     qa_before=$(shasum -a 256 "$qa_gd/Contents/Frameworks/Geode.dylib" "$qa_gd/Contents/Frameworks/libfmod.dylib")
     if run_install > "$qa_root/reject-$qa_version.log" 2>&1; then print "Incompatible Geode $qa_version incorrectly accepted"; exit 1; fi
     qa_after=$(shasum -a 256 "$qa_gd/Contents/Frameworks/Geode.dylib" "$qa_gd/Contents/Frameworks/libfmod.dylib")
