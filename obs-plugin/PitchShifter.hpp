@@ -31,7 +31,9 @@ class PitchShifter {
     struct Tables {
         size_t size = 0, step = 0, latency = 0;
         std::vector<float> window;
-        std::vector<std::complex<float>> twiddles, inverseTwiddles;
+        // The twiddle factors of each FFT pass in the order it uses them; the pass that combines
+        // halves of `half` points starts at index half - 1.
+        std::vector<float> cosines, sines, inverseSines;
         std::vector<size_t> reversed;
     };
     // Built once for every size FMOD accepts; a static here is initialized once and safely shared.
@@ -48,12 +50,13 @@ class PitchShifter {
                 t.window.resize(size);
                 for (size_t k = 0; k < size; ++k)
                     t.window[k] = float(.5 - .5 * std::cos(2 * pi * double(k) / double(size)));
-                t.twiddles.resize(size / 2);
-                t.inverseTwiddles.resize(size / 2);
-                for (size_t k = 0; k < size / 2; ++k) {
-                    t.twiddles[k] = std::polar(1.f, float(-2 * pi * double(k) / double(size)));
-                    t.inverseTwiddles[k] = std::conj(t.twiddles[k]);
-                }
+                for (size_t half = 1; half < size; half *= 2)
+                    for (size_t k = 0; k < half; ++k) {
+                        const auto twiddle = std::polar(1.f, float(-2 * pi * double(k * size / (half * 2)) / double(size)));
+                        t.cosines.push_back(twiddle.real());
+                        t.sines.push_back(twiddle.imag());
+                        t.inverseSines.push_back(std::conj(twiddle).imag());
+                    }
                 t.reversed.resize(size);
                 unsigned bits = 0;
                 while ((size_t(1) << bits) < size)
@@ -87,24 +90,46 @@ class PitchShifter {
     const Tables *tables = nullptr;
     std::array<Channel, 2> channels;
     std::array<float, maxBins> magnitude{}, frequency{}, shiftedMagnitude{}, shiftedFrequency{};
-    std::array<std::complex<float>, maxFft> spectrum{};
+    std::array<float, maxFft> real{}, imaginary{}; // the spectrum
 
-    // In-place radix-2 FFT; the inverse is unscaled, as in Bernsee's code.
+    // Combines `half` pairs: each low point a and high point b become a + bw and a - bw. It rounds as
+    // std::complex<float> does: each product is its own statement, so no compiler fuses it into a
+    // multiply-add. The halves never overlap, which lets the compiler vectorize the loop.
+    static void butterflies(float *__restrict lowRe, float *__restrict lowIm, float *__restrict highRe,
+                            float *__restrict highIm, size_t half, const float *__restrict cosines,
+                            const float *__restrict sines) {
+        for (size_t k = 0; k < half; ++k) {
+            const float ac = highRe[k] * cosines[k], bd = highIm[k] * sines[k];
+            const float ad = highRe[k] * sines[k], bc = highIm[k] * cosines[k];
+            const float br = ac - bd, bi = ad + bc;
+            highRe[k] = lowRe[k] - br;
+            highIm[k] = lowIm[k] - bi;
+            lowRe[k] = lowRe[k] + br;
+            lowIm[k] = lowIm[k] + bi;
+        }
+    }
+    // In-place radix-2 FFT of a spectrum its caller stored in bit-reversed order (point k at
+    // reversed[k]); the result is in order. The inverse is unscaled, as in Bernsee's code.
     void transform(bool inverse) {
         const auto &t = *tables;
-        for (size_t i = 0; i < t.size; ++i)
-            if (i < t.reversed[i])
-                std::swap(spectrum[i], spectrum[t.reversed[i]]);
-        for (size_t length = 2; length <= t.size; length *= 2) {
-            const size_t stride = t.size / length;
-            const auto &twiddles = inverse ? t.inverseTwiddles : t.twiddles;
-            for (size_t start = 0; start < t.size; start += length)
-                for (size_t k = 0; k < length / 2; ++k) {
-                    const auto a = spectrum[start + k];
-                    const auto b = spectrum[start + k + length / 2] * twiddles[k * stride];
-                    spectrum[start + k] = a + b;
-                    spectrum[start + k + length / 2] = a - b;
-                }
+        const auto &sines = inverse ? t.inverseSines : t.sines;
+        for (size_t half = 1; half < t.size; half *= 2) {
+            const float *cosines = &t.cosines[half - 1], *passSines = &sines[half - 1];
+            if (half < 4) // Too short to vectorize: one twiddle at a time across every block instead.
+                for (size_t k = 0; k < half; ++k)
+                    for (size_t start = k; start < t.size; start += half * 2) {
+                        const float ac = real[start + half] * cosines[k], bd = imaginary[start + half] * passSines[k];
+                        const float ad = real[start + half] * passSines[k], bc = imaginary[start + half] * cosines[k];
+                        const float br = ac - bd, bi = ad + bc;
+                        real[start + half] = real[start] - br;
+                        imaginary[start + half] = imaginary[start] - bi;
+                        real[start] = real[start] + br;
+                        imaginary[start] = imaginary[start] + bi;
+                    }
+            else
+                for (size_t start = 0; start < t.size; start += half * 2)
+                    butterflies(&real[start], &imaginary[start], &real[start + half], &imaginary[start + half], half,
+                                cosines, passSines);
         }
     }
     void processFrame(Channel &c, float pitch) {
@@ -112,12 +137,14 @@ class PitchShifter {
         const size_t bins = t.size / 2;
         const double expected = 2 * pi * double(t.step) / double(t.size);
         for (size_t k = 0; k < t.size; ++k)
-            spectrum[k] = {c.input[k] * t.window[k], 0.f};
+            real[t.reversed[k]] = c.input[k] * t.window[k];
+        std::fill_n(imaginary.begin(), t.size, 0.f);
         transform(false);
         // Analysis: each bin's magnitude and true frequency (in bins) from its phase advance.
         for (size_t k = 0; k <= bins; ++k) {
-            const float phase = std::arg(spectrum[k]);
-            magnitude[k] = 2 * std::abs(spectrum[k]);
+            const std::complex<float> bin(real[k], imaginary[k]);
+            const float phase = std::arg(bin);
+            magnitude[k] = 2 * std::abs(bin);
             double delta = double(phase) - double(c.lastPhase[k]) - double(k) * expected;
             c.lastPhase[k] = phase;
             delta -= 2 * pi * std::round(delta / (2 * pi));
@@ -141,14 +168,16 @@ class PitchShifter {
             if (phase > pi || phase < -pi)
                 phase -= double(int(phase / (2 * pi))) * 2 * pi;
             c.phaseSum[k] = float(phase);
-            spectrum[k] = std::polar(shiftedMagnitude[k], float(phase));
+            const auto bin = std::polar(shiftedMagnitude[k], float(phase));
+            real[t.reversed[k]] = bin.real();
+            imaginary[t.reversed[k]] = bin.imag();
         }
         for (size_t k = bins + 1; k < t.size; ++k)
-            spectrum[k] = {};
+            real[t.reversed[k]] = imaginary[t.reversed[k]] = 0;
         transform(true);
         const float scale = 2.f / float(bins * overlap);
         for (size_t k = 0; k < t.size; ++k)
-            c.accumulator[k] += scale * t.window[k] * spectrum[k].real();
+            c.accumulator[k] += scale * t.window[k] * real[k];
         std::copy_n(c.accumulator.begin(), t.step, c.output.begin());
         std::copy(c.accumulator.begin() + t.step, c.accumulator.begin() + t.size, c.accumulator.begin());
         std::fill(c.accumulator.begin() + t.size - t.step, c.accumulator.begin() + t.size, 0.f);
