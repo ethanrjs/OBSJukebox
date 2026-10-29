@@ -241,12 +241,14 @@ struct Game {
 // The receiver step is handling the game's packets (checking tags, queueing; the game signs them
 // beforehand, untimed); music is the decoder worker's block, effects the effects worker's, and mix the
 // output thread's.
-static void render(unsigned seconds) {
+static void render(unsigned seconds, const std::string &only) {
     writeStereoWav("artifacts/audio-tests/bench-48k.wav", 48000);
     writeStereoWav("artifacts/audio-tests/bench-44k.wav", 44100);
     std::cout << "pipeline on simulated time, " << seconds
               << " s each: CPU ms per second of audio; per-block us p50/p95/p99/max; heap allocations per block\n";
     for (const auto &w : workloads()) {
+        if (std::string(w.name).find(only) == std::string::npos)
+            continue;
         Simulation sim;
         sim.synchronize(sim.local);
         Game game(w, sim.now);
@@ -497,7 +499,7 @@ int main(int argc, char **argv) {
     if (mode == "pitch")
         bench::pitch(count ? count : 5);
     else if (mode == "render")
-        bench::render(count ? count : 10);
+        bench::render(count ? count : 10, argc > 3 ? argv[3] : ""); // a third argument picks workloads by name
     else if (mode == "threads") {
         std::cout << "real threads, " << (count ? count : 8) << " s measured after 1 s\n";
         for (const auto &w : bench::workloads())
@@ -509,7 +511,7 @@ int main(int argc, char **argv) {
     else if (mode == "fidelity")
         bench::fidelity();
     else {
-        std::cerr << "Usage: bench pitch|render|threads|link|fidelity [rounds or seconds]\n";
+        std::cerr << "Usage: bench pitch|render|threads|link|fidelity [rounds or seconds] [render workload name part]\n";
         return 2;
     }
     return failures ? 1 : 0;
