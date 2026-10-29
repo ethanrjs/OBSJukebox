@@ -78,6 +78,39 @@ public:
     AudioThreadScheduling(const AudioThreadScheduling &) = delete;
     AudioThreadScheduling &operator=(const AudioThreadScheduling &) = delete;
 };
+// Sleeps the output thread until its next block. A plain sleep wakes on the process's timer ticks,
+// and Windows 11 can leave a minimized OBS on the default 15.6 ms ones despite libobs's 1 ms
+// request; waking 20 ms late then outruns the effects worker's one block of lead. A high
+// resolution waitable timer isn't bound to those ticks. Elsewhere, and if Windows has no such
+// timer, it is a plain sleep.
+class BlockTimer {
+#ifdef _WIN32
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+#endif
+public:
+    BlockTimer() = default;
+    BlockTimer(const BlockTimer &) = delete;
+    BlockTimer &operator=(const BlockTimer &) = delete;
+    ~BlockTimer() {
+#ifdef _WIN32
+        if (timer)
+            CloseHandle(timer);
+#endif
+    }
+    void sleepUntil(Clock::time_point deadline) {
+#ifdef _WIN32
+        // The timer counts in 100 ns steps; rounding up, and waiting again if it fires early, means
+        // it never returns before the deadline.
+        for (auto left = deadline - Clock::now(); timer && left > Clock::duration::zero(); left = deadline - Clock::now()) {
+            LARGE_INTEGER due;
+            due.QuadPart = -((std::chrono::duration_cast<std::chrono::nanoseconds>(left).count() + 99) / 100);
+            if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE) || WaitForSingleObject(timer, INFINITE) != WAIT_OBJECT_0)
+                break;
+        }
+#endif
+        std::this_thread::sleep_until(deadline);
+    }
+};
 struct LinkState {
     SongLinkPacket packet;
     Clock::time_point received{};
@@ -1231,8 +1264,9 @@ struct SongSource {
         decoderWorker = std::thread([this] { decodeMusic(); });
         effectsWorker = std::thread([this] { renderEffectsBlocks(); });
         auto next = Clock::now() + std::chrono::nanoseconds(blockNs);
+        BlockTimer timer;
         while (!stop) {
-            std::this_thread::sleep_until(next);
+            timer.sleepUntil(next);
 #ifdef OBS_JUKEBOX_QA
             qaMax(testWakeMaxNs, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                              std::chrono::steady_clock::now() - next)
