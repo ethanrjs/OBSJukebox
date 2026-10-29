@@ -245,6 +245,8 @@ void startUpdate(bool restart, bool viaNotice) {
                 notify("Update failed: the download or the setup didn't start.");
                 return;
             }
+            // A cold start of the setup takes several seconds; say so, or the panel looks stuck at 100%.
+            if (panel == Panel::Progress) { progressText = "Starting the setup..."; refreshPanel(); }
             // Wait for the setup to say it is ready before reporting anything.
             std::thread([version, restart, viaNotice, startedOn] {
                 bool ready = false;
@@ -282,15 +284,16 @@ void startUpdate(bool restart, bool viaNotice) {
 // Leaves the game so the setup can install: only from the main menu, and only once the reopen flag is written.
 void exitForUpdate(ur::Version version, unsigned startedOn) {
     panel = Panel::None;
-    // Leaving the menu at any point since the click, even after coming back, turns this into after-close.
-    if (!onMainMenu() || menuGeneration != startedOn || update_platform::obsRunning()) {
+    // The player asked for a restart, so GD comes back after the install even if they close GD themselves.
+    if (file::writeString(paths.reopenFlag, "").isErr()) {
         refreshPanel();
         notify(fmt::format("OBS Jukebox {} installs after you close GD and OBS. GD won't reopen by itself.", ur::toString(version)));
         return;
     }
-    if (file::writeString(paths.reopenFlag, "").isErr()) {
+    // Leaving the menu at any point since the click, even after coming back, turns this into after-close.
+    if (!onMainMenu() || menuGeneration != startedOn || update_platform::obsRunning()) {
         refreshPanel();
-        notify(fmt::format("OBS Jukebox {} installs after you close GD and OBS. GD won't reopen by itself.", ur::toString(version)));
+        notify(fmt::format("OBS Jukebox {} installs after you close GD and OBS. GD reopens by itself.", ur::toString(version)));
         return;
     }
     utils::game::exit(true);
@@ -377,7 +380,7 @@ void drawPanel(MenuLayer* menu) {
     root->setID("update-panel"_spr);
     root->setContentSize({230.f, 52.f});
     root->setAnchorPoint({1.f, 1.f});
-    root->setPosition({win.width - 6.f, win.height - 36.f});
+    root->setPosition({win.width - 4.f, win.height - 4.f});
     auto background = CCScale9Sprite::create("square02b_001.png");
     background->setColor({0, 0, 0});
     background->setOpacity(140);
