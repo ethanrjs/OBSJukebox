@@ -136,6 +136,32 @@ static void decoderSeekRecoveryTest() {
         check(opened && rejected && recovered && rms>.01,"decoder resumes near start after repeated beyond-end seeks");
     }
 }
+// Decoder::open finds an MP3's seek points and length in one pass (indexMp3). Seeks must land on the
+// samples miniaudio's own seek points give, and the length must match, with and without a Xing header.
+// At rate 1 a fresh seek renders the decoded samples unchanged.
+static void decoderSeekPointsTest(){
+    const std::pair<const char*,const char*> files[]={
+        {"artifacts/audio-tests/long.mp3","MP3 seek points and length match miniaudio's"},
+        {"artifacts/audio-tests/long-noxing.mp3","MP3 seek points and length match miniaudio's without a Xing header"}};
+    for(const auto& [path,label]:files){
+        Decoder decoder;
+        auto config=ma_decoder_config_init(ma_format_f32,2,48000);config.seekPointCount=2048;
+        ma_decoder reference;
+        bool same=decoder.open(path) && ma_decoder_init_file(path,&config,&reference)==MA_SUCCESS;
+        if(!same){check(false,label);continue;}
+        ma_uint64 length=0;ma_decoder_get_length_in_pcm_frames(&reference,&length);
+        same&=decoder.hasAudioAt(double(length-4802)/48000) && !decoder.hasAudioAt(double(length-4799)/48000);
+        std::vector<float> ours(4800*2),theirs(4800*2);
+        for(double at:{37.3,233.7,.5,120.01}){
+            same&=decoder.seek(at);decoder.render(ours.data(),4800,1.);
+            same&=ma_decoder_seek_to_pcm_frame(&reference,ma_uint64(at*48000))==MA_SUCCESS;
+            same&=ma_decoder_read_pcm_frames(&reference,theirs.data(),4800,nullptr)==MA_SUCCESS;
+            same&=ours==theirs;
+        }
+        ma_decoder_uninit(&reference);
+        check(same,label);
+    }
+}
 static void decoderWatchdogTest(bool failedSeek = false) {
     Simulation sim;
     SongLinkPacket packet;packet.flags=3;packet.epoch=310;packet.rate=1.25;packet.offset=.15;

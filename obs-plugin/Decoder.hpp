@@ -30,7 +30,14 @@ inline bool localSongPath(const std::string &path) {
     auto separator = [](char c) { return c == '/' || c == '\\'; };
     return path.find("://") == std::string::npos && !(path.size() >= 2 && separator(path[0]) && separator(path[1]));
 }
+// Gives an MP3 decoder opened without seek points the `wanted`-point table and, unless the file
+// states its frame count, the length that miniaudio itself would find, from one pass over the file
+// instead of up to three. Leaves other formats alone; lengthFrames stays 0 when not found. Returns
+// false if it could not, and the decoder must then be reopened with miniaudio's seek points. In
+// Decoder.cpp, which can reach miniaudio's internals.
+bool indexMp3(ma_decoder &decoder, ma_uint32 wanted, ma_uint64 &lengthFrames);
 class Decoder {
+    static constexpr ma_uint32 seekPointCount = 2048;
     ma_decoder decoder{};
     bool opened = false, seekValid = false;
     ma_uint64 lengthFrames = 0;
@@ -99,13 +106,21 @@ class Decoder {
             return false;
         }
         auto config = ma_decoder_config_init(ma_format_f32, 2, 48000);
-        config.seekPointCount = 2048;
 #ifdef _WIN32
         auto wide = std::filesystem::path(std::u8string(path.begin(), path.end())).wstring();
-        auto result = ma_decoder_init_file_w(wide.c_str(), &config, &decoder);
+        auto init = [&] { return ma_decoder_init_file_w(wide.c_str(), &config, &decoder); };
 #else
-        auto result = ma_decoder_init_file(path.c_str(), &config, &decoder);
+        auto init = [&] { return ma_decoder_init_file(path.c_str(), &config, &decoder); };
 #endif
+        // An MP3 gets its seek points from indexMp3's single pass over the file; if that fails, from
+        // miniaudio's own.
+        auto result = init();
+        if (result == MA_SUCCESS && !indexMp3(decoder, seekPointCount, lengthFrames)) {
+            ma_decoder_uninit(&decoder);
+            config.seekPointCount = seekPointCount;
+            result = init();
+            lengthFrames = 0;
+        }
         opened = result == MA_SUCCESS;
 #ifdef _WIN32
         if (!opened) {
@@ -122,7 +137,8 @@ class Decoder {
                 lengthFrames = windowsDecoder->lengthInFrames();
             else
 #endif
-                ma_decoder_get_length_in_pcm_frames(&decoder, &lengthFrames);
+                if (!lengthFrames)
+                    ma_decoder_get_length_in_pcm_frames(&decoder, &lengthFrames);
         }
         seekValid = opened;
 #ifdef OBS_JUKEBOX_QA

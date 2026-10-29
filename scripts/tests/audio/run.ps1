@@ -11,6 +11,8 @@ try {
     if ($LASTEXITCODE) { throw 'MP3 fixture generation failed.' }
     & ffmpeg -hide_banner -loglevel error -y -i artifacts/audio-tests/long.mp3 -t 4 -c copy artifacts/audio-tests/short.mp3
     if ($LASTEXITCODE) { throw 'Short MP3 fixture generation failed.' }
+    & ffmpeg -hide_banner -loglevel error -y -i artifacts/audio-tests/long.mp3 -c copy -write_xing 0 artifacts/audio-tests/long-noxing.mp3
+    if ($LASTEXITCODE) { throw 'MP3 fixture without a Xing header failed.' }
     $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
     $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     $vc = (Get-ChildItem "$vs/VC/Tools/MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName

@@ -8,6 +8,7 @@
 //   bench threads    the real output thread and workers under load, per thread, for misses and lateness
 //   bench link       signing and checking packets, on the mod's side and the plugin's
 //   bench fidelity   the shipping stage against the 41b8647 reference and FMOD's recordings
+//   bench open       opening, seeking and the first block of the song files given, in wall time
 #define main playbackTests
 #include "playback-tests.cpp"
 #undef main
@@ -523,6 +524,47 @@ static void fidelity() {
         chains.add(heldout::chain<PitchChain>(signal), heldout::chain<reference_41b8647::PitchChain>(signal));
     std::printf("  %-18s %zu differing samples, max difference %g\n", "chain changes", chains.samples, chains.max);
 }
+
+// What a song change costs the music worker, which renders 20 ms ahead: opening the file, the seek to
+// the position GD reports, and the first block, then a seek far away and one back near the start.
+// Wall milliseconds per step; the first open of each file is reported apart, since the OS may not
+// have cached the file yet.
+static void open(unsigned rounds, const std::vector<std::string> &paths) {
+    std::cout << "song open, wall ms p50/p95/p99/max over " << rounds << " rounds (first open apart)\n";
+    for (const auto &path : paths) {
+        Samples opens, seeks, firstBlocks, farSeeks, backSeeks;
+        double firstOpen = 0;
+        std::array<float, 480 * 2> block{};
+        for (unsigned round = 0; round <= rounds; ++round) {
+            Decoder decoder;
+            auto begin = wallNs();
+            const bool ok = decoder.open(path);
+            const double openMs = double(wallNs() - begin) / 1e6;
+            if (!ok) {
+                std::printf("%s: cannot open (%s)\n", path.c_str(), decoder.error.c_str());
+                break;
+            }
+            auto step = [&](Samples &samples, auto &&work) {
+                const auto start = wallNs();
+                work();
+                samples.add(double(wallNs() - start) / 1e6);
+            };
+            if (round == 0) {
+                firstOpen = openMs;
+                continue;
+            }
+            opens.add(openMs);
+            step(seeks, [&] { decoder.seek(30); });
+            step(firstBlocks, [&] { decoder.render(block.data(), 480, 1); });
+            step(farSeeks, [&] { decoder.seek(120); decoder.render(block.data(), 480, 1); });
+            step(backSeeks, [&] { decoder.seek(5); decoder.render(block.data(), 480, 1); });
+        }
+        std::printf("%s\n  first open %8.2f\n  open       %s\n  seek 30 s  %s\n  first block%s\n"
+                    "  seek 120 s + block %s\n  seek 5 s + block   %s\n",
+                    path.c_str(), firstOpen, opens.spread().c_str(), seeks.spread().c_str(),
+                    firstBlocks.spread().c_str(), farSeeks.spread().c_str(), backSeeks.spread().c_str());
+    }
+}
 } // namespace bench
 
 int main(int argc, char **argv) {
@@ -553,8 +595,11 @@ int main(int argc, char **argv) {
         bench::link(count ? count : 20000);
     else if (mode == "fidelity")
         bench::fidelity();
+    else if (mode == "open") // song files follow, after the rounds if given
+        bench::open(count ? count : 20, std::vector<std::string>(argv + std::min(argc, count ? 3 : 2), argv + argc));
     else {
-        std::cerr << "Usage: bench pitch|render|threads|link|fidelity [rounds or seconds] [render workload name part]\n";
+        std::cerr << "Usage: bench pitch|render|threads|link|fidelity|open [rounds or seconds] [render workload name "
+                     "part | song files]\n";
         return 2;
     }
     return failures ? 1 : 0;
