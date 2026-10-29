@@ -25,7 +25,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cmake --build build-windows/qa --config Release --parallel 2
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          ctest --test-dir build-windows/qa -C Release --output-on-failure
+          # Verbose, so the log says whether the transport tests checked the SHA instructions.
+          ctest --test-dir build-windows/qa -C Release -V
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tools/qa/test_link_protocol.py
       - name: Audio regressions
@@ -74,6 +75,11 @@ jobs:
           python3 tools/qa/test_protocol_layout.py "$RUNNER_TEMP/protocol-layout"
           python3 tools/qa/check-geode-version.py
           python3 tools/qa/unix-install-state.py --perl /usr/bin/perl
+      - name: Transport tests
+        run: |
+          cmake -S tools/qa -B build-macos/qa -DCMAKE_BUILD_TYPE=Release -DOBS_APP="$RUNNER_TEMP/OBS.app"
+          cmake --build build-macos/qa --target transport-release transport-qa --parallel 3
+          ctest --test-dir build-macos/qa -R transport -V
       - name: Package installer
         run: |
           zsh scripts/package-macos.sh

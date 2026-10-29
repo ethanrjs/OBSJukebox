@@ -97,7 +97,7 @@ static void shaInstructionChecks() {
     portable.update("abc", 3);
     assert(hex(portable.finish()) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     std::cout << (link_key::hasShaInstructions() ? "SHA instructions match the portable rounds\n"
-                                                 : "No SHA instructions on this CPU; portable rounds only\n");
+                                                 : "No SHA instruction path for this CPU; portable rounds only\n");
 }
 
 int main() {

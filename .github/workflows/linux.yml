@@ -41,7 +41,8 @@ jobs:
         run: |
           cmake -S tools/qa -B build-linux/qa -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build-linux/qa --parallel 2
-          ctest --test-dir build-linux/qa --output-on-failure
+          # Verbose, so the log says whether the transport tests checked the SHA instructions.
+          ctest --test-dir build-linux/qa -V
       - name: Check OBS audio
         env:
           OBS_JUKEBOX_TEST_PORT: '39023'
