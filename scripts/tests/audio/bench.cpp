@@ -447,18 +447,29 @@ static void link(unsigned rounds) {
         std::printf("  %-34s %7.2f us CPU each | us p50/p95/p99/max %s\n", what,
                     double(cpuNs() - begin) / 1000 / rounds, calls.spread().c_str());
     };
-    // Each result feeds the next packet and a count printed at the end, so no compiler can drop the work.
-    unsigned valid = 0;
+    // Every round changes a hashed field, and every tag and check result goes into a checksum printed
+    // at the end, so no compiler can hoist or drop the work. A check costs the same whether it matches.
+    unsigned checksum = 0;
     std::cout << "link tags, " << rounds << " rounds\n";
-    time("sign a song packet (mod)", [&] { signPacket(key, song); ++song.attempt; });
-    time("check a song packet (plugin)", [&] { valid += signedWith(key, song); song.tag[0] ^= uint8_t(valid); });
-    time("sign a 512-frame effects packet (mod)", [&] { signPacket(key, effects, effectsSize); ++effects.sequence; });
-    time("check a 512-frame effects packet", [&] {
-        valid += signedWith(key, effects, effectsSize);
-        effects.tag[0] ^= uint8_t(valid);
+    time("sign a song packet (mod)", [&] {
+        signPacket(key, song);
+        checksum += song.tag[0];
+        ++song.attempt;
     });
-    // A check costs the same whether it matches, and these packets change every round, so few do.
-    std::printf("  (%u checks matched)\n", valid);
+    time("check a song packet (plugin)", [&] {
+        checksum += signedWith(key, song);
+        ++song.attempt;
+    });
+    time("sign a 512-frame effects packet (mod)", [&] {
+        signPacket(key, effects, effectsSize);
+        checksum += effects.tag[0];
+        ++effects.sequence;
+    });
+    time("check a 512-frame effects packet", [&] {
+        checksum += signedWith(key, effects, effectsSize);
+        ++effects.sequence;
+    });
+    std::printf("  (checksum %u)\n", checksum);
 }
 
 // FMOD's recordings against the stage, by fixed alignment: no lag search, no gain matching.
