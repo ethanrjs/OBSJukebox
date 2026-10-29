@@ -11,19 +11,20 @@
 #include "../vendor/miniaudio/stb_vorbis.c"
 #include <algorithm>
 #include <cstring>
+#include <new>
 #include <vector>
 
 // Declared in Decoder.hpp. ma_dr_mp3_calculate_seek_points reads every frame header twice, once to
 // count the frames and once to place the points, and without a Xing frame count the length takes a
 // third pass. This takes one pass and repeats the placement on what it recorded, so the table and
-// length are the ones miniaudio would give.
-bool indexMp3(ma_decoder &decoder, ma_uint32 wanted, ma_uint64 &lengthFrames) {
+// length are the ones miniaudio would give. Out of memory for its frame list, the file falls back to
+// miniaudio's own passes, as any other failure does.
+bool indexMp3(ma_decoder &decoder, ma_uint32 wanted, ma_uint64 &lengthFrames) try {
     lengthFrames = 0;
     if (decoder.pBackendVTable != &g_ma_decoding_backend_vtable_mp3)
         return true;
     auto &backend = *static_cast<ma_mp3 *>(decoder.pBackend);
     auto &mp3 = backend.dr;
-    std::vector<ma_dr_mp3_seek_point> points;
     if (mp3.currentPCMFrame != 0 || !ma_dr_mp3_seek_to_start_of_stream(&mp3))
         return false;
     struct Frame {
@@ -42,6 +43,7 @@ bool indexMp3(ma_decoder &decoder, ma_uint32 wanted, ma_uint64 &lengthFrames) {
     }
     if (!ma_dr_mp3_seek_to_start_of_stream(&mp3))
         return false;
+    std::vector<ma_dr_mp3_seek_point> points;
     constexpr size_t leading = MA_DR_MP3_SEEK_LEADING_MP3_FRAMES;
     if (frames.size() < leading + 1) {
         points.push_back({0, 0, 0, 0});
@@ -99,4 +101,6 @@ bool indexMp3(ma_decoder &decoder, ma_uint32 wanted, ma_uint64 &lengthFrames) {
                            ? totalPcm
                            : ma_calculate_frame_count_after_resampling(decoder.outputSampleRate, mp3.sampleRate, totalPcm);
     return true;
+} catch (const std::bad_alloc &) {
+    return false;
 }

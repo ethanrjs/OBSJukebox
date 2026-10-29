@@ -30,11 +30,8 @@ inline bool localSongPath(const std::string &path) {
     auto separator = [](char c) { return c == '/' || c == '\\'; };
     return path.find("://") == std::string::npos && !(path.size() >= 2 && separator(path[0]) && separator(path[1]));
 }
-// Gives an MP3 decoder opened without seek points the `wanted`-point table and, unless the file
-// states its frame count, the length that miniaudio itself would find, from one pass over the file
-// instead of up to three. Leaves other formats alone; lengthFrames stays 0 when not found. Returns
-// false if it could not, and the decoder must then be reopened with miniaudio's seek points. In
-// Decoder.cpp, which can reach miniaudio's internals.
+// Gives an MP3 decoder opened without seek points miniaudio's own `wanted`-point table, and the length
+// when the file doesn't state it (else 0), in one pass. False: reopen with miniaudio's seek points.
 bool indexMp3(ma_decoder &decoder, ma_uint32 wanted, ma_uint64 &lengthFrames);
 class Decoder {
     static constexpr ma_uint32 seekPointCount = 2048;
