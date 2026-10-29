@@ -495,6 +495,16 @@ static Signal oneSidedGaps(size_t frames) {
     }
     return audio;
 }
+// A constant on the left and the highest frequency (+-0.2 each frame) on the right: the two bins
+// whose imaginary part is exactly zero.
+static Signal dcAndNyquist(size_t frames) {
+    Signal audio(frames * 2);
+    for (size_t i = 0; i < frames; ++i) {
+        audio[i * 2] = .2f;
+        audio[i * 2 + 1] = i % 2 ? -.2f : .2f;
+    }
+    return audio;
+}
 // Identical channels for the first half, as centred SFX are, then different ones.
 static Signal monoThenStereo(size_t frames) {
     auto audio = noise(frames, 11);
@@ -526,7 +536,7 @@ static std::vector<std::pair<const char *, Signal>> suite(size_t frames) {
     return {{"stereo noise", noise(frames, 9)},     {"mono noise", mono(frames)},
             {"multitone", multitone(frames)},       {"transients", transients(frames)},
             {"one-sided gaps", oneSidedGaps(frames)}, {"mono then stereo", monoThenStereo(frames)},
-            {"edge values", edgeValues(frames)}};
+            {"edge values", edgeValues(frames)},    {"DC and Nyquist", dcAndNyquist(frames)}};
 }
 // Runs a stage over the signal in calls of the given sizes, cycling through them.
 template <class Shifter>
@@ -552,11 +562,15 @@ struct Difference {
     }
 };
 const std::vector<std::vector<size_t>> callPatterns{{480}, {256}, {64, 113, 256, 480, 31, 1}};
-// Stage lists a chain goes through: added, pitch changed, removed, back, moved to another FFT.
+// Stage lists a chain goes through: added, pitch changed, removed, back, moved to another FFT,
+// replaced by another instance in the same slot.
 template <class Chain> static Signal chain(Signal audio) {
     Chain stages(true, 480);
-    const PitchStage a{.75f, 1024, 0, 71}, b{1.25f, 2048, 0, 72}, bFaster{1.5f, 2048, 0, 72}, aWider{.75f, 4096, 0, 71};
-    const std::vector<std::vector<PitchStage>> lists{{a}, {a, b}, {a, bFaster}, {a}, {a, b}, {aWider, b}, {b}, {}};
+    const PitchStage a{.75f, 1024, 0, 71}, b{1.25f, 2048, 0, 72}, bFaster{1.5f, 2048, 0, 72}, aWider{.75f, 4096, 0, 71},
+        narrow{.83f, 256, 0, 73}, narrowReplaced{.83f, 256, 0, 74}, mid{1.37f, 512, 0, 75};
+    const std::vector<std::vector<PitchStage>> lists{{a},    {a, b},      {a, bFaster},  {a},
+                                                     {a, b}, {aWider, b}, {narrow, mid}, {narrowReplaced, mid},
+                                                     {b},    {}};
     const size_t frames = audio.size() / 2, span = frames / lists.size();
     for (size_t at = 0; at < frames; at += 480) {
         const auto &list = lists[std::min(at / span, lists.size() - 1)];
@@ -566,21 +580,35 @@ template <class Chain> static Signal chain(Signal audio) {
 }
 } // namespace heldout
 
-// The shipping stage must give the frozen reference's samples for every size, pitch, call pattern and
-// gate, so an optimization can't trade away any of the error margin against FMOD.
+// The shipping stage must give the frozen reference's samples, so an optimization can't trade away
+// any of the error margin against FMOD. Each signal, size and pitch runs with one of the call
+// patterns and gates, taking turns; `bench fidelity` runs every pairing.
 static void pitchReferenceTest() {
     heldout::Difference difference;
     size_t run = 0;
     for (const auto &[name, signal] : heldout::suite(72000))
         for (uint32_t fft : {256u, 512u, 1024u, 2048u, 4096u})
-            for (float pitch : {.5f, .75f, 1.f, 1.5f, 2.f}) {
+            for (float pitch : {.5f, .6f, .75f, 1.f, 1.1f, 1.5f, 2.f}) {
                 const auto &calls = heldout::callPatterns[run % heldout::callPatterns.size()];
                 const size_t gate = run++ % 2 ? 256 : 480;
                 difference.add(heldout::shift<PitchShifter>(signal, pitch, fft, gate, calls),
                                heldout::shift<reference_41b8647::PitchShifter>(signal, pitch, fft, gate, calls));
             }
-    for (const auto &signal : {heldout::noise(96000, 13), heldout::mono(96000)})
-        difference.add(heldout::chain<PitchChain>(signal), heldout::chain<reference_41b8647::PitchChain>(signal));
+    // Parameters the wire never sends but process() still has to handle: clamped pitches and FFT
+    // sizes it rounds up.
+    const auto noise = heldout::noise(72000, 14);
+    for (float pitch : {.3f, 3.f})
+        for (uint32_t fft : {0u, 300u})
+            difference.add(heldout::shift<PitchShifter>(noise, pitch, fft, 480, {480}),
+                           heldout::shift<reference_41b8647::PitchShifter>(noise, pitch, fft, 480, {480}));
+    double energy = 0;
+    for (const auto &signal : {heldout::noise(120000, 13), heldout::mono(120000)}) {
+        const auto expected = heldout::chain<reference_41b8647::PitchChain>(signal);
+        difference.add(heldout::chain<PitchChain>(signal), expected);
+        for (float sample : expected)
+            energy += double(sample) * sample;
+    }
+    check(energy > 1, "the reference chain is audible, so matching it means something");
     if (difference.samples)
         std::cerr << difference.samples << " samples differ from the reference, by up to " << difference.max << '\n';
     check(difference.samples == 0, "the pitch stage gives the 41b8647 reference's samples on held-out audio");

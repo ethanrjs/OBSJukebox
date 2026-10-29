@@ -19,6 +19,9 @@
 #include <pthread.h>
 #include <time.h>
 #endif
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 
 // The receiver's packet handling and thread, which only its friends can reach.
 struct BenchAccess {
@@ -37,7 +40,7 @@ using Ns = std::chrono::nanoseconds;
 static uint64_t wallNs() { return uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()); }
 
 // CPU time a thread has used. Windows counts CPU cycles; they are converted with a rate measured once
-// against the wall clock while this thread spins.
+// against the wall clock while this thread spins, so its figures are cycle-equivalent nanoseconds.
 #ifdef _WIN32
 static double cyclesPerNs() {
     static const double rate = [] {
@@ -58,6 +61,15 @@ static uint64_t cpuNs(HANDLE thread) {
 }
 static uint64_t cpuNs(std::thread &thread) { return cpuNs(HANDLE(thread.native_handle())); }
 static uint64_t cpuNs() { return cpuNs(GetCurrentThread()); }
+#elif defined(__APPLE__)
+static uint64_t cpuNs(pthread_t thread) {
+    thread_basic_info_data_t info{};
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(pthread_mach_thread_np(thread), THREAD_BASIC_INFO, thread_info_t(&info), &count) != KERN_SUCCESS)
+        return 0;
+    return (uint64_t(info.user_time.seconds) + uint64_t(info.system_time.seconds)) * 1000000000ULL +
+           (uint64_t(info.user_time.microseconds) + uint64_t(info.system_time.microseconds)) * 1000ULL;
+}
 #else
 static uint64_t cpuNs(pthread_t thread) {
     clockid_t clock;
@@ -66,6 +78,8 @@ static uint64_t cpuNs(pthread_t thread) {
         return 0;
     return uint64_t(t.tv_sec) * 1000000000ULL + uint64_t(t.tv_nsec);
 }
+#endif
+#ifndef _WIN32
 static uint64_t cpuNs(std::thread &thread) { return cpuNs(thread.native_handle()); }
 static uint64_t cpuNs() { return cpuNs(pthread_self()); }
 #endif
@@ -89,11 +103,12 @@ struct Samples {
 };
 
 // One stage over ten seconds of stereo noise in OBS's 480-frame calls, shipping and reference runs
-// interleaved so drift in clock speed hits both. Reports CPU ms per second of audio (median of the
-// rounds) and per-call microseconds.
+// interleaved, taking turns to go first, so drift in clock speed hits both. Reports CPU ms per second
+// of audio (median of the rounds) and per-call microseconds.
 template <class Shifter> static double timeStage(const heldout::Signal &signal, float pitch, uint32_t fft, Samples &calls) {
     auto audio = signal;
     Shifter shifter(480);
+    calls.values.reserve(calls.values.size() + audio.size() / 2 / 480);
     const auto cpuBegin = cpuNs();
     for (size_t at = 0; at < audio.size() / 2; at += 480) {
         const auto begin = wallNs();
@@ -109,10 +124,18 @@ static void pitch(unsigned rounds) {
         const auto signal = identical ? heldout::mono(480000) : heldout::noise(480000, 21);
         for (uint32_t fft : {256u, 512u, 1024u, 2048u, 4096u})
             for (float pitch : {.5f, .75f, 1.f, 1.5f, 2.f}) {
-                Samples shipping, reference, shippingCalls, referenceCalls;
+                Samples shipping, reference, shippingCalls, referenceCalls, warmup;
+                timeStage<reference_41b8647::PitchShifter>(signal, pitch, fft, warmup);
+                timeStage<PitchShifter>(signal, pitch, fft, warmup);
                 for (unsigned round = 0; round < rounds; ++round) {
-                    reference.add(timeStage<reference_41b8647::PitchShifter>(signal, pitch, fft, referenceCalls));
-                    shipping.add(timeStage<PitchShifter>(signal, pitch, fft, shippingCalls));
+                    auto runReference = [&] {
+                        reference.add(timeStage<reference_41b8647::PitchShifter>(signal, pitch, fft, referenceCalls));
+                    };
+                    auto runShipping = [&] { shipping.add(timeStage<PitchShifter>(signal, pitch, fft, shippingCalls)); };
+                    if (round % 2)
+                        runShipping(), runReference();
+                    else
+                        runReference(), runShipping();
                 }
                 std::printf("%s fft %4u pitch %.2f | 41b8647 %6.2f ms/s (%.2f-%.2f) %s | shipping %6.2f ms/s "
                             "(%.2f-%.2f) %s | %+.1f%%\n",
@@ -317,7 +340,9 @@ static void render(unsigned seconds, const std::string &only) {
 
 // The real output thread and both workers, with a real receiver and a game on loopback, for misses,
 // wake-ups and how late each block reaches OBS. CPU is per thread over the measured stretch; the
-// game's sender threads are not the plugin's and are left out.
+// game's sender threads are not the plugin's and are left out. The output thread's figure includes
+// the test stub's copy of each block and the QA recount of late effects, so it compares builds rather
+// than predicting OBS. Allocation counts elsewhere cover C++ `new` on the calling thread only.
 static void threads(const Workload &w, unsigned seconds) {
     receiver = std::make_shared<Receiver>();
     resetOutput();
@@ -422,11 +447,18 @@ static void link(unsigned rounds) {
         std::printf("  %-34s %7.2f us CPU each | us p50/p95/p99/max %s\n", what,
                     double(cpuNs() - begin) / 1000 / rounds, calls.spread().c_str());
     };
+    // Each result feeds the next packet and a count printed at the end, so no compiler can drop the work.
+    unsigned valid = 0;
     std::cout << "link tags, " << rounds << " rounds\n";
-    time("sign a song packet (mod)", [&] { signPacket(key, song); });
-    time("check a song packet (plugin)", [&] { (void)signedWith(key, song); });
-    time("sign a 512-frame effects packet (mod)", [&] { signPacket(key, effects, effectsSize); });
-    time("check a 512-frame effects packet", [&] { (void)signedWith(key, effects, effectsSize); });
+    time("sign a song packet (mod)", [&] { signPacket(key, song); ++song.attempt; });
+    time("check a song packet (plugin)", [&] { valid += signedWith(key, song); song.tag[0] ^= uint8_t(valid); });
+    time("sign a 512-frame effects packet (mod)", [&] { signPacket(key, effects, effectsSize); ++effects.sequence; });
+    time("check a 512-frame effects packet", [&] {
+        valid += signedWith(key, effects, effectsSize);
+        effects.tag[0] ^= uint8_t(valid);
+    });
+    // A check costs the same whether it matches, and these packets change every round, so few do.
+    std::printf("  (%u checks matched)\n", valid);
 }
 
 // FMOD's recordings against the stage, by fixed alignment: no lag search, no gain matching.
