@@ -109,29 +109,106 @@ class PitchShifter {
             lowIm[k] = lowIm[k] + bi;
         }
     }
-    // In-place radix-2 FFT of a spectrum its caller stored in bit-reversed order (point k at
-    // reversed[k]); the result is in order. The inverse is unscaled, as in Bernsee's code.
-    void transform(bool inverse) {
-        const auto &t = *tables;
-        const auto &sines = inverse ? t.inverseSines : t.sines;
-        for (size_t half = 1; half < t.size; half *= 2) {
-            const float *cosines = &t.cosines[half - 1], *passSines = &sines[half - 1];
-            if (half < 4) // Too short to vectorize: one twiddle at a time across every block instead.
-                for (size_t k = 0; k < half; ++k)
-                    for (size_t start = k; start < t.size; start += half * 2) {
-                        const float ac = real[start + half] * cosines[k], bd = imaginary[start + half] * passSines[k];
-                        const float ad = real[start + half] * passSines[k], bc = imaginary[start + half] * cosines[k];
-                        const float br = ac - bd, bi = ad + bc;
-                        real[start + half] = real[start] - br;
-                        imaginary[start + half] = imaginary[start] - bi;
-                        real[start] = real[start] + br;
-                        imaginary[start] = imaginary[start] + bi;
-                    }
-            else
-                for (size_t start = 0; start < t.size; start += half * 2)
-                    butterflies(&real[start], &imaginary[start], &real[start + half], &imaginary[start + half], half,
-                                cosines, passSines);
+    // The forward FFT's last pass without the highs above the first, which no one reads: the
+    // spectrum is used up to bin N/2 only. Same operations as butterflies() for what it keeps.
+    static void lowButterflies(float *__restrict lowRe, float *__restrict lowIm, const float *__restrict highRe,
+                               const float *__restrict highIm, size_t half, const float *__restrict cosines,
+                               const float *__restrict sines) {
+        for (size_t k = 0; k < half; ++k) {
+            const float ac = highRe[k] * cosines[k], bd = highIm[k] * sines[k];
+            const float ad = highRe[k] * sines[k], bc = highIm[k] * cosines[k];
+            const float br = ac - bd, bi = ad + bc;
+            lowRe[k] = lowRe[k] + br;
+            lowIm[k] = lowIm[k] + bi;
         }
+    }
+    // The inverse FFT's last pass without the imaginary parts: overlap-add reads the real part only.
+    static void realButterflies(float *__restrict lowRe, float *__restrict highRe, const float *__restrict highIm,
+                                size_t half, const float *__restrict cosines, const float *__restrict sines) {
+        for (size_t k = 0; k < half; ++k) {
+            const float ac = highRe[k] * cosines[k], bd = highIm[k] * sines[k];
+            const float br = ac - bd;
+            highRe[k] = lowRe[k] - br;
+            lowRe[k] = lowRe[k] + br;
+        }
+    }
+    // One butterfly in registers, with the same operations as butterflies().
+    static void butterfly(float &lowRe, float &lowIm, float &highRe, float &highIm, float cosine, float sine) {
+        const float ac = highRe * cosine, bd = highIm * sine;
+        const float ad = highRe * sine, bc = highIm * cosine;
+        const float br = ac - bd, bi = ad + bc;
+        highRe = lowRe - br;
+        highIm = lowIm - bi;
+        lowRe = lowRe + br;
+        lowIm = lowIm + bi;
+    }
+    // The FFT is radix-2 on a spectrum in bit-reversed order (point k at reversed[k]), unscaled when
+    // inverse as in Bernsee's code. Its first two passes are too short to vectorize, so they run on
+    // groups of four points in registers, pairs and then pairs of pairs, while the group is loaded.
+    // Point k of group 4i is reversed[4i] + groupOffsets[k]: bit reversal sends 1, 2, 3 to N/2,
+    // N/4, 3N/4.
+    void firstTwoPasses(size_t at, float (&re)[4], float (&im)[4], const std::vector<float> &sines) {
+        const auto &cosines = tables->cosines;
+        butterfly(re[0], im[0], re[1], im[1], cosines[0], sines[0]);
+        butterfly(re[2], im[2], re[3], im[3], cosines[0], sines[0]);
+        butterfly(re[0], im[0], re[2], im[2], cosines[1], sines[1]);
+        butterfly(re[1], im[1], re[3], im[3], cosines[2], sines[2]);
+        std::copy_n(re, 4, &real[at]);
+        std::copy_n(im, 4, &imaginary[at]);
+    }
+    std::array<size_t, 4> groupOffsets() const {
+        return {0, tables->size / 2, tables->size / 4, tables->size / 4 * 3};
+    }
+    // The passes between the second and the last.
+    void middlePasses(const std::vector<float> &sines) {
+        const auto &t = *tables;
+        for (size_t half = 4; half < t.size / 2; half *= 2)
+            for (size_t start = 0; start < t.size; start += half * 2)
+                butterflies(&real[start], &imaginary[start], &real[start + half], &imaginary[start + half], half,
+                            &t.cosines[half - 1], &sines[half - 1]);
+    }
+    // The spectrum of the channel's windowed frame, up to bin N/2. The input is real, so every point
+    // starts with a +0 imaginary part.
+    void forwardTransform(const Channel &c) {
+        const auto &t = *tables;
+        const auto offsets = groupOffsets();
+        for (size_t at = 0; at < t.size; at += 4) {
+            float re[4], im[4] = {};
+            for (size_t i = 0; i < 4; ++i) {
+                const size_t point = t.reversed[at] + offsets[i];
+                re[i] = c.input[point] * t.window[point];
+            }
+            firstTwoPasses(at, re, im, t.sines);
+        }
+        middlePasses(t.sines);
+        const size_t half = t.size / 2;
+        butterfly(real[0], imaginary[0], real[half], imaginary[half], t.cosines[half - 1], t.sines[half - 1]);
+        lowButterflies(&real[1], &imaginary[1], &real[half + 1], &imaginary[half + 1], half - 1, &t.cosines[half],
+                       &t.sines[half]);
+    }
+    // The real part of the inverse FFT of the channel's synthesized bins 0..N/2 (shiftedMagnitude at
+    // phaseSum); bins above N/2 are +0. In the groups of four, those leave only points 0 and 2 set,
+    // apart from the first group, which also holds bin N/2.
+    void inverseTransform(const Channel &c) {
+        const auto &t = *tables;
+        const auto offsets = groupOffsets();
+        // A bin nothing was shifted into stays silent; std::polar would give it a signed zero.
+        auto bin = [&](size_t k, float &re, float &im) {
+            const auto value = shiftedMagnitude[k] == 0 ? std::complex<float>() : std::polar(shiftedMagnitude[k], c.phaseSum[k]);
+            re = value.real();
+            im = value.imag();
+        };
+        for (size_t at = 0; at < t.size; at += 4) {
+            float re[4] = {}, im[4] = {};
+            bin(t.reversed[at], re[0], im[0]);
+            bin(t.reversed[at] + offsets[2], re[2], im[2]);
+            if (at == 0)
+                bin(offsets[1], re[1], im[1]);
+            firstTwoPasses(at, re, im, t.inverseSines);
+        }
+        middlePasses(t.inverseSines);
+        const size_t half = t.size / 2;
+        realButterflies(&real[0], &real[half], &imaginary[half], half, &t.cosines[half - 1], &t.inverseSines[half - 1]);
     }
     // std::round (halfway cases away from zero) without the CRT call MSVC makes for it and without
     // compares or copysign, which MSVC won't vectorize. The fraction is exact, and doubling it is too,
@@ -170,10 +247,7 @@ class PitchShifter {
         const auto &t = *tables;
         const size_t bins = t.size / 2;
         const double expected = 2 * pi * double(t.step) / double(t.size);
-        for (size_t k = 0; k < t.size; ++k)
-            real[t.reversed[k]] = c.input[k] * t.window[k];
-        std::fill_n(imaginary.begin(), t.size, 0.f);
-        transform(false);
+        forwardTransform(c);
         // Analysis. The phases come first, so binFrequencies has no calls in it.
         for (size_t k = 0; k <= bins; ++k)
             phase[k] = std::arg(std::complex<float>(real[k], imaginary[k]));
@@ -192,15 +266,7 @@ class PitchShifter {
         }
         // Synthesis: the phases first, then the bins from them.
         advancePhases(shiftedFrequency.data(), c.phaseSum.data(), int(bins + 1), expected);
-        for (size_t k = 0; k <= bins; ++k) {
-            // A bin nothing was shifted into stays silent; std::polar would give it a signed zero.
-            const auto bin = shiftedMagnitude[k] == 0 ? std::complex<float>() : std::polar(shiftedMagnitude[k], c.phaseSum[k]);
-            real[t.reversed[k]] = bin.real();
-            imaginary[t.reversed[k]] = bin.imag();
-        }
-        for (size_t k = bins + 1; k < t.size; ++k)
-            real[t.reversed[k]] = imaginary[t.reversed[k]] = 0;
-        transform(true);
+        inverseTransform(c);
         const float scale = 2.f / float(bins * overlap);
         for (size_t k = 0; k < t.size; ++k)
             c.accumulator[k] += scale * t.window[k] * real[k];
