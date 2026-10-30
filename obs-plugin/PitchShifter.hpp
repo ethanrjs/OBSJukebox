@@ -89,7 +89,7 @@ class PitchShifter {
     size_t gateFrames = 512, size = 0;
     const Tables *tables = nullptr;
     std::array<Channel, 2> channels;
-    std::array<float, maxBins> frequency{}, shiftedMagnitude{}, shiftedFrequency{};
+    std::array<float, maxBins> phase{}, frequency{}, shiftedMagnitude{}, shiftedFrequency{};
     std::array<float, maxFft> real{}, imaginary{}; // the spectrum
 
     // Combines `half` pairs: each low point a and high point b become a + bw and a - bw. It rounds as
@@ -133,6 +133,39 @@ class PitchShifter {
                                 cosines, passSines);
         }
     }
+    // std::round (halfway cases away from zero) without the CRT call MSVC makes for it and without
+    // compares or copysign, which MSVC won't vectorize. The fraction is exact, and doubling it is too,
+    // so its truncation is +-1 exactly when the fraction reaches a half. Exact for |x| < 2^31 (the
+    // phase deltas here stay under 600), except that a zero result is always +0. binFrequencies can
+    // take that: the sign could only reach delta when delta is -0, and delta is then added to k >= +0.
+    static double roundHalfAway(double x) {
+        const double whole = double(int(x));
+        const double fraction = x - whole;
+        return whole + double(int(2 * fraction));
+    }
+    // Each bin's true frequency (in bins) from how far its phase moved since the last frame. Takes
+    // separate arrays so the compiler can vectorize it.
+    static void binFrequencies(const float *__restrict phase, float *__restrict lastPhase, float *__restrict frequency,
+                               int count, double expected) {
+        for (int k = 0; k < count; ++k) {
+            double delta = double(phase[k]) - double(lastPhase[k]) - double(k) * expected;
+            lastPhase[k] = phase[k];
+            delta -= 2 * pi * roundHalfAway(delta / (2 * pi));
+            frequency[k] = float(double(k) + delta * double(overlap) / (2 * pi));
+        }
+    }
+    // Moves each bin's output phase on by its new frequency, wrapped as FMOD does: a phase outside
+    // [-pi, pi] loses its whole turns. FMOD tests the range first; there is no need to, since inside
+    // it the turns truncate to 0 and subtracting +0 leaves the phase as it was, -0 included.
+    static void advancePhases(const float *__restrict shiftedFrequency, float *__restrict phaseSum, int count,
+                              double expected) {
+        for (int k = 0; k < count; ++k) {
+            const double delta = (double(shiftedFrequency[k]) - double(k)) * 2 * pi / double(overlap) +
+                                 double(k) * expected;
+            const double phase = double(phaseSum[k]) + delta;
+            phaseSum[k] = float(phase - double(int(phase / (2 * pi))) * 2 * pi);
+        }
+    }
     void processFrame(Channel &c, float pitch) {
         const auto &t = *tables;
         const size_t bins = t.size / 2;
@@ -141,14 +174,10 @@ class PitchShifter {
             real[t.reversed[k]] = c.input[k] * t.window[k];
         std::fill_n(imaginary.begin(), t.size, 0.f);
         transform(false);
-        // Analysis: each bin's true frequency (in bins) from its phase advance.
-        for (size_t k = 0; k <= bins; ++k) {
-            const float phase = std::arg(std::complex<float>(real[k], imaginary[k]));
-            double delta = double(phase) - double(c.lastPhase[k]) - double(k) * expected;
-            c.lastPhase[k] = phase;
-            delta -= 2 * pi * std::round(delta / (2 * pi));
-            frequency[k] = float(double(k) + delta * double(overlap) / (2 * pi));
-        }
+        // Analysis. The phases come first, so binFrequencies has no calls in it.
+        for (size_t k = 0; k <= bins; ++k)
+            phase[k] = std::arg(std::complex<float>(real[k], imaginary[k]));
+        binFrequencies(phase.data(), c.lastPhase.data(), frequency.data(), int(bins + 1), expected);
         shiftedMagnitude.fill(0.f);
         shiftedFrequency.fill(0.f);
         // FMOD rounds the destination bin; Bernsee's code truncates, which does not sound the same.
@@ -161,16 +190,11 @@ class PitchShifter {
             shiftedMagnitude[target] += 2 * std::abs(std::complex<float>(real[k], imaginary[k]));
             shiftedFrequency[target] = frequency[k] * pitch;
         }
-        // Synthesis: accumulate each bin's phase at its new frequency, wrapped each hop as FMOD does.
+        // Synthesis: the phases first, then the bins from them.
+        advancePhases(shiftedFrequency.data(), c.phaseSum.data(), int(bins + 1), expected);
         for (size_t k = 0; k <= bins; ++k) {
-            const double delta = (double(shiftedFrequency[k]) - double(k)) * 2 * pi / double(overlap) +
-                                 double(k) * expected;
-            double phase = double(c.phaseSum[k]) + delta;
-            if (phase > pi || phase < -pi)
-                phase -= double(int(phase / (2 * pi))) * 2 * pi;
-            c.phaseSum[k] = float(phase);
             // A bin nothing was shifted into stays silent; std::polar would give it a signed zero.
-            const auto bin = shiftedMagnitude[k] == 0 ? std::complex<float>() : std::polar(shiftedMagnitude[k], float(phase));
+            const auto bin = shiftedMagnitude[k] == 0 ? std::complex<float>() : std::polar(shiftedMagnitude[k], c.phaseSum[k]);
             real[t.reversed[k]] = bin.real();
             imaginary[t.reversed[k]] = bin.imag();
         }
