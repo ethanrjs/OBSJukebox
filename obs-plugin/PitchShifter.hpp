@@ -240,9 +240,9 @@ class PitchShifter {
         const auto &t = *tables;
         const auto offsets = groupOffsets();
         // A bin nothing was shifted into stays silent; std::polar would give it a signed zero. That can
-        // only change the sign of a zero in real[], and with default rounding and no flush-to-zero,
-        // adding +-0 to the overlap-add accumulator, which starts at +0, never gives -0, so retained
-        // state is the same as with std::polar.
+        // only change the sign of a zero in real[]. With default rounding and neither flush-to-zero nor
+        // denormals-are-zero, adding +-0 to the overlap-add accumulator, which starts at +0, never
+        // gives -0, so retained state is the same as with std::polar.
         auto bin = [&](size_t k, float &re, float &im) {
             const auto value = shiftedMagnitude[k] == 0 ? std::complex<float>() : std::polar(shiftedMagnitude[k], c.phaseSum[k]);
             re = value.real();
