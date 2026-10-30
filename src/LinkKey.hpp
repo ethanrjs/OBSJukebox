@@ -54,7 +54,8 @@ inline constexpr uint32_t roundConstants[64] = {
 #else
 #define LINK_KEY_SHA_TARGET
 #endif
-// Every packet is tagged on GD's main thread and checked by the plugin, and the x86 SHA extensions
+// Status packets are tagged on GD's main thread (effects packets on AudioTap's sender, clock replies
+// on Bridge's worker) and every packet is checked by the plugin, and the x86 SHA extensions
 // hash a block several times faster than the portable rounds.
 inline bool hasShaInstructions() {
     static const bool supported = [] {
@@ -188,7 +189,7 @@ class Sha256 {
 
   public:
     using Digest = std::array<uint8_t, 32>;
-    // Tests set this to compare the portable rounds with the SHA instructions.
+    // Tests set this to compare the portable rounds with the SHA instructions; leave it false elsewhere.
     bool portableOnly = false;
     void update(const void *data, size_t size) {
         auto bytes = static_cast<const uint8_t *>(data);

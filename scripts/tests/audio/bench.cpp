@@ -12,6 +12,8 @@
 #define main playbackTests
 #include "playback-tests.cpp"
 #undef main
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <numeric>
 #ifdef _WIN32
@@ -582,7 +584,9 @@ int main(int argc, char **argv) {
 #endif
     writeLinkKey(processLinkKey());
     PitchShifter::prepareTables();
-    const unsigned count = argc > 2 ? unsigned(std::atoi(argv[2])) : 0;
+    // A count is digits only, so a GD song named 941913.mp3 stays a file name.
+    const bool counted = argc > 2 && *argv[2] && std::strspn(argv[2], "0123456789") == std::strlen(argv[2]);
+    const unsigned count = counted ? unsigned(std::atoi(argv[2])) : 0;
     if (mode == "pitch")
         bench::pitch(count ? count : 5);
     else if (mode == "render")
@@ -598,7 +602,7 @@ int main(int argc, char **argv) {
     else if (mode == "fidelity")
         bench::fidelity();
     else if (mode == "open") // song files follow, after the rounds if given
-        bench::open(count ? count : 20, std::vector<std::string>(argv + std::min(argc, count ? 3 : 2), argv + argc));
+        bench::open(count ? count : 20, std::vector<std::string>(argv + std::min(argc, counted ? 3 : 2), argv + argc));
     else {
         std::cerr << "Usage: bench pitch|render|threads|link|fidelity|open [rounds or seconds] [render workload name "
                      "part | song files]\n";

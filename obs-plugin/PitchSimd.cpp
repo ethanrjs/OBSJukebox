@@ -2,6 +2,7 @@
 // in the header that every stage user includes.
 #include "../src/LinkPacket.hpp" // PitchShifter.hpp uses PitchStage without including it
 #include "PitchShifter.hpp"
+#include <cstdlib>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -59,6 +60,7 @@ PITCH_AVX_TARGET void butterflies(float *lowRe, float *lowIm, float *highRe, flo
 #else
 namespace pitch_simd {
 bool available() { return false; }
-void butterflies(float *, float *, float *, float *, size_t, const float *, const float *) {} // never called off x86
+// available() is false off x86, so this is never called; stop loudly if that ever changes.
+void butterflies(float *, float *, float *, float *, size_t, const float *, const float *) { std::abort(); }
 } // namespace pitch_simd
 #endif

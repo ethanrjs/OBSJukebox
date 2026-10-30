@@ -18,7 +18,10 @@
 // count the frames and once to place the points, and without a Xing frame count the length takes a
 // third pass. This takes one pass and repeats the placement on what it recorded, so the table and
 // length are the ones miniaudio would give. Out of memory for its frame list, the file falls back to
-// miniaudio's own passes, as any other failure does.
+// miniaudio's own passes, as any other failure does. It reads the MP3 backend's internals and repeats
+// miniaudio 0.11.23's placement, so a miniaudio update must re-check it against decoderSeekPointsTest.
+static_assert(MA_VERSION_MAJOR == 0 && MA_VERSION_MINOR == 11 && MA_VERSION_REVISION == 23,
+              "indexMp3 mirrors miniaudio 0.11.23's ma_dr_mp3_calculate_seek_points; re-check it");
 bool indexMp3(ma_decoder &decoder, ma_uint32 wanted, ma_uint64 &lengthFrames) try {
     lengthFrames = 0;
     if (decoder.pBackendVTable != &g_ma_decoding_backend_vtable_mp3)

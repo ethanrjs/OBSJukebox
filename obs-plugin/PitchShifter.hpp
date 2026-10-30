@@ -239,7 +239,9 @@ class PitchShifter {
     void inverseTransform(const Channel &c) {
         const auto &t = *tables;
         const auto offsets = groupOffsets();
-        // A bin nothing was shifted into stays silent; std::polar would give it a signed zero.
+        // A bin nothing was shifted into stays silent; std::polar would give it a signed zero. That can
+        // only change the sign of a zero in real[], and adding +-0 to the overlap-add accumulator, which
+        // starts at +0, never gives -0, so retained state is the same as with std::polar.
         auto bin = [&](size_t k, float &re, float &im) {
             const auto value = shiftedMagnitude[k] == 0 ? std::complex<float>() : std::polar(shiftedMagnitude[k], c.phaseSum[k]);
             re = value.real();
@@ -331,7 +333,7 @@ class PitchShifter {
     }
 
   public:
-    // Tests set this to check the AVX loops against the portable ones.
+    // Tests set this to check the AVX loops against the portable ones; leave it false elsewhere.
     bool portableOnly = false;
     explicit PitchShifter(size_t gateFrames = 512) : gateFrames(gateFrames ? gateFrames : 512) {}
     // Builds the shared tables and checks for AVX. Call before any audio thread starts; process()
