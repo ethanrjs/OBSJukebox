@@ -1,6 +1,6 @@
 // The pitch stage's AVX loops (declared in PitchShifter.hpp), defined once here rather than inline
 // in the header that every stage user includes.
-#include "../src/LinkPacket.hpp"
+#include "../src/LinkPacket.hpp" // PitchShifter.hpp uses PitchStage without including it
 #include "PitchShifter.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64)

@@ -106,7 +106,8 @@ class PitchShifter {
 
     // Combines `half` pairs: each low point a and high point b become a + bw and a - bw. It rounds as
     // std::complex<float> does: each product is its own statement, as in libc++, so clang's default
-    // contraction can't fuse it into a multiply-add (x86-64 builds have no FMA to fuse with). The
+    // contraction can't fuse it into a multiply-add (x86-64 builds have no FMA to fuse with). GCC
+    // contracts across statements by default, so a GCC arm64 build, which nothing ships, could fuse. The
     // halves never overlap, which lets the compiler vectorize the loop.
     static void butterflies(float *__restrict lowRe, float *__restrict lowIm, float *__restrict highRe,
                             float *__restrict highIm, size_t half, const float *__restrict cosines,
@@ -333,9 +334,12 @@ class PitchShifter {
     // Tests set this to check the AVX loops against the portable ones.
     bool portableOnly = false;
     explicit PitchShifter(size_t gateFrames = 512) : gateFrames(gateFrames ? gateFrames : 512) {}
-    // Builds the shared tables. Call before any audio thread starts; process() would build them
-    // lazily on first use otherwise.
-    static void prepareTables() { (void)allTables(); }
+    // Builds the shared tables and checks for AVX. Call before any audio thread starts; process()
+    // would do both lazily on first use otherwise.
+    static void prepareTables() {
+        (void)allTables();
+        (void)pitch_simd::available();
+    }
     bool active() const { return size != 0; }
     // Forgets the stage's audio and phase without freeing its fixed buffers.
     void clear() {

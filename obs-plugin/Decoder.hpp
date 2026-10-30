@@ -58,6 +58,10 @@ class Decoder {
     inline static std::atomic<bool> testFailOnNextSeek{false};
     inline static std::atomic<bool> testStarveAllReads{false};
     inline static std::atomic<unsigned> testOpenCount{0};
+    // QA: the next open treats indexMp3 as failed (as when it runs out of memory); how often an open
+    // fell back to miniaudio's own seek points.
+    inline static std::atomic<bool> testIndexFailsOnNextOpen{false};
+    inline static std::atomic<unsigned> testIndexFallbacks{0};
     std::atomic<unsigned> testSeekCount{0}; // QA: how often this source sought, to catch a wandering rate
 #endif
     double position = 0;
@@ -112,11 +116,19 @@ class Decoder {
         // An MP3 gets its seek points from indexMp3's single pass over the file; if that fails, from
         // miniaudio's own.
         auto result = init();
-        if (result == MA_SUCCESS && !indexMp3(decoder, seekPointCount, lengthFrames)) {
+#ifdef OBS_JUKEBOX_QA
+        const bool indexFails = testIndexFailsOnNextOpen.exchange(false);
+#else
+        constexpr bool indexFails = false;
+#endif
+        if (result == MA_SUCCESS && (indexFails || !indexMp3(decoder, seekPointCount, lengthFrames))) {
             ma_decoder_uninit(&decoder);
             config.seekPointCount = seekPointCount;
             result = init();
             lengthFrames = 0;
+#ifdef OBS_JUKEBOX_QA
+            ++testIndexFallbacks;
+#endif
         }
         opened = result == MA_SUCCESS;
 #ifdef _WIN32
@@ -153,6 +165,9 @@ class Decoder {
     }
     bool ready() const { return opened; }
     bool starvedBeforeEnd() const { return unexpectedStarvation; }
+#ifdef OBS_JUKEBOX_QA
+    ma_uint64 testLengthFrames() const { return lengthFrames; }
+#endif
     bool hasAudioAt(double seconds) const {
         return opened && lengthFrames && std::isfinite(seconds) && seconds >= 0 &&
                seconds * 48000 + 4800 < double(lengthFrames);

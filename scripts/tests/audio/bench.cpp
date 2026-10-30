@@ -381,6 +381,8 @@ static void threads(const Workload &w, unsigned seconds) {
         std::map<std::string, uint64_t> cpuBegin;
         uint64_t measureStart = 0, musicMisses = 0, effectsMisses = 0;
         auto threadCpu = [&] {
+            while (!source.testWorkersStarted.load(std::memory_order_acquire))
+                std::this_thread::yield();
             return std::map<std::string, uint64_t>{{"output", cpuNs(source.worker)},
                                                     {"music", cpuNs(source.decoderWorker)},
                                                     {"effects", cpuNs(source.effectsWorker)},

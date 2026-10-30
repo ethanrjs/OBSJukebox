@@ -137,26 +137,32 @@ static void decoderSeekRecoveryTest() {
     }
 }
 // Decoder::open finds an MP3's seek points and length in one pass (indexMp3). Seeks must land on the
-// samples miniaudio's own seek points give, and the length must match it to within two frames, with and
-// without a Xing header, and resampled from 44.1 kHz. At rate 1 the first seek after opening renders the
-// decoded samples unchanged; both sides open afresh for each seek, since a resampler keeps state.
+// samples miniaudio's own seek points give, and the length must equal its length, with and without a
+// Xing header, and resampled from 44.1 kHz. The last case makes indexMp3 fail, as it does out of memory,
+// so the decoder reopens with miniaudio's seek points; the others must not fall back. At rate 1 the first
+// seek after opening renders the decoded samples unchanged; both sides open afresh for each seek, since a
+// resampler keeps state.
 static void decoderSeekPointsTest(){
-    const std::pair<const char*,const char*> files[]={
-        {"artifacts/audio-tests/long.mp3","MP3 seek points and length match miniaudio's"},
-        {"artifacts/audio-tests/long-noxing.mp3","MP3 seek points and length match miniaudio's without a Xing header"},
-        {"artifacts/audio-tests/long-44k-noxing.mp3","MP3 seek points and resampled length match miniaudio's at 44.1 kHz"}};
+    const struct{const char* path;const char* label;bool indexFails;} files[]={
+        {"artifacts/audio-tests/long.mp3","MP3 seek points and length match miniaudio's",false},
+        {"artifacts/audio-tests/long-noxing.mp3","MP3 seek points and length match miniaudio's without a Xing header",false},
+        {"artifacts/audio-tests/long-44k-noxing.mp3","MP3 seek points and resampled length match miniaudio's at 44.1 kHz",false},
+        {"artifacts/audio-tests/long-noxing.mp3","MP3 that indexMp3 cannot index opens with miniaudio's seek points",true}};
     auto config=ma_decoder_config_init(ma_format_f32,2,48000);config.seekPointCount=2048;
-    for(const auto& [path,label]:files){
+    for(const auto& [path,label,indexFails]:files){
         bool same=true;
         auto fresh=[&](auto&& compare){
             Decoder decoder;ma_decoder reference;
+            const unsigned fallbacks=Decoder::testIndexFallbacks;
+            Decoder::testIndexFailsOnNextOpen=indexFails;
             if(!decoder.open(path) || ma_decoder_init_file(path,&config,&reference)!=MA_SUCCESS){same=false;return;}
+            same&=Decoder::testIndexFallbacks==fallbacks+(indexFails?1:0);
             compare(decoder,reference);
             ma_decoder_uninit(&reference);
         };
         fresh([&](Decoder& decoder,ma_decoder& reference){
             ma_uint64 length=0;ma_decoder_get_length_in_pcm_frames(&reference,&length);
-            same&=decoder.hasAudioAt(double(length-4802)/48000) && !decoder.hasAudioAt(double(length-4799)/48000);
+            same&=length && decoder.testLengthFrames()==length;
         });
         std::vector<float> ours(4800*2),theirs(4800*2);
         for(double at:{37.3,233.7,.5,120.01})

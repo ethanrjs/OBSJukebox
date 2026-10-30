@@ -787,6 +787,7 @@ struct SongSource {
     std::array<DryBlock, 8> testDry{};
     std::atomic<unsigned> testMusicMisses{0}, testMusicMissesRaw{0}, testEffectsMisses{0}, testEffectsMissesRaw{0};
     std::atomic<bool> testMeasure{false};
+    std::atomic<bool> testWorkersStarted{false}; // run() has assigned decoderWorker and effectsWorker
 #endif
     explicit SongSource(obs_source_t *s)
         : source(s), linkReceiver(receiver) {}
@@ -1263,6 +1264,9 @@ struct SongSource {
         wantedTimestamp = timestamp;
         decoderWorker = std::thread([this] { decodeMusic(); });
         effectsWorker = std::thread([this] { renderEffectsBlocks(); });
+#ifdef OBS_JUKEBOX_QA
+        testWorkersStarted.store(true, std::memory_order_release);
+#endif
         auto next = Clock::now() + std::chrono::nanoseconds(blockNs);
         BlockTimer timer;
         while (!stop) {
