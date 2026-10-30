@@ -13,6 +13,22 @@
 #include <optional>
 #include <random>
 #include <string>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
+#endif
 #ifdef _WIN32
 #include "Socket.hpp"
 #include <windows.h>
@@ -22,6 +38,123 @@
 #endif
 
 namespace link_key {
+inline constexpr uint32_t roundConstants[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+#if defined(__x86_64__) || defined(_M_X64)
+#define LINK_KEY_SHA_INSTRUCTIONS
+#if defined(__GNUC__) || defined(__clang__)
+#define LINK_KEY_SHA_TARGET __attribute__((target("sha,sse4.1")))
+#else
+#define LINK_KEY_SHA_TARGET
+#endif
+// Status packets are tagged on GD's main thread, effects packets on AudioTap's sender and clock
+// replies on Bridge's worker; the plugin checks every one. The x86 SHA extensions hash a block
+// several times faster than the portable rounds.
+inline bool hasShaInstructions() {
+    static const bool supported = [] {
+#ifdef _MSC_VER
+        int info[4];
+        __cpuid(info, 0);
+        if (info[0] < 7)
+            return false;
+        __cpuid(info, 1);
+        const unsigned features = unsigned(info[2]);
+        __cpuidex(info, 7, 0);
+        const unsigned extended = unsigned(info[1]);
+#else
+        unsigned a = 0, b = 0, features = 0, d = 0, extended = 0, c = 0;
+        if (!__get_cpuid(1, &a, &b, &features, &d) || !__get_cpuid_count(7, 0, &a, &extended, &c, &d))
+            return false;
+#endif
+        const bool ssse3 = features & (1u << 9), sse41 = features & (1u << 19), sha = extended & (1u << 29);
+        return ssse3 && sse41 && sha;
+    }();
+    return supported;
+}
+// One block with the SHA extensions, as in Intel's reference code: the state is held as ABEF and
+// CDGH, and each step runs four rounds and extends the message schedule by four words.
+LINK_KEY_SHA_TARGET inline void compressWithShaInstructions(uint32_t *state, const uint8_t *block) {
+    const __m128i byteSwap = _mm_set_epi64x(0x0c0d0e0f08090a0bLL, 0x0405060700010203LL);
+    const __m128i cdab = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i *>(state)), 0xB1);
+    const __m128i efgh = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i *>(state + 4)), 0x1B);
+    __m128i abef = _mm_alignr_epi8(cdab, efgh, 8), cdgh = _mm_blend_epi16(efgh, cdab, 0xF0);
+    const __m128i abefBefore = abef, cdghBefore = cdgh;
+    __m128i words[4];
+    for (int i = 0; i < 4; ++i)
+        words[i] = _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i *>(block + i * 16)), byteSwap);
+    for (int step = 0; step < 16; ++step) {
+        const __m128i current = words[step & 3];
+        const __m128i scheduled =
+            _mm_add_epi32(current, _mm_loadu_si128(reinterpret_cast<const __m128i *>(roundConstants + step * 4)));
+        cdgh = _mm_sha256rnds2_epu32(cdgh, abef, scheduled);
+        if (step >= 3 && step < 15) {
+            auto &next = words[(step + 1) & 3];
+            next = _mm_sha256msg2_epu32(_mm_add_epi32(next, _mm_alignr_epi8(current, words[(step - 1) & 3], 4)),
+                                        current);
+        }
+        abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(scheduled, 0x0E));
+        if (step >= 1 && step < 13)
+            words[(step - 1) & 3] = _mm_sha256msg1_epu32(words[(step - 1) & 3], current);
+    }
+    abef = _mm_add_epi32(abef, abefBefore);
+    cdgh = _mm_add_epi32(cdgh, cdghBefore);
+    const __m128i feba = _mm_shuffle_epi32(abef, 0x1B), dchg = _mm_shuffle_epi32(cdgh, 0xB1);
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(state), _mm_blend_epi16(feba, dchg, 0xF0));
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(state + 4), _mm_alignr_epi8(dchg, feba, 8));
+}
+#elif defined(__aarch64__) && (defined(__APPLE__) || defined(__linux__))
+#define LINK_KEY_SHA_INSTRUCTIONS
+#if defined(__ARM_FEATURE_SHA2)
+#define LINK_KEY_SHA_TARGET // Apple's arm64 default CPU has them
+#elif defined(__clang__)
+#define LINK_KEY_SHA_TARGET __attribute__((target("sha2")))
+#else
+#define LINK_KEY_SHA_TARGET __attribute__((target("+sha2")))
+#endif
+// Every Apple Silicon CPU has the ARMv8 SHA-256 instructions; other arm64 CPUs may not, so the OS is
+// asked either way.
+inline bool hasShaInstructions() {
+    static const bool supported = [] {
+#ifdef __APPLE__
+        int present = 0;
+        size_t size = sizeof(present);
+        return sysctlbyname("hw.optional.arm.FEAT_SHA256", &present, &size, nullptr, 0) == 0 && present != 0;
+#else
+        return (getauxval(AT_HWCAP) & HWCAP_SHA2) != 0;
+#endif
+    }();
+    return supported;
+}
+// One block with the ARMv8 SHA-256 instructions: the state stays in order as ABCD and EFGH, each step
+// runs four rounds, and the first twelve steps extend the message schedule by four words.
+LINK_KEY_SHA_TARGET inline void compressWithShaInstructions(uint32_t *state, const uint8_t *block) {
+    uint32x4_t abcd = vld1q_u32(state), efgh = vld1q_u32(state + 4);
+    const uint32x4_t abcdBefore = abcd, efghBefore = efgh;
+    uint32x4_t words[4];
+    for (int i = 0; i < 4; ++i)
+        words[i] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + i * 16)));
+    for (int step = 0; step < 16; ++step) {
+        const uint32x4_t scheduled = vaddq_u32(words[step & 3], vld1q_u32(roundConstants + step * 4));
+        const uint32x4_t abcdBeforeStep = abcd;
+        abcd = vsha256hq_u32(abcd, efgh, scheduled);
+        efgh = vsha256h2q_u32(efgh, abcdBeforeStep, scheduled);
+        if (step < 12)
+            words[step & 3] = vsha256su1q_u32(vsha256su0q_u32(words[step & 3], words[(step + 1) & 3]),
+                                              words[(step + 2) & 3], words[(step + 3) & 3]);
+    }
+    vst1q_u32(state, vaddq_u32(abcd, abcdBefore));
+    vst1q_u32(state + 4, vaddq_u32(efgh, efghBefore));
+}
+#else
+inline bool hasShaInstructions() { return false; }
+#endif
 // SHA-256 as FIPS 180-4 defines it.
 class Sha256 {
     std::array<uint32_t, 8> state{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
@@ -31,15 +164,11 @@ class Sha256 {
     uint64_t total = 0;
     static uint32_t rotate(uint32_t x, int n) { return x >> n | x << (32 - n); }
     void compress() {
-        static constexpr uint32_t k[64] = {
-            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+#ifdef LINK_KEY_SHA_INSTRUCTIONS
+        if (!portableOnly && hasShaInstructions())
+            return compressWithShaInstructions(state.data(), block);
+#endif
+        const auto &k = roundConstants;
         uint32_t w[64];
         for (int i = 0; i < 16; ++i)
             w[i] = uint32_t(block[i * 4]) << 24 | uint32_t(block[i * 4 + 1]) << 16 | uint32_t(block[i * 4 + 2]) << 8 |
@@ -60,6 +189,8 @@ class Sha256 {
 
   public:
     using Digest = std::array<uint8_t, 32>;
+    // Tests set this to compare the portable rounds with the SHA instructions; leave it false elsewhere.
+    bool portableOnly = false;
     void update(const void *data, size_t size) {
         auto bytes = static_cast<const uint8_t *>(data);
         total += size;

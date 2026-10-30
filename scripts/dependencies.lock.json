@@ -2,7 +2,7 @@
   "sources": {
     "geode-sdk": [
       "https://github.com/geode-sdk/geode.git",
-      "7e41336f68660b990644f5c3450b6da6ae944560"
+      "3909856e8714b503945d5cea12ba1bddf5d5b1b0"
     ],
     "bindings": [
       "https://github.com/geode-sdk/bindings.git",
@@ -19,22 +19,22 @@
   },
   "assets": {
     "geode-win": {
-      "url": "https://github.com/geode-sdk/geode/releases/download/v5.10.1/geode-v5.10.1-win.zip",
-      "sha256": "49f0fbcaee398cda467979acb40c067145f9df92fd8ce3661e853f1fc05b53d8",
-      "destination": "geode-windows-5.10.1",
+      "url": "https://github.com/geode-sdk/geode/releases/download/v5.11.2/geode-v5.11.2-win.zip",
+      "sha256": "193d4d9003dd020c989eae5c0e5345aa5b501f2a3ea467ebdd83b72a0c6539cf",
+      "destination": "geode-windows-5.11.2",
       "platform": "windows",
       "kind": "zip"
     },
     "geode-mac": {
-      "url": "https://github.com/geode-sdk/geode/releases/download/v5.10.1/geode-v5.10.1-mac.zip",
-      "sha256": "d9dd5f5c776cec6fba880816e5a6dfbe03e921101d3ae263eab6e60f3f8b1d54",
-      "destination": "geode-macos-5.10.1",
+      "url": "https://github.com/geode-sdk/geode/releases/download/v5.11.2/geode-v5.11.2-mac.zip",
+      "sha256": "b4bed59e29044c19cf33e7b0dadfc04d6af681e2f37253e16e40879dac0eea4d",
+      "destination": "geode-macos-5.11.2",
       "platform": "mac",
       "kind": "zip"
     },
     "resources": {
-      "url": "https://github.com/geode-sdk/geode/releases/download/v5.10.1/resources.zip",
-      "sha256": "bb7a07c5b304d3be120325ea2f0974a9e8dddac28001530ab780229bcebbfab4",
+      "url": "https://github.com/geode-sdk/geode/releases/download/v5.11.2/resources.zip",
+      "sha256": "33d7a2b35d64447fbdf2d69de09ea95bae80a29f7d77e63f4e574ef881eae054",
       "destination": "geode-resources",
       "platform": "all",
       "kind": "zip"

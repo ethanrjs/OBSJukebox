@@ -30,7 +30,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cmake --build build-windows/qa --config Release --parallel 2
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          ctest --test-dir build-windows/qa -C Release --output-on-failure
+          # Verbose, so the log says whether the transport tests checked the SHA instructions.
+          ctest --test-dir build-windows/qa -C Release -V
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python tools/qa/test_link_protocol.py
       - name: Audio regressions
@@ -40,6 +41,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $env:PATH += ';C:\ProgramData\chocolatey\bin'
           ./scripts/tests/audio/run.ps1
+          ./scripts/tests/audio/run.ps1 -Bench -BuildOnly
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: Windows-installer
@@ -72,6 +74,7 @@ jobs:
           brew install ffmpeg
           # The hosted macOS runners can't keep 10 ms audio deadlines (a 10 ms sleep takes up to 50 ms).
           bash scripts/tests/audio/run.sh --skip-timing
+          bash scripts/tests/audio/run.sh --bench --build-only
           python3 tools/qa/test_link_protocol.py
           c++ -std=c++20 tools/qa/protocol-layout.cpp -o "$RUNNER_TEMP/protocol-layout"
           python3 tools/qa/test_protocol_layout.py "$RUNNER_TEMP/protocol-layout"
@@ -80,6 +83,11 @@ jobs:
           bash tools/qa/make-update-fixtures.sh tools/qa/update-fixtures
           c++ -std=c++20 -Wall -Wextra tools/qa/update-rules-validation.cpp src/UpdateRules.cpp src/UpdateCrypto.cpp -framework Security -framework CoreFoundation -o "$RUNNER_TEMP/update-rules-validation"
           "$RUNNER_TEMP/update-rules-validation" tools/qa/update-fixtures
+      - name: Transport tests
+        run: |
+          cmake -S tools/qa -B build-macos/qa -DCMAKE_BUILD_TYPE=Release -DOBS_APP="$RUNNER_TEMP/OBS.app"
+          cmake --build build-macos/qa --target transport-release transport-qa --parallel 3
+          ctest --test-dir build-macos/qa -R transport -V
       - name: Package installer
         run: |
           zsh scripts/package-macos.sh

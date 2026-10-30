@@ -37,6 +37,8 @@ This mod utilizes [Stephan M. Bernsee's smbPitchShift algorithm](https://blogs.z
 
 ## Compatibility
 
+Requires Geode 5.11.2 or newer in the 5.x series, Geometry Dash 2.2081, and Jukebox 3.8.0.
+
 Windows x64 and macOS 13+ (Apple Silicon) are (somewhat) supported. Linux support through Proton is experimental.
 
 Run OBS as your normal user, not as administrator. OBS only follows packets signed with a key that the mod writes where only your account can read it. A program already running as you can read that key too, and an OBS running as administrator would then open files for it that only an administrator can read.

@@ -78,6 +78,39 @@ public:
     AudioThreadScheduling(const AudioThreadScheduling &) = delete;
     AudioThreadScheduling &operator=(const AudioThreadScheduling &) = delete;
 };
+// Sleeps the output thread until its next block. A plain sleep wakes on the process's timer ticks,
+// and Windows 11 can leave a minimized OBS on the default 15.6 ms ones despite libobs's 1 ms
+// request; waking 20 ms late then outruns the effects worker's one block of lead. A high
+// resolution waitable timer isn't bound to those ticks. Elsewhere, and if Windows has no such
+// timer, it is a plain sleep.
+class BlockTimer {
+#ifdef _WIN32
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+#endif
+public:
+    BlockTimer() = default;
+    BlockTimer(const BlockTimer &) = delete;
+    BlockTimer &operator=(const BlockTimer &) = delete;
+    ~BlockTimer() {
+#ifdef _WIN32
+        if (timer)
+            CloseHandle(timer);
+#endif
+    }
+    void sleepUntil(Clock::time_point deadline) {
+#ifdef _WIN32
+        // The timer counts in 100 ns steps; rounding up, and waiting again if it fires early, means
+        // it never returns before the deadline.
+        for (auto left = deadline - Clock::now(); timer && left > Clock::duration::zero(); left = deadline - Clock::now()) {
+            LARGE_INTEGER due;
+            due.QuadPart = -((std::chrono::duration_cast<std::chrono::nanoseconds>(left).count() + 99) / 100);
+            if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE) || WaitForSingleObject(timer, INFINITE) != WAIT_OBJECT_0)
+                break;
+        }
+#endif
+        std::this_thread::sleep_until(deadline);
+    }
+};
 struct LinkState {
     SongLinkPacket packet;
     Clock::time_point received{};
@@ -462,8 +495,9 @@ class Receiver {
   public:
 #ifdef OBS_JUKEBOX_QA
     // The audio tests run a receiver without its socket or thread and feed it packets on
-    // simulated time.
+    // simulated time. The benchmark times its packet handling and its thread.
     friend struct Simulation;
+    friend struct BenchAccess;
     struct Offline {};
     explicit Receiver(Offline) {}
 #endif
@@ -558,11 +592,17 @@ class Receiver {
         return ids;
     }
     std::vector<SongLinkPacket> playbackWindow(uint64_t start, uint64_t end, int channel = 0) {
+        std::vector<SongLinkPacket> window;
+        playbackWindow(start, end, channel, window);
+        return window;
+    }
+    // Fills `window` in place, so an audio thread that keeps it allocates nothing once it has grown.
+    void playbackWindow(uint64_t start, uint64_t end, int channel, std::vector<SongLinkPacket> &window) {
         std::lock_guard lock(mutex);
-        std::vector<SongLinkPacket> window(1);
-        window.front().channelID = channel;
+        window.clear();
+        window.emplace_back().channelID = channel;
         if (channel < -1 || channel >= SONG_LINK_MAX_CHANNELS)
-            return window;
+            return;
         auto &voice = playback[channel + 1];
         auto next = std::upper_bound(voice.begin(), voice.end(), start,
                                      [](uint64_t t, const auto &p) { return t < p.packet.timestamp; });
@@ -570,7 +610,6 @@ class Receiver {
             window.front() = std::prev(next)->packet;
         for (; next != voice.end() && next->packet.timestamp < end; ++next)
             window.push_back(next->packet);
-        return window;
     }
     // A packet runs until the next packet in sequence starts, and its last sample blends into that
     // packet's first, so seams sound like any other pair of samples. The tap's timestamps can leave
@@ -748,6 +787,7 @@ struct SongSource {
     std::array<DryBlock, 8> testDry{};
     std::atomic<unsigned> testMusicMisses{0}, testMusicMissesRaw{0}, testEffectsMisses{0}, testEffectsMissesRaw{0};
     std::atomic<bool> testMeasure{false};
+    std::atomic<bool> testWorkersStarted{false}; // run() has assigned decoderWorker and effectsWorker
 #endif
     explicit SongSource(obs_source_t *s)
         : source(s), linkReceiver(receiver) {}
@@ -809,6 +849,9 @@ struct SongSource {
     uint64_t groupSession = 0;
     PitchChain effectsChain{true}; // the SFX stages after the tap; effects worker only, preallocated
     uint64_t effectsSession = 0;
+    // The global packets for the block each thread is on; kept so neither allocates per block.
+    std::vector<SongLinkPacket> effectsWindow; // effects worker only
+    std::vector<SongLinkPacket> outputWindow;  // output thread only
     bool outputActive = false;  // output thread only
     bool outputStarted = false; // output thread only; the first block is not a reactivation
 #if defined(__linux__)
@@ -1125,7 +1168,8 @@ struct SongSource {
 #ifdef OBS_JUKEBOX_QA
         std::this_thread::sleep_for(std::chrono::milliseconds(testEffectsDelayMs.exchange(0)));
 #endif
-        const auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
+        linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1, effectsWindow);
+        const auto &window = effectsWindow;
         if (hasEffectsStages(window, timestamp)) {
             mixGameEffects(window, timestamp, effects);
 #ifdef OBS_JUKEBOX_QA
@@ -1185,7 +1229,8 @@ struct SongSource {
         // here keeps the full margin for late packets. Staged blocks come from the worker. The newest
         // packets decide: a stage that appears after the worker rendered its block leaves that block
         // silent, as a fresh FMOD shifter is, and one removed since then is gone at once.
-        const auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1);
+        linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1, outputWindow);
+        const auto &window = outputWindow;
         const bool staged = hasEffectsStages(window, timestamp);
         if (!staged) {
             effects = {};
@@ -1219,9 +1264,13 @@ struct SongSource {
         wantedTimestamp = timestamp;
         decoderWorker = std::thread([this] { decodeMusic(); });
         effectsWorker = std::thread([this] { renderEffectsBlocks(); });
+#ifdef OBS_JUKEBOX_QA
+        testWorkersStarted.store(true, std::memory_order_release);
+#endif
         auto next = Clock::now() + std::chrono::nanoseconds(blockNs);
+        BlockTimer timer;
         while (!stop) {
-            std::this_thread::sleep_until(next);
+            timer.sleepUntil(next);
 #ifdef OBS_JUKEBOX_QA
             qaMax(testWakeMaxNs, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                              std::chrono::steady_clock::now() - next)

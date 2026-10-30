@@ -1,5 +1,5 @@
 {
-  "geode": "5.10.1",
+  "geode": "5.11.2",
   "gd": {
     "win": "2.2081",
     "mac": "2.2081"
@@ -7,7 +7,10 @@
   "id": "local.separate_song",
   "name": "OBS Jukebox",
   "version": "v1.2.3",
-  "developer": "babbur",
+  "developers": [
+    "babbur",
+    "Navinor"
+  ],
   "description": "Play a different song on your OBS stream than in game, with the OBS Jukebox plugin.",
   "links": {
     "source": "https://github.com/ethanrjs/OBSJukebox"

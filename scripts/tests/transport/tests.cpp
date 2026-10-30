@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <random>
 #ifndef _WIN32
 #include <sys/resource.h>
 #endif
@@ -77,9 +78,31 @@ static void linkKeyChecks() {
     assert(readLinkKey(file) && (*readLinkKey(file))[0] == 0xaa);
     std::filesystem::remove_all(file.parent_path());
 }
+// The SHA instructions, where this CPU has them, give the portable rounds' digest for every length
+// from empty to several blocks, including each padding case.
+static void shaInstructionChecks() {
+    std::mt19937 random(7);
+    std::string data(5000, '\0');
+    for (auto &c : data)
+        c = char(random());
+    for (size_t size = 0; size <= data.size(); size += size < 200 ? 1 : 97) {
+        link_key::Sha256 chosen, portable;
+        portable.portableOnly = true;
+        chosen.update(data.data(), size);
+        portable.update(data.data(), size);
+        assert(chosen.finish() == portable.finish());
+    }
+    link_key::Sha256 portable;
+    portable.portableOnly = true;
+    portable.update("abc", 3);
+    assert(hex(portable.finish()) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    std::cout << (link_key::hasShaInstructions() ? "SHA instructions match the portable rounds\n"
+                                                 : "No SHA instruction path for this CPU; portable rounds only\n");
+}
 
 int main() {
     linkKeyChecks();
+    shaInstructionChecks();
     using separate_song::downmixStereo;
     float mono[] = {.4f};
     assert(downmixStereo(mono, 1)[0] == .4f && downmixStereo(mono, 1)[1] == .4f);

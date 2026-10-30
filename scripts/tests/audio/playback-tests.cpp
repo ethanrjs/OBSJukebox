@@ -1242,7 +1242,7 @@ int main(int argc,char** argv){
     tapClockDriftTest();effectsSeamTest(44100);effectsSeamTest(48000);effectsGapTest();driftCorrectionTest();
     slowSpeedhackTest();verySlowSpeedhackTest();crawlSpeedhackTest();fastSpeedhackTest();rateBoundsTest();senderTest();senderInvalidPathTest();utf8Test();
     blockQueueTest();pitchTests();slowPitchHeartbeatTest();receiverIsolationTest();receiverEffectsBoundaryTest();receiverFloodTest();receiverLifetimeTest();
-    sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();
+    sourceRecoveryTest(false);sourceRecoveryTest(true);decoderSeekRecoveryTest();decoderSeekPointsTest();
     decoderWatchdogTest();decoderWatchdogTest(true);decoderWatchdogSilenceTest();
     if(timing){
         sourceResyncRecoveryTest();sourceToggleRecoveryTest();decoderWatchdogBackoffTest();

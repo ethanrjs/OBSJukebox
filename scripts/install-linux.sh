@@ -43,7 +43,7 @@ song_game="$(cd -- "$song_game" && pwd -P)"
 [[ -f "$song_game/Geode.dll" && -d "$song_game/geode" ]] || fail 'Install Geode for Windows into Geometry Dash first, then run the game once through Proton.'
 [[ -f "$song_root/check-geode-version.pl" ]] || fail 'The installer is missing its Geode compatibility check. Download the complete package again.'
 command -v perl >/dev/null && perl -MJSON::PP -e 1 >/dev/null 2>&1 || fail 'Install Perl (including its core JSON::PP module) with your Linux package manager, then run this installer again.'
-song_geode_version=$(perl "$song_root/check-geode-version.pl" "$song_game/Geode.dll") || fail 'Geode compatibility could not be verified. Update or repair Geode for Windows with the official installer from https://geode-sdk.org (Geode >=5.10.1 and <6.0.0), then try again. No installation files have been changed.'
+song_geode_version=$(perl "$song_root/check-geode-version.pl" "$song_game/Geode.dll") || fail 'Geode compatibility could not be verified. Update or repair Geode for Windows with the official installer from https://geode-sdk.org (Geode >=5.11.2 and <6.0.0), then try again. No installation files have been changed.'
 song_mods="$song_game/geode/mods"
 song_packages=$(perl -MJSON::PP - "$song_mods" <<'PERL'
 use strict;
