@@ -147,10 +147,34 @@ class PitchShifter {
     // groups of four points in registers, pairs and then pairs of pairs, while the group is loaded.
     // Point k of group 4i is reversed[4i] + groupOffsets[k]: bit reversal sends 1, 2, 3 to N/2,
     // N/4, 3N/4.
-    void firstTwoPasses(size_t at, float (&re)[4], float (&im)[4], const std::vector<float> &sines) {
+    //
+    // Many of those first-pass inputs are known +0s, and a product with a known +0 is a constant
+    // of the twiddle, computed once: the forward input is real, so a pair's imaginary parts are +0
+    // and the products with them are +0 * sine and +0 * cosine; an inverse pair whose high bin is
+    // above N/2 is +0 + +0i, so its b*w is (+0*cos - +0*sin, +0*sin + +0*cos).
+    struct ZeroProducts {
+        float sine, cosine;
+    };
+    static ZeroProducts zeroProducts(float cosine, float sine) { return {0.f * sine, 0.f * cosine}; }
+    static void butterflyRealInputs(float &lowRe, float &lowIm, float &highRe, float &highIm, float cosine, float sine,
+                                    ZeroProducts zero) {
+        const float ac = highRe * cosine, ad = highRe * sine;
+        const float br = ac - zero.sine, bi = ad + zero.cosine;
+        highRe = lowRe - br;
+        highIm = 0.f - bi;
+        lowRe = lowRe + br;
+        lowIm = 0.f + bi;
+    }
+    static void butterflyZeroHigh(float &lowRe, float &lowIm, float &highRe, float &highIm, ZeroProducts zero) {
+        const float br = zero.cosine - zero.sine, bi = zero.sine + zero.cosine;
+        highRe = lowRe - br;
+        highIm = lowIm - bi;
+        lowRe = lowRe + br;
+        lowIm = lowIm + bi;
+    }
+    // Pass 2 and the store, after a pass 1 that the caller does.
+    void secondPass(size_t at, float (&re)[4], float (&im)[4], const std::vector<float> &sines) {
         const auto &cosines = tables->cosines;
-        butterfly(re[0], im[0], re[1], im[1], cosines[0], sines[0]);
-        butterfly(re[2], im[2], re[3], im[3], cosines[0], sines[0]);
         butterfly(re[0], im[0], re[2], im[2], cosines[1], sines[1]);
         butterfly(re[1], im[1], re[3], im[3], cosines[2], sines[2]);
         std::copy_n(re, 4, &real[at]);
@@ -172,13 +196,17 @@ class PitchShifter {
     void forwardTransform(const Channel &c) {
         const auto &t = *tables;
         const auto offsets = groupOffsets();
+        const float cosine = t.cosines[0], sine = t.sines[0];
+        const auto zero = zeroProducts(cosine, sine);
         for (size_t at = 0; at < t.size; at += 4) {
-            float re[4], im[4] = {};
+            float re[4], im[4];
             for (size_t i = 0; i < 4; ++i) {
                 const size_t point = t.reversed[at] + offsets[i];
                 re[i] = c.input[point] * t.window[point];
             }
-            firstTwoPasses(at, re, im, t.sines);
+            butterflyRealInputs(re[0], im[0], re[1], im[1], cosine, sine, zero);
+            butterflyRealInputs(re[2], im[2], re[3], im[3], cosine, sine, zero);
+            secondPass(at, re, im, t.sines);
         }
         middlePasses(t.sines);
         const size_t half = t.size / 2;
@@ -198,13 +226,20 @@ class PitchShifter {
             re = value.real();
             im = value.imag();
         };
+        const float cosine = t.cosines[0], sine = t.inverseSines[0];
+        const auto zero = zeroProducts(cosine, sine);
         for (size_t at = 0; at < t.size; at += 4) {
             float re[4] = {}, im[4] = {};
             bin(t.reversed[at], re[0], im[0]);
             bin(t.reversed[at] + offsets[2], re[2], im[2]);
-            if (at == 0)
+            if (at == 0) {
                 bin(offsets[1], re[1], im[1]);
-            firstTwoPasses(at, re, im, t.inverseSines);
+                butterfly(re[0], im[0], re[1], im[1], cosine, sine);
+            } else {
+                butterflyZeroHigh(re[0], im[0], re[1], im[1], zero);
+            }
+            butterflyZeroHigh(re[2], im[2], re[3], im[3], zero);
+            secondPass(at, re, im, t.inverseSines);
         }
         middlePasses(t.inverseSines);
         const size_t half = t.size / 2;
