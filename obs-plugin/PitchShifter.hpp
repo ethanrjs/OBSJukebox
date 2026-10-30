@@ -25,6 +25,7 @@
 // purpose is hereby granted without fee, provided that the above copyright notice and this license
 // appear in all source copies. THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT EXPRESS OR IMPLIED
 // WARRANTY OF ANY KIND. See http://www.dspguru.com/wol.htm for more information.
+
 // AVX versions of PitchShifter's FFT loops (PitchSimd.cpp): eight lanes of the same statements,
 // separate multiplies and adds with no FMA, so each element gets the same IEEE operations in the
 // same order. available() is true only where the CPU has AVX and the OS saves its registers, and
@@ -264,8 +265,8 @@ class PitchShifter {
     }
     // std::round (halfway cases away from zero) without the CRT call MSVC makes for it and without
     // compares or copysign, which MSVC won't vectorize. The fraction is exact, and doubling it is too,
-    // so its truncation is +-1 exactly when the fraction reaches a half. Exact for |x| < 2^31 (the
-    // phase deltas here stay under 600), except that a zero result is always +0. binFrequencies can
+    // so its truncation is +-1 exactly when the fraction reaches a half. Exact for |x| < 2^31 (here x
+    // is a phase delta in turns and stays under 600), except that a zero result is always +0. binFrequencies can
     // take that: the sign could only reach delta when delta is -0, and delta is then added to k >= +0.
     static double roundHalfAway(double x) {
         const double whole = double(int(x));

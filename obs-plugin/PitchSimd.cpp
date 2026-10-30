@@ -1,5 +1,5 @@
-// The pitch stage's AVX loops (declared in PitchShifter.hpp), in their own file so the intrinsics
-// headers stay out of the plugin's main translation unit.
+// The pitch stage's AVX loops (declared in PitchShifter.hpp), defined once here rather than inline
+// in the header that every stage user includes.
 #include "../src/LinkPacket.hpp"
 #include "PitchShifter.hpp"
 
