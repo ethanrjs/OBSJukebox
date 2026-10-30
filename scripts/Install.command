@@ -1,20 +1,156 @@
 #!/bin/zsh
 set -euo pipefail
+zmodload zsh/system
 song_root="${0:A:h}"
-song_uninstall=0
-if [[ "${1:-}" == --uninstall ]]; then song_uninstall=1; shift; fi
+song_uninstall=0 song_update=0 song_no_downgrade=0 song_result_file='' song_reopen_flag=''
+# Exit codes the update wrapper reads: 0 installed, 1 failed, 2 busy or apps open, 3 rollback
+# incomplete, 4 a newer mod is installed. 2 and 4 mean nothing was changed.
+song_exit=1 song_success=0 song_repair=0 song_failure=''
+typeset -a song_targets song_previous
+finish() { print -r -- "$1"; if [[ -t 0 ]]; then read 'song_reply?Press Return to close. '; fi; }
+fail() { song_failure="$1"; exit 1; }
+# Stops before changing anything, with a code the update wrapper acts on.
+stop() { song_exit=$1; finish "$2"; exit "$1"; }
+# An fcntl lock the shell holds until it exits; the kernel releases it even after a crash.
+# Returns 0 on success, 1 when another process holds it, 3 when the support folder can't be used.
+take_lock() {
+    local song_dir="$HOME/Library/Application Support/OBS Jukebox"
+    /bin/mkdir -p "$song_dir" 2>/dev/null || return 3
+    : >> "$song_dir/$1" 2>/dev/null || return 3
+    zsystem flock -t 0 "$song_dir/$1" 2>/dev/null || return 1
+    return 0
+}
+# True when $1 is a release version above $2 ("v" prefixes allowed). Anything else isn't newer.
+version_newer() {
+    /usr/bin/perl -e 'my @v = map { /\Av?(\d+)\.(\d+)\.(\d+)\z/ ? [$1, $2, $3] : undef } @ARGV;
+        exit 1 unless $v[0] && $v[1];
+        for my $i (0 .. 2) { exit 0 if $v[0][$i] > $v[1][$i]; exit 1 if $v[0][$i] < $v[1][$i] }
+        exit 1' -- "$1" "$2"
+}
+# Restores this run's changes if it didn't finish, then exits with one of the codes above. Installed
+# first, so no failure, however early, passes its raw status on.
+finalize() {
+    trap - EXIT
+    # Take the state once: the trap can be reached twice when finalize runs from inside a function,
+    # and a second restore must not move files again.
+    local -a song_saved_targets song_saved_previous
+    song_saved_targets=("${song_targets[@]}")
+    song_saved_previous=("${song_previous[@]}")
+    local song_message="$song_failure"
+    song_targets=() song_previous=() song_failure=''
+    if (( ! song_success && ${#song_saved_targets} )); then
+        print 'Installation failed. Restoring changed files.'
+        local song_i
+        for (( song_i=${#song_saved_targets}; song_i>=1; song_i-- )); do
+            if [[ -e "${song_saved_targets[$song_i]}" ]]; then
+                /bin/mv "${song_saved_targets[$song_i]}" "$song_audit/Failed/$song_i" || song_repair=1
+            fi
+            if [[ "${song_saved_previous[$song_i]}" == 1 ]]; then
+                /usr/bin/ditto "$song_audit/Backups/$song_i" "${song_saved_targets[$song_i]}" || { song_repair=1; print -r -- "Restore manually: $song_audit/Backups/$song_i -> ${song_saved_targets[$song_i]}"; }
+            fi
+        done
+    fi
+    # The reason comes last, after the restore notes, so the update wrapper and the player see it.
+    if (( ! song_success )) && [[ -n "$song_message" ]]; then
+        [[ -z "${SONG_REASON_FILE:-}" ]] || print -r -- "$song_message" > "$SONG_REASON_FILE" || true
+        finish "$song_message"
+    fi
+    if (( song_success )); then exit 0
+    elif (( song_repair )); then exit 3
+    elif (( song_exit == 2 || song_exit == 4 )); then exit "$song_exit"
+    else exit 1; fi
+}
+trap finalize EXIT
+while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+        --uninstall) song_uninstall=1 ;;
+        --update) song_update=1 ;;
+        --no-downgrade) song_no_downgrade=1 ;;
+        --result) song_result_file="${2:?--result needs a path}"; shift ;;
+        --reopen-flag) song_reopen_flag="${2:?--reopen-flag needs a path}"; shift ;;
+        *) fail "Unknown option: $1" ;;
+    esac
+    shift
+done
 song_app="${1:-$HOME/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app}"
 song_obs="${2:-/Applications/OBS.app}"
 if [[ $# -lt 2 && ! -d "$song_obs" ]]; then song_obs="$HOME/Applications/OBS.app"; fi
 song_app="${song_app:A}"
 song_obs="${song_obs:A}"
-finish() { print -r -- "$1"; if [[ -t 0 ]]; then read 'song_reply?Press Return to close. '; fi; }
-fail() { finish "$1"; exit 1; }
 [[ "$(/usr/bin/uname -s)" == Darwin ]] || fail 'Run this installer on macOS.'
 if (( song_uninstall )); then
-    if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x obs >/dev/null; then fail 'Close Geometry Dash and OBS before undoing installation.'; fi
+    song_lock=0; take_lock install.lock || song_lock=$?
+    if (( song_lock != 0 )); then
+        if (( song_lock == 1 )); then stop 2 'Another OBS Jukebox setup is running. Let it finish, then try again.'; fi
+        fail 'The OBS Jukebox support folder is not writable.'
+    fi
+    if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x obs >/dev/null; then stop 2 'Close Geometry Dash and OBS before undoing installation.'; fi
     /usr/bin/perl "$song_root/install-state.pl" undo-latest "$HOME/Library/Application Support/OBS Jukebox/Install Logs"
+    song_success=1
     exit
+fi
+take_reopen_flag() { [[ -n "$song_reopen_flag" && -e "$song_reopen_flag" ]] && /bin/rm -f "$song_reopen_flag"; }
+if (( song_update )); then
+    [[ -n "$song_result_file" ]] || fail 'Update mode needs --result.'
+    song_payload_version=$(/usr/bin/unzip -p "$song_root/payload/local.separate_song.geode" mod.json | /usr/bin/perl -MJSON::PP -e 'my $v = JSON::PP->new->relaxed->decode(join "", <STDIN>)->{version}; $v =~ s/\Av//; print $v')
+    write_result() {
+        /usr/bin/env SONG_STATUS="$1" SONG_MESSAGE="${2:-}" SONG_REPAIR="${3:-}" SONG_VERSION="$song_payload_version" /usr/bin/perl -MJSON::PP -e '
+            my %r = (version => $ENV{SONG_VERSION}, status => $ENV{SONG_STATUS});
+            $r{message} = $ENV{SONG_MESSAGE} if length $ENV{SONG_MESSAGE};
+            $r{repair} = JSON::PP::true if $ENV{SONG_REPAIR};
+            print JSON::PP->new->canonical->encode(\%r)' > "$song_result_file.tmp"
+        /bin/mv -f "$song_result_file.tmp" "$song_result_file"
+    }
+    # The lock comes before anything that writes the result, so a second wrapper can't overwrite it.
+    song_lock=0; take_lock update.lock || song_lock=$?
+    if (( song_lock != 0 )); then
+        if (( song_lock == 1 )); then song_success=1; exit; fi
+        write_result failed 'The OBS Jukebox support folder is not writable.'
+        song_success=1
+        exit
+    fi
+    # OBS: the second argument, else the first installed copy Spotlight knows, else the defaults.
+    if [[ $# -lt 2 ]]; then
+        song_obs=''
+        for song_candidate in ${(f)"$(/usr/bin/mdfind "kMDItemCFBundleIdentifier == 'com.obsproject.obs-studio'" 2>/dev/null)"} /Applications/OBS.app "$HOME/Applications/OBS.app"; do
+            if [[ -f "$song_candidate/Contents/Info.plist" ]] && song_candidate_exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$song_candidate/Contents/Info.plist" 2>/dev/null) && [[ -f "$song_candidate/Contents/MacOS/$song_candidate_exe" ]]; then
+                song_obs="$song_candidate"; break
+            fi
+        done
+        [[ -n "$song_obs" ]] || { write_result failed 'OBS Studio was not found.'; song_success=1; exit; }
+    fi
+    song_obs_executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$song_obs/Contents/Info.plist")
+    song_reason=$(/usr/bin/mktemp -t obs-jukebox-reason)
+    write_result waiting
+    while true; do
+        song_gd_running=0 song_obs_running=0
+        /usr/bin/pgrep -x 'Geometry Dash' >/dev/null && song_gd_running=1
+        /usr/bin/pgrep -x "$song_obs_executable" >/dev/null && song_obs_running=1
+        if (( song_gd_running || song_obs_running )); then
+            # "Update now" closed GD but OBS is open: give GD back now, install later.
+            if (( ! song_gd_running )) && take_reopen_flag; then /usr/bin/open "$song_app" || true; fi
+            sleep 2; continue
+        fi
+        song_log=$(/usr/bin/mktemp -t obs-jukebox-update)
+        song_code=0
+        /usr/bin/env SONG_REASON_FILE="$song_reason" /bin/zsh "$song_root/Install.command" --no-downgrade "$song_app" "$song_obs" </dev/null >"$song_log" 2>&1 || song_code=$?
+        # The child writes its own reason last; the log tail is only a fallback.
+        song_message=$(/bin/cat "$song_reason" 2>/dev/null || true)
+        [[ -n "$song_message" ]] || song_message=$(/usr/bin/tail -n 1 "$song_log")
+        /bin/rm -f "$song_log"
+        case $song_code in
+            0) write_result installed; if take_reopen_flag; then /usr/bin/open "$song_app" || true; fi ;;
+            2) sleep 2; continue ;;
+            3) write_result failed "$song_message" repair ;;
+            4) ;;
+            1) write_result failed "$song_message" ;;
+            # A killed child (128 and above) can't run its own rollback, so treat it as a repair case.
+            *) write_result failed "$song_message" repair ;;
+        esac
+        /bin/rm -f "$song_reason"
+        song_success=1
+        exit
+    done
 fi
 [[ -f "$song_root/install-state.pl" ]] || fail 'The installer is missing its undo helper.'
 [[ -f "$song_app/Contents/MacOS/Geometry Dash" ]] || fail 'Geometry Dash was not found. Choose its application in your Steam library.'
@@ -28,8 +164,13 @@ done
 song_arch=$(/usr/bin/uname -m)
 /usr/bin/lipo "$song_plugin" -verify_arch "$song_arch" >/dev/null 2>&1 || fail "This installer does not include a plugin for $song_arch."
 /usr/bin/lipo "$song_obs/Contents/MacOS/$song_obs_executable" -verify_arch "$song_arch" >/dev/null 2>&1 || fail 'Install the native OBS Studio build for this Mac before continuing.'
+song_lock=0; take_lock install.lock || song_lock=$?
+if (( song_lock != 0 )); then
+    if (( song_lock == 1 )); then stop 2 'Another OBS Jukebox setup is running. Let it finish, then try again.'; fi
+    fail 'The OBS Jukebox support folder is not writable.'
+fi
 if /usr/bin/pgrep -x 'Geometry Dash' >/dev/null || /usr/bin/pgrep -x "$song_obs_executable" >/dev/null; then
-    fail 'Finish any OBS recording, close Geometry Dash and OBS, then click Install again.'
+    stop 2 'Finish any OBS recording, close Geometry Dash and OBS, then click Install again.'
 fi
 song_frameworks="$song_app/Contents/Frameworks"
 [[ -d "$song_frameworks" && -w "$song_frameworks" ]] || fail 'Your account cannot write to this Steam installation. Choose a Steam library owned by your account.'
@@ -54,6 +195,7 @@ use strict;
 use warnings;
 my ($directory) = @ARGV;
 my %installed;
+my %versions;
 if (-d $directory) {
     opendir my $mods, $directory or die "Cannot read installed mods: $!\n";
     for my $name (sort grep { /\.geode\z/i } readdir $mods) {
@@ -86,73 +228,61 @@ if (-d $directory) {
             die "Installed Jukebox has no macOS support: $path\n" unless grep { $_ eq 'fleym.nongd.dylib' } @entries;
         }
         $installed{$id} = $path;
+        $versions{$id} = $mod->{version};
     }
     closedir $mods;
 }
-print(($installed{'fleym.nongd'} // '-'), "\n", ($installed{'local.separate_song'} // "$directory/local.separate_song.geode"));
+print(($installed{'fleym.nongd'} // '-'), "\n", ($installed{'local.separate_song'} // "$directory/local.separate_song.geode"), "\n", ($versions{'local.separate_song'} // '-'));
 PERL
 ) || fail 'Installed mod compatibility could not be verified. No installation files have been changed.'
-song_jukebox=${song_packages%%$'\n'*}
-song_mod_destination=${song_packages#*$'\n'}
+song_lines=("${(@f)song_packages}")
+song_jukebox=${song_lines[1]} song_mod_destination=${song_lines[2]} song_installed_version=${song_lines[3]}
+song_payload_version=$(/usr/bin/unzip -p "$song_root/payload/local.separate_song.geode" mod.json | /usr/bin/perl -MJSON::PP -e 'my $v = JSON::PP->new->relaxed->decode(join "", <STDIN>)->{version}; $v =~ s/\Av//; print $v')
+if (( song_no_downgrade )) && version_newer "$song_installed_version" "$song_payload_version"; then
+    stop 4 "A newer OBS Jukebox ($song_installed_version) is already installed."
+fi
 song_audit="$HOME/Library/Application Support/OBS Jukebox/Install Logs/$(/bin/date +%Y%m%d-%H%M%S)-$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f",time')-$(/usr/bin/uuidgen)"
 /bin/mkdir -p "$song_audit/Backups" "$song_audit/Failed"
 exec > >(/usr/bin/tee "$song_audit/install.log") 2>&1
 song_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$song_root/payload/separate-song.plugin/Contents/Info.plist")
 print -r -- "OBS Jukebox $song_version" "Geometry Dash: $song_app" "OBS Studio: $song_obs" "Install log and backups: $song_audit"
-typeset -a song_targets song_previous
-song_success=0
-rollback() {
-    local song_result=$?
-    trap - EXIT
-    if (( ! song_success )); then
-        print 'Installation failed. Restoring changed files.'
-        local song_i
-        for (( song_i=${#song_targets}; song_i>=1; song_i-- )); do
-            if [[ -e "${song_targets[$song_i]}" ]]; then
-                /bin/mv "${song_targets[$song_i]}" "$song_audit/Failed/$song_i" || true
-            fi
-            if [[ "${song_previous[$song_i]}" == 1 ]]; then
-                /usr/bin/ditto "$song_audit/Backups/$song_i" "${song_targets[$song_i]}" || print -r -- "Restore manually: $song_audit/Backups/$song_i -> ${song_targets[$song_i]}"
-            fi
-        done
-    fi
-    exit "$song_result"
-}
-trap rollback EXIT
 copy_item() {
     local song_source="$1" song_destination="$2" song_index=$(( ${#song_targets} + 1 )) song_existed=0
     [[ ! -L "$song_destination" ]] || fail "Refusing to replace a symbolic link: $song_destination"
     if [[ -e "$song_destination" ]]; then
-        /usr/bin/ditto "$song_destination" "$song_audit/Backups/$song_index"
+        /usr/bin/ditto "$song_destination" "$song_audit/Backups/$song_index" || return 1
         song_existed=1
     fi
     song_targets+=("$song_destination")
     song_previous+=("$song_existed")
-    /bin/mkdir -p "${song_destination:h}"
+    /bin/mkdir -p "${song_destination:h}" || return 1
     # Replace complete bundles rather than merging stale files into new payloads.
-    if [[ -e "$song_destination" ]]; then /bin/mv "$song_destination" "$song_audit/Failed/replaced-$song_index"; fi
-    /usr/bin/ditto --noextattr --noqtn "$song_source" "$song_destination"
-    /usr/bin/perl "$song_root/install-state.pl" record "$song_audit" "$song_destination" "$song_audit/Backups/$song_index"
+    if [[ -e "$song_destination" ]]; then /bin/mv "$song_destination" "$song_audit/Failed/replaced-$song_index" || return 1; fi
+    /usr/bin/ditto --noextattr --noqtn "$song_source" "$song_destination" || return 1
+    /usr/bin/perl "$song_root/install-state.pl" record "$song_audit" "$song_destination" "$song_audit/Backups/$song_index" || return 1
     print -r -- "Installed: $song_destination"
     if [[ -f "$song_destination" ]]; then /usr/bin/shasum -a 256 "$song_destination"; fi
+    return 0
 }
+# A command failure inside a function skips the EXIT trap in zsh, so restore here explicitly.
+copy_or_repair() { copy_item "$@" || { trap - EXIT; finalize; }; }
 if (( song_install_geode )); then
-    copy_item "$song_frameworks/libfmod.dylib" "$song_frameworks/restore_fmod.dylib"
-    copy_item "$song_root/payload/geode/Geode.dylib" "$song_frameworks/Geode.dylib"
-    copy_item "$song_root/payload/geode/GeodeBootstrapper.dylib" "$song_frameworks/GeodeBootstrapper.dylib"
-    copy_item "$song_root/payload/geode/resources/geode.loader" "$song_app/Contents/geode/resources/geode.loader"
-    copy_item "$song_root/payload/geode/libfmod.dylib" "$song_frameworks/libfmod.dylib"
+    copy_or_repair "$song_frameworks/libfmod.dylib" "$song_frameworks/restore_fmod.dylib"
+    copy_or_repair "$song_root/payload/geode/Geode.dylib" "$song_frameworks/Geode.dylib"
+    copy_or_repair "$song_root/payload/geode/GeodeBootstrapper.dylib" "$song_frameworks/GeodeBootstrapper.dylib"
+    copy_or_repair "$song_root/payload/geode/resources/geode.loader" "$song_app/Contents/geode/resources/geode.loader"
+    copy_or_repair "$song_root/payload/geode/libfmod.dylib" "$song_frameworks/libfmod.dylib"
     print -r -- "Installed Geode $song_geode_version."
 else
     print -r -- "Keeping your compatible Geode $song_geode_version installation."
 fi
 if [[ "$song_jukebox" == - ]]; then
-    copy_item "$song_root/payload/fleym.nongd.geode" "$song_mods/fleym.nongd.geode"
+    copy_or_repair "$song_root/payload/fleym.nongd.geode" "$song_mods/fleym.nongd.geode"
 else
     print -r -- "Keeping your compatible Jukebox 3.8.0 installation: $song_jukebox"
 fi
-copy_item "$song_root/payload/local.separate_song.geode" "$song_mod_destination"
-copy_item "$song_root/payload/separate-song.plugin" "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
+copy_or_repair "$song_root/payload/local.separate_song.geode" "$song_mod_destination"
+copy_or_repair "$song_root/payload/separate-song.plugin" "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin"
 /usr/bin/shasum -a 256 "$HOME/Library/Application Support/obs-studio/plugins/separate-song.plugin/Contents/MacOS/separate-song"
 /usr/bin/touch "$song_audit/complete"
 song_success=1

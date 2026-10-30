@@ -10,7 +10,10 @@ qa_payload="$qa_root/package/OBS Jukebox Setup.app/Contents/Resources"
 qa_script="$qa_payload/Install.command"
 cp "$qa_payload/payload/geode/Geode.dylib" "$qa_gd/Contents/Frameworks/Geode.dylib"
 print 'original-fmod' > "$qa_gd/Contents/Frameworks/libfmod.dylib"
-touch "$qa_gd/Contents/MacOS/Geometry Dash"
+# A launchable fake GD: the reopen flag test checks that the wrapper actually opens it.
+printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict>' '<key>CFBundleExecutable</key><string>Geometry Dash</string>' '<key>CFBundleIdentifier</key><string>com.example.geometrydash</string>' '<key>CFBundleName</key><string>Geometry Dash</string>' '<key>CFBundlePackageType</key><string>APPL</string>' '</dict></plist>' > "$qa_gd/Contents/Info.plist"
+printf '#!/bin/sh\necho launched >> "%s"\n' "$qa_root/reopened" > "$qa_gd/Contents/MacOS/Geometry Dash"
+chmod +x "$qa_gd/Contents/MacOS/Geometry Dash"
 qa_mods="$qa_gd/Contents/geode/mods"
 qa_plugin="$qa_home/Library/Application Support/obs-studio/plugins/separate-song.plugin"
 qa_logs="$qa_home/Library/Application Support/OBS Jukebox/Install Logs"
@@ -155,3 +158,104 @@ qa_resources=("$qa_payload/payload/geode/resources/geode.loader"/*(N))
 [[ -f "$qa_fresh/Contents/geode/resources/geode.loader/${qa_resources[1]:t}" ]]
 [[ ! -e "$qa_fresh/Contents/geode/resources/geode.loader/geode.loader" ]]
 print 'fresh-geode-resources-at-top-level: pass'
+# Exit codes the update wrapper relies on. Start from a complete install of the packaged mod.
+cp "$qa_payload/payload/local.separate_song.geode" "$qa_mods/local.separate_song.geode"
+qa_lock_dir="$qa_home/Library/Application Support/OBS Jukebox"
+mkdir -p "$qa_lock_dir"; : >> "$qa_lock_dir/install.lock"
+/bin/zsh -c 'zmodload zsh/system; zsystem flock "$1"; sleep 6' qa-holder "$qa_lock_dir/install.lock" & qa_holder=$!
+sleep 1
+qa_code=0; run_install > "$qa_root/locked.log" 2>&1 || qa_code=$?
+wait $qa_holder
+(( qa_code == 2 )) || { print "A held install lock gave $qa_code"; exit 1; }
+print 'install-lock-busy-exit-2: pass'
+cp "$qa_mods/local.separate_song.geode" "$qa_root/current-mod.geode"
+make_mod "$qa_mods/local.separate_song.geode" local.separate_song v9.9.9
+qa_code=0; /usr/bin/env HOME="$qa_home" /bin/zsh "$qa_script" --no-downgrade "$qa_gd" "${OBS_APP:-/Applications/OBS.app}" </dev/null > "$qa_root/newer.log" 2>&1 || qa_code=$?
+(( qa_code == 4 )) || { print "A newer installed mod gave $qa_code"; exit 1; }
+[[ "$(unzip -p "$qa_mods/local.separate_song.geode" mod.json)" == *9.9.9* ]]
+cp "$qa_root/current-mod.geode" "$qa_mods/local.separate_song.geode"
+print 'no-downgrade-exit-4: pass'
+# A command that fails mid-install with its own status 2 must still end as 1, after a full rollback.
+# install-state.pl runs after each copy, so a stand-in that fails makes a deterministic mid-install error.
+cp "$qa_payload/install-state.pl" "$qa_root/install-state.pl.real"
+# The mod must be a different version, so a passing comparison proves the rollback put it back.
+make_mod "$qa_mods/local.separate_song.geode" local.separate_song 0.9.0
+cp "$qa_mods/local.separate_song.geode" "$qa_root/before-failure.geode"
+print -r -- '#!/usr/bin/perl
+exit 2;' > "$qa_payload/install-state.pl"
+qa_code=0; run_install > "$qa_root/raw-two.log" 2>&1 || qa_code=$?
+(( qa_code == 1 )) || { print "A command exiting 2 mid-install gave $qa_code"; cat "$qa_root/raw-two.log"; exit 1; }
+cmp "$qa_mods/local.separate_song.geode" "$qa_root/before-failure.geode"
+print 'raw-status-normalized-exit-1: pass'
+# The same failure, after deleting this run's backups, leaves the rollback unable to finish: exit 3.
+print -r -- '#!/usr/bin/perl
+use File::Path qw(remove_tree);
+remove_tree("$ARGV[1]/Backups") if $ARGV[0] eq "record";
+exit 2;' > "$qa_payload/install-state.pl"
+qa_code=0; run_install > "$qa_root/repair.log" 2>&1 || qa_code=$?
+cp "$qa_root/install-state.pl.real" "$qa_payload/install-state.pl"
+(( qa_code == 3 )) || { print "An unfinished rollback gave $qa_code"; cat "$qa_root/repair.log"; exit 1; }
+cp "$qa_root/before-failure.geode" "$qa_mods/local.separate_song.geode"
+print 'unfinished-rollback-exit-3: pass'
+qa_code=0; /usr/bin/env HOME="$qa_home" /bin/zsh "$qa_script" --uninstall </dev/null > "$qa_root/undo-code.log" 2>&1 || qa_code=$?
+(( qa_code == 0 )) || { print "A successful undo gave $qa_code"; exit 1; }
+print 'undo-exit-0: pass'
+# The update wrapper: waits for GD and OBS, installs, reports.
+qa_result="$qa_root/update-result.json"
+qa_status() { /usr/bin/perl -MJSON::PP -e 'local $/; open my $f, "<", shift or exit 1; print decode_json(<$f>)->{status}' "$qa_result"; }
+run_update() { /usr/bin/env HOME="$qa_home" /bin/zsh "$qa_script" --update --result "$qa_result" --reopen-flag "$qa_root/reopen" "$qa_gd" "${OBS_APP:-/Applications/OBS.app}" </dev/null; }
+cp /bin/sleep "$qa_root/Geometry Dash"
+"$qa_root/Geometry Dash" 20 & qa_fake_gd=$!
+run_update > "$qa_root/update.log" 2>&1 & qa_wrapper=$!
+sleep 3
+[[ "$(qa_status)" == waiting ]] || { print 'The wrapper did not report waiting'; cat "$qa_root/update.log"; exit 1; }
+run_update > "$qa_root/update-second.log" 2>&1
+[[ "$(qa_status)" == waiting ]]
+print 'update-second-wrapper-exits: pass'
+kill $qa_fake_gd; wait $qa_fake_gd 2>/dev/null || true
+wait $qa_wrapper
+[[ "$(qa_status)" == installed ]] || { print 'The wrapper did not install'; cat "$qa_root/update.log"; exit 1; }
+print 'update-waits-then-installs: pass'
+rm -f "$qa_root/reopened"
+: > "$qa_root/reopen"
+run_update > "$qa_root/update-reopen.log" 2>&1
+for qa_try in {1..30}; do [[ -e "$qa_root/reopened" ]] && break; sleep 0.1; done
+[[ "$(qa_status)" == installed && ! -e "$qa_root/reopen" && -e "$qa_root/reopened" ]]
+print 'update-reopen-flag-consumed: pass'
+/bin/zsh -c 'zmodload zsh/system; : >> "$1"; zsystem flock "$1"; sleep 4' qa-holder "$qa_lock_dir/update.lock" & qa_holder=$!
+sleep 1
+rm -f "$qa_result"
+run_update > /dev/null 2>&1
+[[ ! -e "$qa_result" ]]
+wait $qa_holder
+run_update > /dev/null 2>&1
+[[ "$(qa_status)" == installed ]]
+print 'update-lock-free-after-holder-exits: pass'
+# A killed wrapper leaves no stale lock: the kernel drops an fcntl lock with its process.
+/bin/zsh -c 'zmodload zsh/system; : >> "$1"; zsystem flock "$1"; sleep 60' qa-holder "$qa_lock_dir/update.lock" & qa_holder=$!
+sleep 1
+kill -9 $qa_holder; wait $qa_holder 2>/dev/null || true
+rm -f "$qa_result"
+run_update > /dev/null 2>&1
+[[ "$(qa_status)" == installed ]]
+print 'update-lock-free-after-kill: pass'
+# An unfinished rollback reaches the mod as failed with repair.
+print -r -- '#!/usr/bin/perl
+use File::Path qw(remove_tree);
+remove_tree("$ARGV[1]/Backups") if $ARGV[0] eq "record";
+exit 2;' > "$qa_payload/install-state.pl"
+run_update > /dev/null 2>&1
+cp "$qa_root/install-state.pl.real" "$qa_payload/install-state.pl"
+cp "$qa_root/before-failure.geode" "$qa_mods/local.separate_song.geode"
+[[ "$(qa_status)" == failed ]] && /usr/bin/perl -MJSON::PP -e 'local $/; open my $f, "<", shift or exit 1; exit(decode_json(<$f>)->{repair} ? 0 : 1)' "$qa_result"
+print 'update-repair-result: pass'
+# A child killed mid-install can't roll back, so its files are treated as possibly half-installed.
+print -r -- '#!/usr/bin/perl
+kill "KILL", getppid();
+sleep 5;' > "$qa_payload/install-state.pl"
+rm -f "$qa_result"
+run_update > /dev/null 2>&1
+cp "$qa_root/install-state.pl.real" "$qa_payload/install-state.pl"
+cp "$qa_root/before-failure.geode" "$qa_mods/local.separate_song.geode"
+[[ "$(qa_status)" == failed ]] && /usr/bin/perl -MJSON::PP -e 'local $/; open my $f, "<", shift or exit 1; exit(decode_json(<$f>)->{repair} ? 0 : 1)' "$qa_result"
+print 'update-killed-child-repair: pass'
