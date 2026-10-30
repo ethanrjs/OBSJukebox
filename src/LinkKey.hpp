@@ -20,6 +20,14 @@
 #else
 #include <cpuid.h>
 #endif
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
 #endif
 #ifdef _WIN32
 #include "Socket.hpp"
@@ -99,6 +107,49 @@ LINK_KEY_SHA_TARGET inline void compressWithShaInstructions(uint32_t *state, con
     const __m128i feba = _mm_shuffle_epi32(abef, 0x1B), dchg = _mm_shuffle_epi32(cdgh, 0xB1);
     _mm_storeu_si128(reinterpret_cast<__m128i *>(state), _mm_blend_epi16(feba, dchg, 0xF0));
     _mm_storeu_si128(reinterpret_cast<__m128i *>(state + 4), _mm_alignr_epi8(dchg, feba, 8));
+}
+#elif defined(__aarch64__) && (defined(__APPLE__) || defined(__linux__))
+#define LINK_KEY_SHA_INSTRUCTIONS
+#if defined(__ARM_FEATURE_SHA2)
+#define LINK_KEY_SHA_TARGET // Apple's arm64 default CPU has them
+#elif defined(__clang__)
+#define LINK_KEY_SHA_TARGET __attribute__((target("sha2")))
+#else
+#define LINK_KEY_SHA_TARGET __attribute__((target("+sha2")))
+#endif
+// Every Apple Silicon CPU has the ARMv8 SHA-256 instructions; other arm64 CPUs may not, so the OS is
+// asked either way.
+inline bool hasShaInstructions() {
+    static const bool supported = [] {
+#ifdef __APPLE__
+        int present = 0;
+        size_t size = sizeof(present);
+        return sysctlbyname("hw.optional.arm.FEAT_SHA256", &present, &size, nullptr, 0) == 0 && present != 0;
+#else
+        return (getauxval(AT_HWCAP) & HWCAP_SHA2) != 0;
+#endif
+    }();
+    return supported;
+}
+// One block with the ARMv8 SHA-256 instructions: the state stays in order as ABCD and EFGH, each step
+// runs four rounds, and the first twelve steps extend the message schedule by four words.
+LINK_KEY_SHA_TARGET inline void compressWithShaInstructions(uint32_t *state, const uint8_t *block) {
+    uint32x4_t abcd = vld1q_u32(state), efgh = vld1q_u32(state + 4);
+    const uint32x4_t abcdBefore = abcd, efghBefore = efgh;
+    uint32x4_t words[4];
+    for (int i = 0; i < 4; ++i)
+        words[i] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + i * 16)));
+    for (int step = 0; step < 16; ++step) {
+        const uint32x4_t scheduled = vaddq_u32(words[step & 3], vld1q_u32(roundConstants + step * 4));
+        const uint32x4_t abcdBeforeStep = abcd;
+        abcd = vsha256hq_u32(abcd, efgh, scheduled);
+        efgh = vsha256h2q_u32(efgh, abcdBeforeStep, scheduled);
+        if (step < 12)
+            words[step & 3] = vsha256su1q_u32(vsha256su0q_u32(words[step & 3], words[(step + 1) & 3]),
+                                              words[(step + 2) & 3], words[(step + 3) & 3]);
+    }
+    vst1q_u32(state, vaddq_u32(abcd, abcdBefore));
+    vst1q_u32(state + 4, vaddq_u32(efgh, efghBefore));
 }
 #else
 inline bool hasShaInstructions() { return false; }
