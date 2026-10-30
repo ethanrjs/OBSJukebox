@@ -5,7 +5,7 @@ if(APPLE)
 endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_library(separate-song MODULE separate-song.cpp Decoder.cpp)
+add_library(separate-song MODULE separate-song.cpp Decoder.cpp PitchSimd.cpp)
 # The plugin shows its release version in the source properties. mod.json is the release's single
 # source of truth, so read the version from it here rather than duplicating the number in the code.
 set(OBS_JUKEBOX_VERSION "dev")

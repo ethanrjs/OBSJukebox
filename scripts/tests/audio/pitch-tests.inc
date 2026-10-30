@@ -613,6 +613,24 @@ static void pitchReferenceTest() {
         std::cerr << difference.samples << " samples differ from the reference, by up to " << difference.max << '\n';
     check(difference.samples == 0, "the pitch stage gives the 41b8647 reference's samples on held-out audio");
 }
+// Where the CPU has AVX, the stage's AVX loops give the portable loops' output bit for bit; the
+// reference test compares with ==, which takes -0 for +0.
+static void pitchSimdTest() {
+    struct Portable : PitchShifter {
+        explicit Portable(size_t gateFrames) : PitchShifter(gateFrames) { portableOnly = true; }
+    };
+    size_t differing = 0;
+    for (const auto &[name, signal] : heldout::suite(48000))
+        for (uint32_t fft : {256u, 512u, 1024u, 2048u, 4096u})
+            for (float pitch : {.5f, .75f, 1.f, 1.5f}) {
+                const auto wide = heldout::shift<PitchShifter>(signal, pitch, fft, 480, {480});
+                const auto portable = heldout::shift<Portable>(signal, pitch, fft, 480, {480});
+                differing += std::memcmp(wide.data(), portable.data(), wide.size() * sizeof(float)) != 0;
+            }
+    std::cout << (pitch_simd::available() ? "Pitch stage: AVX loops checked against the portable loops\n"
+                                          : "Pitch stage: no AVX on this CPU; portable loops only\n");
+    check(differing == 0, "the pitch stage's AVX loops give the portable loops' output bit for bit");
+}
 
 // A four-second tone at `hz`, so a render test can tell frequencies apart by counting crossings.
 static void writeTone(const char *path, double hz = 440) {
@@ -1320,6 +1338,7 @@ static void pitchTests() {
     PitchShifter::prepareTables();
     pitchParityTest();
     pitchReferenceTest();
+    pitchSimdTest();
     pitchChannelTest();
     pitchSplitTest();
     pitchResetTest();

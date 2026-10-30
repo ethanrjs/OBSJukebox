@@ -25,6 +25,17 @@
 // purpose is hereby granted without fee, provided that the above copyright notice and this license
 // appear in all source copies. THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT EXPRESS OR IMPLIED
 // WARRANTY OF ANY KIND. See http://www.dspguru.com/wol.htm for more information.
+// AVX versions of PitchShifter's FFT loops (PitchSimd.cpp): eight lanes of the same statements,
+// separate multiplies and adds with no FMA, so each element gets the same IEEE operations in the
+// same order. available() is true only where the CPU has AVX and the OS saves its registers, and
+// always false off x86.
+namespace pitch_simd {
+bool available();
+// PitchShifter::butterflies for a `half` that is a multiple of 8.
+void butterflies(float *lowRe, float *lowIm, float *highRe, float *highIm, size_t half, const float *cosines,
+                 const float *sines);
+} // namespace pitch_simd
+
 class PitchShifter {
     static constexpr size_t overlap = 4, maxFft = 4096, maxBins = maxFft / 2 + 1;
     static constexpr double pi = 3.14159265358979323846;
@@ -183,13 +194,19 @@ class PitchShifter {
     std::array<size_t, 4> groupOffsets() const {
         return {0, tables->size / 2, tables->size / 4, tables->size / 4 * 3};
     }
-    // The passes between the second and the last.
+    // The passes between the second and the last, eight lanes wide where AVX runs.
     void middlePasses(const std::vector<float> &sines) {
         const auto &t = *tables;
+        const bool wide = !portableOnly && pitch_simd::available();
         for (size_t half = 4; half < t.size / 2; half *= 2)
-            for (size_t start = 0; start < t.size; start += half * 2)
-                butterflies(&real[start], &imaginary[start], &real[start + half], &imaginary[start + half], half,
-                            &t.cosines[half - 1], &sines[half - 1]);
+            for (size_t start = 0; start < t.size; start += half * 2) {
+                float *lowRe = &real[start], *lowIm = &imaginary[start];
+                float *highRe = &real[start + half], *highIm = &imaginary[start + half];
+                if (wide && half >= 8)
+                    pitch_simd::butterflies(lowRe, lowIm, highRe, highIm, half, &t.cosines[half - 1], &sines[half - 1]);
+                else
+                    butterflies(lowRe, lowIm, highRe, highIm, half, &t.cosines[half - 1], &sines[half - 1]);
+            }
     }
     // The spectrum of the channel's windowed frame, up to bin N/2. The input is real, so every point
     // starts with a +0 imaginary part.
@@ -312,6 +329,8 @@ class PitchShifter {
     }
 
   public:
+    // Tests set this to check the AVX loops against the portable ones.
+    bool portableOnly = false;
     explicit PitchShifter(size_t gateFrames = 512) : gateFrames(gateFrames ? gateFrames : 512) {}
     // Builds the shared tables. Call before any audio thread starts; process() would build them
     // lazily on first use otherwise.
