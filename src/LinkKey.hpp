@@ -54,9 +54,9 @@ inline constexpr uint32_t roundConstants[64] = {
 #else
 #define LINK_KEY_SHA_TARGET
 #endif
-// Status packets are tagged on GD's main thread (effects packets on AudioTap's sender, clock replies
-// on Bridge's worker) and every packet is checked by the plugin, and the x86 SHA extensions
-// hash a block several times faster than the portable rounds.
+// Status packets are tagged on GD's main thread, effects packets on AudioTap's sender and clock
+// replies on Bridge's worker; the plugin checks every one. The x86 SHA extensions hash a block
+// several times faster than the portable rounds.
 inline bool hasShaInstructions() {
     static const bool supported = [] {
 #ifdef _MSC_VER

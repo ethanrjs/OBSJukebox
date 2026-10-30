@@ -586,7 +586,7 @@ int main(int argc, char **argv) {
     PitchShifter::prepareTables();
     // A count is digits only, so a GD song named 941913.mp3 stays a file name.
     const bool counted = argc > 2 && *argv[2] && std::strspn(argv[2], "0123456789") == std::strlen(argv[2]);
-    const unsigned count = counted ? unsigned(std::atoi(argv[2])) : 0;
+    const unsigned count = counted ? unsigned(std::strtoul(argv[2], nullptr, 10)) : 0;
     if (mode == "pitch")
         bench::pitch(count ? count : 5);
     else if (mode == "render")

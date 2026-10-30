@@ -60,7 +60,7 @@ PITCH_AVX_TARGET void butterflies(float *lowRe, float *lowIm, float *highRe, flo
 #else
 namespace pitch_simd {
 bool available() { return false; }
-// available() is false off x86, so this is never called; stop loudly if that ever changes.
+// available() is false off x86-64, so this is never called; stop loudly if that ever changes.
 void butterflies(float *, float *, float *, float *, size_t, const float *, const float *) { std::abort(); }
 } // namespace pitch_simd
 #endif
