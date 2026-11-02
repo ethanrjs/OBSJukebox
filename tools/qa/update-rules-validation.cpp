@@ -104,6 +104,7 @@ static void rulesPart2() {
     auto repair = launch({v124, false, v125, Result{v125, Status::Installed, true}, {}});
     check(repair.notice == Notice::Repair && repair.saved.blocked == v125 && repair.stop && repair.deleteStaging && repair.deleteResult, "repair overrides the status and blocks");
     check(launch({v124, false, v125, Result{v125, Status::Failed, true}, {}}).notice == Notice::Repair && launch({v124, false, v125, Result{v125, Status::Declined, true}, {}}).notice == Notice::Repair, "repair overrides a failed or declined result too");
+    check(launch({v125, false, v125, Result{v125, Status::Failed, true}, {}}).saved.blocked == v125, "a fresh repair result still blocks even if the target mod already runs");
     auto forged = launch({v124, false, v125, Result{Version{999, 0, 0}, Status::Failed, true}, {}});
     check(forged.notice == Notice::None && !forged.saved.blocked && forged.deleteResult && !forged.stop, "a result for another version is deleted unread");
     auto shutdown = launch({v124, false, v125, Result{v125, Status::Waiting}, {}});
@@ -111,7 +112,7 @@ static void rulesPart2() {
     auto finished = launch({v125, false, v125, std::nullopt, {}});
     check(finished.deleteStaging && finished.notice == Notice::None, "an authentic staged manifest for the running version is cleanup");
     Saved blocked{.blocked = v125};
-    check(launch({v125, false, std::nullopt, std::nullopt, blocked}).saved.blocked == v125, "reaching the blocked version doesn't clear the block");
+    check(!launch({v125, false, std::nullopt, std::nullopt, blocked}).saved.blocked, "reinstalling the blocked version clears the block");
     check(!launch({v126, false, std::nullopt, std::nullopt, blocked}).saved.blocked, "a newer version clears the block");
 
     OfferInput base{Mode::Ask, Platform::Windows, v124, v125, true, false, true, {}};
@@ -127,12 +128,13 @@ static void rulesPart2() {
     check(offer([](auto& in) { in.hasEntry = false; }) == Offer::LinkPanel, "a missing platform entry gets the link panel");
     check(offer([&](auto& in) { in.platform = Platform::Other; in.saved.notified = v125; }) == Offer::None, "the link panel shows once per version");
     check(offer([&](auto& in) { in.saved.attemptsVersion = v125; in.saved.attempts = 3; }) == Offer::None, "a retired version is never offered");
-    check(offer([&](auto& in) { in.saved.blocked = v125; in.running = v125; in.latest = v126; }) == Offer::LinkPanel, "while blocked, only the link panel appears");
+    check(offer([&](auto& in) { in.saved.blocked = v125; in.running = v125; in.latest = v126; }) == Offer::AskPanel, "reinstalled blocked version can update normally");
     check(offer([&](auto& in) { in.saved.blocked = v125; in.running = v124; in.latest = v125; }) == Offer::None, "the blocked version itself isn't offered");
 
     check(noticeText(Notice::Installed, v125) == "OBS Jukebox updated to 1.2.5.", "installed text");
     check(noticeText(Notice::Failed, v125) == "Update failed. It'll be offered again.", "failed text leaves the reason to the log");
 }
+#ifndef UPDATE_RULES_ONLY
 static void cryptoChecks(const std::filesystem::path& fixtures) {
     auto hex = text(fixtures / "test-public.hex");
     while (!hex.empty() && (hex.back() == '\n' || hex.back() == '\r')) hex.pop_back();
@@ -152,10 +154,13 @@ static void cryptoChecks(const std::filesystem::path& fixtures) {
     check(digest.has_value() && (*digest)[0] == 0x92 && (*digest)[31] == 0xff, "the hash matches sha256sum");
     check(!update_crypto::sha256File(fixtures / "missing.file"), "a missing file has no hash");
 }
+#endif
 int main(int argc, char** argv) {
     if (argc != 2) { std::cerr << "usage: update-rules-validation fixtures-folder\n"; return 2; }
     rulesPart1(argv[1]);
     rulesPart2();
+#ifndef UPDATE_RULES_ONLY
     cryptoChecks(argv[1]);
+#endif
     std::cout << checks << " update rule checks passed\n";
 }

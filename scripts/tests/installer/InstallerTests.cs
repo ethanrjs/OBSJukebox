@@ -18,14 +18,14 @@ static class InstallerTests
         using(var writer=new StreamWriter(zip.CreateEntry("mod.json").Open())) writer.Write($$"""{"id":"{{id}}","version":"v{{version}}"}""");
         zip.CreateEntry(binary).Open().Dispose();
     }
-    // A process with the given name, from a copy of ping.exe, for tests that need an app "running".
+
     static Process FakeApp(string folder,string name)
     {
         string exe=Path.Combine(folder,name+".exe");
         File.Copy(Path.Combine(Environment.SystemDirectory,"PING.EXE"),exe,true);
         return Process.Start(new ProcessStartInfo(exe,"-n 120 127.0.0.1"){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true})!;
     }
-    // A fake update host. Each loop reads one (GD, OBS) state; the last one repeats.
+
     static UpdateMode.Host FakeHost(List<string> events,(bool Gd,bool Obs)[] states,Action install,string? installed=null)
     {
         int at=-1;
@@ -162,19 +162,19 @@ static class InstallerTests
                 new ChangedFile { Destination=modFile,Backup=saved,OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("half-installed mod")),Applied=true }] };
             string manifest=Path.Combine(session,"manifest.json");
             File.WriteAllText(manifest,System.Text.Json.JsonSerializer.Serialize(stranded));
-            // Recovery may need to close OBS, which a mod-only update promises not to do.
+
             Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted,ModOnly=true },_=>{},[]);
             Check(File.ReadAllText(modFile)=="half-installed mod","a mod-only update leaves an interrupted install for full setup");
             Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
             Check(File.ReadAllText(modFile)=="previous mod" && File.ReadAllText(manifest).Contains("rolled-back"),"a transaction left installing by a killed setup is restored on the next run");
-            // Setup can be killed after replacing a file but before recording that it did.
+
             string unrecorded=Path.Combine(interrupted,"20260101-000001-abcdef");Directory.CreateDirectory(unrecorded);
             File.WriteAllText(Path.Combine(unrecorded,"0000.bak"),"previous mod");File.WriteAllText(modFile,"half-installed mod");
             File.WriteAllText(Path.Combine(unrecorded,"manifest.json"),System.Text.Json.JsonSerializer.Serialize(new InstallRecord { GD=interrupted,OBS=interrupted,Files=[
                 new ChangedFile { Destination=modFile,Backup=Path.Combine(unrecorded,"0000.bak"),OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("half-installed mod")) }] }));
             Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
             Check(File.ReadAllText(modFile)=="previous mod","recovery restores a file replaced just before setup was killed");
-            // A destination recovery can't read must not stop it restoring the other files.
+
             string partial=Path.Combine(interrupted,"20260102-000000-abcdef");Directory.CreateDirectory(partial);
             string applied=Path.Combine(interrupted,"applied.dll"),locked=Path.Combine(interrupted,"locked.dll");
             File.WriteAllText(Path.Combine(partial,"0000.bak"),"previous plugin");File.WriteAllText(applied,"installed plugin");File.WriteAllText(locked,"previous scene");
@@ -184,7 +184,7 @@ static class InstallerTests
             using(new FileStream(locked,FileMode.Open,FileAccess.Read,FileShare.None))
                 Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
             Check(File.ReadAllText(applied)=="previous plugin" && File.ReadAllText(Path.Combine(partial,"manifest.json")).Contains("rollback-incomplete"),"recovery restores the files it can when one destination is locked");
-            // Recovery would roll back another setup's live transaction, so only one setup runs at a time.
+
             using(var held=new ManualResetEventSlim()) using(var release=new ManualResetEventSlim())
             {
                 var other=new Thread(()=>{ using var running=new Mutex(false,Engine.SetupLockName); running.WaitOne(); held.Set(); release.Wait(); running.ReleaseMutex(); });
@@ -195,7 +195,7 @@ static class InstallerTests
                 release.Set(); other.Join();
                 Check(refused,"setup refuses to run while another setup is running");
             }
-            // A recovery that fails, or a manifest it can't read, must not stop every later install.
+
             var recover=()=>Engine.RecoverInterrupted(new Options { StateRoot=interrupted,GD=interrupted,OBS=interrupted },_=>{},[]);
             string lostSession=Path.Combine(interrupted,"20260103-000000-abcdef");Directory.CreateDirectory(lostSession);
             string lostManifest=Path.Combine(lostSession,"manifest.json");
@@ -267,14 +267,14 @@ static class InstallerTests
             var unlogged=new IOException("write failed");
             try { Engine.RollBack(unrestorable,unlogged,line=>{ if(line.StartsWith("Rollback incomplete")) throw new IOException("log is full"); }); } catch(IOException) { }
             Check(unlogged.Data["repair"] is true,"the repair mark survives a log write that fails after it");
-            // A log that fails on every line must not stop a restore that can finish.
+
             string restorable=Path.Combine(repairRoot,"restorable.geode"),restorableBackup=Path.Combine(repairRoot,"restorable.bak");
             File.WriteAllText(restorable,"installed");File.WriteAllText(restorableBackup,"original");
             var restorableRecord=new InstallRecord { Files=[ new ChangedFile { Destination=restorable,Backup=restorableBackup,OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("original")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("installed")),Applied=true } ] };
             var silenced=new IOException("write failed");
             Engine.RollBack(restorableRecord,silenced,Engine.QuietLog(_=>throw new IOException("log is full")));
             Check(File.ReadAllText(restorable)=="original" && silenced.Data["repair"]==null,"a failing log doesn't stop the restore or mark repair");
-            // Recovery must wait, not give up, when an app opens just before it restores anything.
+
             string obsFolder=Path.Combine(repairRoot,"obs"),repairSession=Path.Combine(repairRoot,"state","20260101-000000-abcdef");
             Directory.CreateDirectory(Path.Combine(obsFolder,"bin","64bit"));Directory.CreateDirectory(repairSession);
             string plugin=Path.Combine(obsFolder,"plugin.dll");File.WriteAllText(plugin,"half-installed");
@@ -290,7 +290,7 @@ static class InstallerTests
                 Check(waited && File.ReadAllText(manifest).Contains("\"installing\"") && File.ReadAllText(plugin)=="half-installed","recovery leaves a session for later when an app is open in update mode");
             }
             finally { fakeObs.Kill(); fakeObs.WaitForExit(); }
-            // A newer mod installed by hand: the update stops before recovery touches anything.
+
             string newerGd=Path.Combine(repairRoot,"gd-newer");
             Directory.CreateDirectory(Path.Combine(newerGd,"geode","mods"));
             WriteMod(Path.Combine(newerGd,"geode","mods","local.separate_song.geode"),"local.separate_song","999.0.0","local.separate_song.dll");
@@ -305,7 +305,7 @@ static class InstallerTests
         try
         {
             string result=Path.Combine(updates,"result.json"),flag=Path.Combine(updates,"reopen");
-            // StateRoot too, so update.log lines go here and not into the real one.
+
             var o=new Options { Update=true,ResultPath=result,ReopenFlag=flag,StateRoot=Path.Combine(updates,"state") };
             var events=new List<string>();
             Check(UpdateMode.Run(o,FakeHost(events,[(true,false),(false,true),(false,false)],()=>{}))==0 && events.SequenceEqual(["sleep","sleep","install"]) && ReadResult(result)["status"]!.ToString()=="installed","an update waits for GD and OBS, then installs");
@@ -315,7 +315,7 @@ static class InstallerTests
             Check(events.SequenceEqual(["install","start-gd"]) && !File.Exists(flag),"the reopen flag starts GD after the install, once");
             File.WriteAllText(flag,"");events.Clear();
             UpdateMode.Run(o,FakeHost(events,[(false,true),(false,true),(false,false)],()=>{}));
-            Check(events.SequenceEqual(["start-gd","sleep","sleep","install"]),"OBS still open after GD exits: GD comes back at once and the later install leaves it closed");
+            Check(events.SequenceEqual(["sleep","sleep","install","start-gd"]),"GD reopens only after OBS closes and installation finishes");
             events.Clear();int tries=0;
             UpdateMode.Run(o,FakeHost(events,[(false,false)],()=>{ if(++tries==1) throw new AppRunningException("GD opened"); }));
             Check(events.SequenceEqual(["install","sleep","install"]) && ReadResult(result)["status"]!.ToString()=="installed","an app opening at the last moment sends the update back to waiting");
@@ -329,6 +329,15 @@ static class InstallerTests
             Check(ReadResult(result)["status"]!.ToString()=="failed" && ReadResult(result)["repair"]!.GetValue<bool>(),"an unfinished rollback gives repair, even after a cancelled UAC prompt");
             UpdateMode.Run(o,FakeHost([],[(false,false)],()=>throw new IOException("disk full")));
             Check(ReadResult(result)["status"]!.ToString()=="failed" && ReadResult(result)["message"]!.ToString()=="disk full","any other error gives failed with its message");
+            foreach(var failure in new Exception[] { new IOException("disk full"), new System.ComponentModel.Win32Exception(1223), unfinished, new NewerVersionInstalledException() })
+            {
+                File.WriteAllText(flag, ""); events.Clear();
+                UpdateMode.Run(o,FakeHost(events,[(false,false)],()=>throw failure));
+                Check(events.SequenceEqual(["install","start-gd"]) && !File.Exists(flag),"every terminal outcome reopens GD once");
+            }
+            File.WriteAllText(flag, ""); events.Clear();
+            UpdateMode.Run(o,FakeHost(events,[(false,false)],()=>{},installed:"999.0.0"));
+            Check(events.SequenceEqual(["start-gd"]) && !File.Exists(flag),"newer version detected before waiting still reopens GD");
             File.Delete(result);
             Check(UpdateMode.Run(o,FakeHost([],[(false,false)],()=>{},installed:"999.0.0"))==0 && !File.Exists(result),"a newer installed mod stops the update before it writes anything");
             UpdateMode.Run(o,FakeHost([],[(false,false)],()=>throw new NewerVersionInstalledException()));
@@ -346,7 +355,7 @@ static class InstallerTests
             Check(Engine.RecordedOBS(state)==recordedObs,"update mode finds OBS through the last install record");
             File.Delete(Path.Combine(recordedObs,"bin","64bit","obs64.exe"));
             Check(Engine.RecordedOBS(state)==null,"a recorded OBS folder without obs64.exe is ignored");
-            // A second update setup exits without touching the first one's result file.
+
             File.Delete(result);
             using(var held=new ManualResetEventSlim()) using(var release=new ManualResetEventSlim())
             {

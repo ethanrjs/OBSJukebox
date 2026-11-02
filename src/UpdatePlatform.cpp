@@ -53,7 +53,7 @@ Job job() {
     BOOL inJob = FALSE;
     if (!IsProcessInJob(GetCurrentProcess(), nullptr, &inJob) || !inJob) return Job::Free;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
-    // Unreadable limits: assume the worst, so GD never exits for a setup that would die with it.
+
     if (!QueryInformationJobObject(nullptr, JobObjectExtendedLimitInformation, &info, sizeof info, nullptr)) return Job::Trapped;
     auto flags = info.BasicLimitInformation.LimitFlags;
     if (!(flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) || (flags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)) return Job::Free;
@@ -88,8 +88,8 @@ bool setupWaiting() {
     struct flock lock{};
     lock.l_type = F_WRLCK;
     lock.l_whence = SEEK_SET;
-    bool held = fcntl(fd, F_SETLK, &lock) == -1 && (errno == EAGAIN || errno == EACCES);
-    close(fd); // also drops the test lock if it was taken
+    bool held = fcntl(fd, F_GETLK, &lock) == 0 && lock.l_type != F_UNLCK;
+    close(fd);
     return held;
 }
 bool underWine() { return false; }
@@ -113,7 +113,7 @@ static bool spawn(const char* program, std::vector<std::string> args, pid_t* chi
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
     if (detach) posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT);
-    // The waiting wrapper must not inherit GD's sockets or logs, including ones without FD_CLOEXEC.
+
     else posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
     int error = posix_spawn(child, program, &actions, &attributes, argv.data(), environ);
     posix_spawn_file_actions_destroy(&actions);
@@ -138,4 +138,4 @@ std::filesystem::path gdBundle() {
     return ok ? std::filesystem::path(path) : std::filesystem::path{};
 }
 #endif
-} // namespace update_platform
+}

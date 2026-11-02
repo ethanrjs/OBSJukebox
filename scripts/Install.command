@@ -3,16 +3,11 @@ set -euo pipefail
 zmodload zsh/system
 song_root="${0:A:h}"
 song_uninstall=0 song_update=0 song_no_downgrade=0 song_result_file='' song_reopen_flag=''
-# Exit codes the update wrapper reads: 0 installed, 1 failed, 2 busy or apps open, 3 rollback
-# incomplete, 4 a newer mod is installed. 2 and 4 mean nothing was changed.
-song_exit=1 song_success=0 song_repair=0 song_failure=''
+song_exit=1 song_success=0 song_repair=0 song_failure='' song_update_owned=0
 typeset -a song_targets song_previous
 finish() { print -r -- "$1"; if [[ -t 0 ]]; then read 'song_reply?Press Return to close. '; fi; }
 fail() { song_failure="$1"; exit 1; }
-# Stops before changing anything, with a code the update wrapper acts on.
 stop() { song_exit=$1; finish "$2"; exit "$1"; }
-# An fcntl lock the shell holds until it exits; the kernel releases it even after a crash.
-# Returns 0 on success, 1 when another process holds it, 3 when the support folder can't be used.
 take_lock() {
     local song_dir="$HOME/Library/Application Support/OBS Jukebox"
     /bin/mkdir -p "$song_dir" 2>/dev/null || return 3
@@ -20,19 +15,14 @@ take_lock() {
     zsystem flock -t 0 "$song_dir/$1" 2>/dev/null || return 1
     return 0
 }
-# True when $1 is a release version above $2 ("v" prefixes allowed). Anything else isn't newer.
 version_newer() {
     /usr/bin/perl -e 'my @v = map { /\Av?(\d+)\.(\d+)\.(\d+)\z/ ? [$1, $2, $3] : undef } @ARGV;
         exit 1 unless $v[0] && $v[1];
         for my $i (0 .. 2) { exit 0 if $v[0][$i] > $v[1][$i]; exit 1 if $v[0][$i] < $v[1][$i] }
         exit 1' -- "$1" "$2"
 }
-# Restores this run's changes if it didn't finish, then exits with one of the codes above. Installed
-# first, so no failure, however early, passes its raw status on.
 finalize() {
     trap - EXIT
-    # Take the state once: the trap can be reached twice when finalize runs from inside a function,
-    # and a second restore must not move files again.
     local -a song_saved_targets song_saved_previous
     song_saved_targets=("${song_targets[@]}")
     song_saved_previous=("${song_previous[@]}")
@@ -50,11 +40,11 @@ finalize() {
             fi
         done
     fi
-    # The reason comes last, after the restore notes, so the update wrapper and the player see it.
     if (( ! song_success )) && [[ -n "$song_message" ]]; then
         [[ -z "${SONG_REASON_FILE:-}" ]] || print -r -- "$song_message" > "$SONG_REASON_FILE" || true
         finish "$song_message"
     fi
+    if (( song_update_owned )) && take_reopen_flag; then /usr/bin/open "$song_app" || true; fi
     if (( song_success )); then exit 0
     elif (( song_repair )); then exit 3
     elif (( song_exit == 2 || song_exit == 4 )); then exit "$song_exit"
@@ -101,7 +91,6 @@ if (( song_update )); then
             print JSON::PP->new->canonical->encode(\%r)' > "$song_result_file.tmp"
         /bin/mv -f "$song_result_file.tmp" "$song_result_file"
     }
-    # The lock comes before anything that writes the result, so a second wrapper can't overwrite it.
     song_lock=0; take_lock update.lock || song_lock=$?
     if (( song_lock != 0 )); then
         if (( song_lock == 1 )); then song_success=1; exit; fi
@@ -109,7 +98,7 @@ if (( song_update )); then
         song_success=1
         exit
     fi
-    # OBS: the second argument, else the first installed copy Spotlight knows, else the defaults.
+    song_update_owned=1
     if [[ $# -lt 2 ]]; then
         song_obs=''
         for song_candidate in ${(f)"$(/usr/bin/mdfind "kMDItemCFBundleIdentifier == 'com.obsproject.obs-studio'" 2>/dev/null)"} /Applications/OBS.app "$HOME/Applications/OBS.app"; do
@@ -127,24 +116,20 @@ if (( song_update )); then
         /usr/bin/pgrep -x 'Geometry Dash' >/dev/null && song_gd_running=1
         /usr/bin/pgrep -x "$song_obs_executable" >/dev/null && song_obs_running=1
         if (( song_gd_running || song_obs_running )); then
-            # "Update now" closed GD but OBS is open: give GD back now, install later.
-            if (( ! song_gd_running )) && take_reopen_flag; then /usr/bin/open "$song_app" || true; fi
             sleep 2; continue
         fi
         song_log=$(/usr/bin/mktemp -t obs-jukebox-update)
         song_code=0
         /usr/bin/env SONG_REASON_FILE="$song_reason" /bin/zsh "$song_root/Install.command" --no-downgrade "$song_app" "$song_obs" </dev/null >"$song_log" 2>&1 || song_code=$?
-        # The child writes its own reason last; the log tail is only a fallback.
         song_message=$(/bin/cat "$song_reason" 2>/dev/null || true)
         [[ -n "$song_message" ]] || song_message=$(/usr/bin/tail -n 1 "$song_log")
         /bin/rm -f "$song_log"
         case $song_code in
-            0) write_result installed; if take_reopen_flag; then /usr/bin/open "$song_app" || true; fi ;;
+            0) write_result installed ;;
             2) sleep 2; continue ;;
             3) write_result failed "$song_message" repair ;;
             4) ;;
             1) write_result failed "$song_message" ;;
-            # A killed child (128 and above) can't run its own rollback, so treat it as a repair case.
             *) write_result failed "$song_message" repair ;;
         esac
         /bin/rm -f "$song_reason"
@@ -256,7 +241,6 @@ copy_item() {
     song_targets+=("$song_destination")
     song_previous+=("$song_existed")
     /bin/mkdir -p "${song_destination:h}" || return 1
-    # Replace complete bundles rather than merging stale files into new payloads.
     if [[ -e "$song_destination" ]]; then /bin/mv "$song_destination" "$song_audit/Failed/replaced-$song_index" || return 1; fi
     /usr/bin/ditto --noextattr --noqtn "$song_source" "$song_destination" || return 1
     /usr/bin/perl "$song_root/install-state.pl" record "$song_audit" "$song_destination" "$song_audit/Backups/$song_index" || return 1
@@ -264,7 +248,6 @@ copy_item() {
     if [[ -f "$song_destination" ]]; then /usr/bin/shasum -a 256 "$song_destination"; fi
     return 0
 }
-# A command failure inside a function skips the EXIT trap in zsh, so restore here explicitly.
 copy_or_repair() { copy_item "$@" || { trap - EXIT; finalize; }; }
 if (( song_install_geode )); then
     copy_or_repair "$song_frameworks/libfmod.dylib" "$song_frameworks/restore_fmod.dylib"

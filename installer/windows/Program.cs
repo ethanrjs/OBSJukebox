@@ -15,7 +15,7 @@ namespace SeparateSongSetup;
 
 static class Program
 {
-    // package-windows.ps1 builds with the version in mod.json.
+
     internal static readonly string ReleaseVersion = typeof(Program).Assembly.GetName().Version!.ToString(3);
     internal static readonly string ProductName = "OBS Jukebox " + ReleaseVersion;
     [STAThread]
@@ -90,9 +90,9 @@ sealed class Options
         }
         if (o.Update)
         {
-            // An update never closes or reopens apps by itself and never edits scenes.
+
             o.Silent = true; o.CloseApps = false; o.Restart = false; o.CreateScene = false;
-            // OBS is usually closed when an update starts, so process detection would find nothing.
+
             if (!obsGiven && Engine.RecordedOBS(Path.GetFullPath(o.StateRoot)) is string recorded) o.OBS = recorded;
         }
         o.GD = NormalizeGD(o.GD); o.OBS = NormalizeOBS(o.OBS);
@@ -156,16 +156,16 @@ sealed class InstallRecord
     public List<ChangedFile> Files { get; set; } = [];
 }
 
-// An app the install must change is running. Update mode waits and tries again.
+
 sealed class AppRunningException(string message) : IOException(message);
-// Another setup holds the install lock. Update mode waits and tries again.
+
 sealed class SetupBusyException(string message) : IOException(message);
-// A newer OBS Jukebox was installed by hand while an update waited. The update stops without a result.
+
 sealed class NewerVersionInstalledException() : IOException("A newer OBS Jukebox is already installed.");
 
 static class Engine
 {
-    // Manifests name the release that wrote them, and an install by any release can be undone.
+
     static bool IsKnownProduct(string? product) =>
         product?.StartsWith("OBS Jukebox ", StringComparison.Ordinal) == true || product == "Separate Song 1.0.0";
     static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -193,8 +193,8 @@ static class Engine
     }
     internal const string JukeboxUrl="https://github.com/Fleeym/jukebox/releases/download/v3.8.0/fleym.nongd.geode";
     internal const string JukeboxHash="A0ECA6C82C7FA6149B956A809A9058959957D7C4672368B6933EA030E641B621";
-    // Every package in the mods folder whose mod.json has this ID. Geode loads only one package per
-    // ID, and which one depends on the file names, so callers refuse more than one.
+
+
     static List<(string Path,JsonNode Metadata,bool HasDll)> FindPackages(string gd,string id)
     {
         var found=new List<(string,JsonNode,bool)>();
@@ -246,10 +246,10 @@ static class Engine
         catch(System.Net.Http.HttpRequestException ex) { throw new IOException("Could not download Jukebox. Check your connection or install Jukebox 3.8.0 from Geode, then retry.",ex); }
         catch(TaskCanceledException ex) { throw new IOException("Jukebox download timed out. Install Jukebox 3.8.0 from Geode or retry.",ex); }
     }
-    // True only when installed is a release version above release; anything unparsable isn't newer.
+
     internal static bool IsNewer(string? installed,string release) =>
         Release(installed) is { } a && Release(release) is { } b && a.CompareTo(b)>0;
-    // Exactly three integers, like version_newer in Install.command; "1.2", "1.2.3.4" and prereleases don't parse.
+
     static (int,int,int)? Release(string? text)
     {
         var parts=text?.TrimStart('v').Split('.');
@@ -258,20 +258,20 @@ static class Engine
         for (int i=0;i<3;i++) if (!int.TryParse(parts[i],System.Globalization.NumberStyles.None,null,out n[i])) return null;
         return (n[0],n[1],n[2]);
     }
-    // The same logger, minus its failures: losing a log line is better than stopping a restore halfway.
+
     internal static Action<string> QuietLog(Action<string> log) => line =>
     {
         try { log(line); }
         catch(Exception ex) when(ex is IOException or UnauthorizedAccessException) { }
     };
-    // A restore that can't finish marks the error, so update mode reports "repair" whatever went wrong first.
+
     internal static void RollBack(InstallRecord record,Exception error,Action<string> log)
     {
         try { Restore(record,log); }
-        // Marked before logging, so a failing log write can't lose the mark.
+
         catch(Exception restoreError) { error.Data["repair"]=true; QuietLog(log)("Rollback incomplete: "+restoreError.Message); }
     }
-    // The OBS folder of the last install, while it still holds OBS.
+
     internal static string? RecordedOBS(string stateRoot)
     {
         try
@@ -340,7 +340,7 @@ static class Engine
         byte[] Required(string key) => payload.TryGetValue(key,out var data) ? data : throw new IOException("This setup is incomplete: missing " + key + ". Download a complete release installer and retry.");
         byte[] mod=Required("mods/local.separate_song.geode");
         if(PackageVersion(mod,"local.separate_song")!=Program.ReleaseVersion) throw new IOException("Unexpected OBS Jukebox payload version.");
-        // Update the installed package where it is, so a renamed copy isn't left beside the new one.
+
         string modDestination=FindInstalledMod(o.GD)?.Path ?? Path.Combine(o.GD,"geode","mods","local.separate_song.geode");
         Add(modDestination,mod,"OBS Jukebox mod " + Program.ReleaseVersion);
         bool portable = File.Exists(Path.Combine(o.OBS,"portable_mode.txt")) || File.Exists(Path.Combine(o.OBS,"portable_mode"));
@@ -411,8 +411,8 @@ static class Engine
     }
     static string MachinePlugin => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"obs-studio","plugins","separate-song","bin","64bit","separate-song.dll");
     static bool IsMachinePlugin(string path)=>string.Equals(Path.GetFullPath(path),MachinePlugin,StringComparison.OrdinalIgnoreCase);
-    // The privileged process has one fixed write target. It never parses user
-    // manifests, edits scenes, closes apps, restarts apps, or writes user backups.
+
+
     internal static int PluginHelper(string[] args)
     {
         if(args.Length<3 || args[1] is not ("write" or "remove"))throw new IOException("Invalid plugin helper request.");
@@ -436,7 +436,7 @@ static class Engine
             using var buffer=new MemoryStream();input.CopyTo(buffer);byte[] bytes=buffer.ToArray();
             if(Hash(bytes)!=args[3])throw new IOException("Plugin copy verification failed.");
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            // Folders created above didn't exist at the first check, and a junction could appear meanwhile.
+
             RefuseLinks();
             string temporary=destination+"."+Guid.NewGuid().ToString("N")+".tmp";
             try { File.WriteAllBytes(temporary,bytes);File.Move(temporary,destination,true); }
@@ -464,8 +464,8 @@ static class Engine
         if(value.TryGetValue<double>(out var number) && double.IsFinite(number) && number>=0 && number<long.MaxValue && Math.Truncate(number)==number)return (long)number;
         return 0;
     }
-    // Reverse only fields and objects changed by this transaction. Matching by
-    // stable IDs tolerates OBS formatting changes and reordered source arrays.
+
+
     internal static byte[] UndoCollection(byte[] original,byte[] installed,byte[] current)
     {
         var originalTree=JsonNode.Parse(original)!;var installedTree=JsonNode.Parse(installed)!;var currentTree=JsonNode.Parse(current)!;
@@ -553,7 +553,7 @@ static class Engine
             using var process=p;
             string? actual=ProcessPath(p);
             if(actual==null)throw new AppRunningException("Cannot inspect running " + name + ". Close it manually before installing.");
-            // An update waits for every copy of the app, wherever it runs from.
+
             if (!o.Update && !string.Equals(actual,exe,StringComparison.OrdinalIgnoreCase)) continue;
             if (!o.CloseApps) throw new AppRunningException(name + " is running. Close it first or choose Ask apps to close. OBS can ask you to stop recording/replay; this setup never force-kills it.");
             log("Requesting normal close: " + actual);
@@ -562,11 +562,11 @@ static class Engine
             stopped.Add(exe);
         }
     }
-    // A setup killed mid-transaction leaves its session at "installing", with backups that neither
-    // undo nor a new install reach. Each run restores such sessions before doing anything else.
+
+
     internal static int RecoverInterrupted(Options o,Action<string> log,List<string> stopped)
     {
-        // Recovery may have to close OBS, which a mod-only update promises not to do.
+
         if(o.ModOnly || !Directory.Exists(o.StateRoot)) return 0;
         int incomplete=0;
         foreach(var session in Directory.GetDirectories(o.StateRoot))
@@ -578,7 +578,7 @@ static class Engine
             catch(Exception ex) when(ex is JsonException or IOException or UnauthorizedAccessException) { continue; }
             if(record is not { Status: "installing" } || !IsKnownProduct(record.Product)) continue;
             log("Restoring an installation that was interrupted: "+manifest);
-            // A session left at "installing" would be retried, and fail, on every later run.
+
             try
             {
                 string gd=o.GD,obs=o.OBS;
@@ -587,32 +587,32 @@ static class Engine
                 Restore(record,log);
                 record.Status="rolled-back";
             }
-            // Nothing was restored yet, so the session stays at "installing" for the next run.
+
             catch(AppRunningException) { throw; }
             catch(Exception ex) { log("Rollback incomplete: "+ex.Message); record.Status="rollback-incomplete"; incomplete++; }
-            // A journal that can't be written counts as unfinished, instead of escaping as a plain error.
+
             try { WriteManifest(manifest,record); }
             catch(Exception ex) when(ex is IOException or UnauthorizedAccessException) { log("Could not record the recovery: "+ex.Message); incomplete++; }
-            // Update mode stops at the first unfinished session. Continuing could hide this one behind an
-            // app that opens for a later session, and the retry would skip a session already marked.
+
+
             if (incomplete>0 && o.Update) break;
         }
         return incomplete;
     }
-    // Through a temporary file, so a setup killed mid-write leaves the previous manifest, not half of one.
+
     static void WriteManifest(string path,InstallRecord record)
     {
         File.WriteAllText(path+".tmp",JsonSerializer.Serialize(record,JsonOptions));
         File.Move(path+".tmp",path,true);
     }
     internal const string SetupLockName=@"Local\OBS Jukebox Setup";
-    // One setup at a time: recovery treats every session left at "installing" as abandoned, so it would
-    // roll back a second window's live transaction.
+
+
     public static void Execute(Options o,Action<string> output,List<string>? closedApps=null)
     {
         using var running=new Mutex(false,SetupLockName);
         try { if(!running.WaitOne(0)) throw new SetupBusyException("Another OBS Jukebox setup is running. Let it finish, then try again."); }
-        catch(AbandonedMutexException) { } // a killed setup held it; recovery handles what it left
+        catch(AbandonedMutexException) { }
         try { ExecuteAlone(o,output,closedApps); }
         finally { running.ReleaseMutex(); }
     }
@@ -668,12 +668,12 @@ static class Engine
         }
         catch(Exception ex)
         {
-            // A log write that fails must never stop the restore, so the rollback logs through QuietLog.
+
             var quiet=QuietLog(Log);
             quiet("Install failed: "+ex.Message+". Restoring this transaction.");
             RollBack(record,ex,quiet);
             record.Status=ex.Data["repair"] is true ? "rollback-incomplete" : "rolled-back";
-            // A journal that can't record the outcome leaves the transaction in doubt.
+
             try { Save(); }
             catch(Exception journal) when(journal is IOException or UnauthorizedAccessException) { ex.Data["repair"]=true; }
             throw;
@@ -689,16 +689,16 @@ static class Engine
             log("Restarted: "+exe);
         }
     }
-    // Setup saves Applied only after replacing a file, so a setup killed in between leaves the new file
-    // unrecorded; its hash still shows it was replaced. A file it can't read counts as replaced, so its
-    // apps get closed and Restore reports that one file instead of stopping before the others.
+
+
+
     static bool Replaced(ChangedFile f)
     {
         if(f.Applied) return true;
         try { return File.Exists(f.Destination) && HashFile(f.Destination)==f.InstalledHash; }
         catch(Exception ex) when(ex is IOException or UnauthorizedAccessException) { return true; }
     }
-    // Restores every file it can, then reports the ones it couldn't.
+
     internal static void Restore(InstallRecord record,Action<string> log)
     {
         var failed=new List<string>();
@@ -714,7 +714,7 @@ static class Engine
         }
         if(failed.Count>0) throw new IOException("Could not restore "+failed.Count+" file(s): "+string.Join(", ",failed)+". The setup log says how to restore each one by hand.");
     }
-    // False when the backup is missing or altered.
+
     static bool RestoreFile(ChangedFile f,Action<string> log)
     {
         if(File.Exists(f.Destination) && HashFile(f.Destination)!=f.InstalledHash)
@@ -770,7 +770,7 @@ sealed class SetupForm : Form
     readonly object logLock=new();
     string? attemptLog;
     bool working;
-    // Closing mid-transaction would end the process before its rollback could run.
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if(working){e.Cancel=true;SetStatus("Wait for setup to finish before closing it.");}
@@ -874,8 +874,8 @@ sealed class SetupForm : Form
     }
 }
 
-// The setup the mod starts for an update: wait until GD and OBS are closed, install, and report the
-// outcome in a file the mod reads on its next launch. It never shows a window.
+
+
 static class UpdateMode
 {
     internal const string LockName=@"Local\OBSJukeboxUpdate";
@@ -883,7 +883,7 @@ static class UpdateMode
 
     internal static int Entry(string[] args)
     {
-        // Found by a plain scan, so a parsing error still reaches the mod.
+
         int at=Array.IndexOf(args,"--result");
         string? result=at>=0 && at+1<args.Length ? args[at+1] : null;
         try
@@ -897,7 +897,7 @@ static class UpdateMode
         }
         catch(Exception ex)
         {
-            // Best effort: with no writable result path, the session log is the only record.
+
             try { if(result!=null) WriteResult(result,"failed",ex.Message,false); }
             catch(Exception ex2) when(ex2 is IOException or UnauthorizedAccessException) { }
             return 1;
@@ -909,7 +909,7 @@ static class UpdateMode
         () => Engine.Execute(o,s=>Log(o,s)),
         () => Engine.RestartApps([Path.Combine(o.GD,"GeometryDash.exe")],s=>Log(o,s)),
         () => Engine.InstalledVersion(o.GD));
-    // No console is attached in update mode, so every line also goes to a file the player can send.
+
     static void Log(Options o,string line)
     {
         try { Directory.CreateDirectory(o.StateRoot); File.AppendAllText(Path.Combine(o.StateRoot,"update.log"),DateTimeOffset.Now.ToString("O")+" "+line+Environment.NewLine); }
@@ -918,35 +918,38 @@ static class UpdateMode
 
     internal static int Run(Options o,Host host)
     {
-        if(Engine.IsNewer(host.InstalledVersion(),Program.ReleaseVersion)) return 0;
-        Write(o,"waiting");
-        Log(o,"Waiting for Geometry Dash and OBS to close");
-        while(true)
+        try
         {
-            bool gd=host.Running("GeometryDash"),obs=host.Running("obs64");
-            if(gd || obs)
+            if(Engine.IsNewer(host.InstalledVersion(),Program.ReleaseVersion)) return 0;
+            Write(o,"waiting");
+            Log(o,"Waiting for Geometry Dash and OBS to close");
+            while(true)
             {
-                // "Update now" closed GD but OBS is open: give GD back now, install later.
-                if(!gd && TakeReopenFlag(o)) StartGD(o,host);
-                host.Sleep(); continue;
+                bool gd=host.Running("GeometryDash"),obs=host.Running("obs64");
+                if(gd || obs)
+                {
+                    host.Sleep(); continue;
+                }
+                try { host.Install(); }
+                catch(Exception ex) when(ex is AppRunningException or SetupBusyException) { host.Sleep(); continue; }
+                catch(NewerVersionInstalledException) { return 0; }
+                catch(Exception ex)
+                {
+                    if(ex.Data["repair"] is true) Write(o,"failed",ex.Message,true);
+                    else if(CancelledElevation(ex)) Write(o,"declined");
+                    else Write(o,"failed",ex.Message);
+                    return 1;
+                }
+                Write(o,"installed");
+                return 0;
             }
-            try { host.Install(); }
-            catch(Exception ex) when(ex is AppRunningException or SetupBusyException) { host.Sleep(); continue; }
-            catch(NewerVersionInstalledException) { return 0; }
-            catch(Exception ex)
-            {
-                if(ex.Data["repair"] is true) Write(o,"failed",ex.Message,true);
-                else if(CancelledElevation(ex)) Write(o,"declined");
-                else Write(o,"failed",ex.Message);
-                return 1;
-            }
-            Write(o,"installed");
-            if(TakeReopenFlag(o)) StartGD(o,host);
-            else Log(o,"No reopen flag, so Geometry Dash stays closed");
-            return 0;
+        }
+        finally
+        {
+            if(TakeReopenFlag(o) && !host.Running("GeometryDash")) StartGD(o,host);
         }
     }
-    // Reopening can fail (the game moved, the shell refused); that must not turn a finished install into a failure.
+
     static void StartGD(Options o,Host host)
     {
         try { host.StartGD(); }
@@ -954,7 +957,7 @@ static class UpdateMode
     }
     static bool TakeReopenFlag(Options o)
     {
-        // A flag that can't be read or deleted is not worth failing a finished install over.
+
         try
         {
             if(o.ReopenFlag==null || !File.Exists(o.ReopenFlag)) return false;
@@ -971,7 +974,7 @@ static class UpdateMode
     {
         if(o.ResultPath!=null) WriteResult(o.ResultPath,status,message,repair);
     }
-    // Through a temporary file, so the mod never reads half a result.
+
     internal static void WriteResult(string path,string status,string? message,bool repair)
     {
         var json=new JsonObject{["version"]=Program.ReleaseVersion,["status"]=status};

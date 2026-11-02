@@ -29,13 +29,6 @@ std::string baseUrl() {
 #endif
     return RELEASES;
 }
-std::array<uint8_t, 65> publicKey() {
-#ifdef OBS_JUKEBOX_QA
-    if (auto hex = std::getenv("OBS_JUKEBOX_UPDATE_PUBLIC_KEY"))
-        if (auto key = ur::parsePublicKeyHex(hex)) return *key;
-#endif
-    return UPDATE_PUBLIC_KEY;
-}
 ur::Platform platform() {
 #if defined(GEODE_IS_WINDOWS)
     return update_platform::underWine() ? ur::Platform::Other : ur::Platform::Windows;
@@ -46,7 +39,7 @@ ur::Platform platform() {
 #endif
 }
 
-// Paths, fixed on the main thread before any background work starts.
+
 struct Paths {
     std::filesystem::path staging, result, reopenFlag;
 };
@@ -58,15 +51,15 @@ struct Offer {
     ByteVector signature;
 };
 enum class Panel { None, Ask, Link, Progress };
-// Main-thread state.
+
 Panel panel = Panel::None;
 ur::Version panelVersion;
 std::string progressText;
 std::optional<Offer> offer;
 std::vector<std::string> pendingNotices;
 bool launched = false;
-// Counts main menus. GD builds a new MenuLayer each time the player returns to it, so a changed count
-// means the player left the menu at least once since an update attempt started.
+
+
 unsigned menuGeneration = 0;
 
 ur::Version running() {
@@ -82,7 +75,7 @@ bool inLevel() {
     return gm->m_playLayer || gm->m_levelEditorLayer;
 }
 void showToast(const std::string& text) { Notification::create(text, NotificationIcon::Info, 3.f)->show(); }
-// Nothing pops up over a level or the editor; those notifications wait for the next main menu.
+
 void notify(std::string text) {
     if (!inLevel()) showToast(text);
     else pendingNotices.push_back(std::move(text));
@@ -102,9 +95,18 @@ void store(const ur::Saved& saved) {
 }
 
 bool authentic(std::string_view bytes, std::span<const uint8_t> signature) {
-    return update_crypto::verifyP256(publicKey(), {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()}, signature);
+    auto message = std::span{reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()};
+#ifdef OBS_JUKEBOX_QA
+    if (auto hex = std::getenv("OBS_JUKEBOX_UPDATE_PUBLIC_KEY")) {
+        auto key = ur::parsePublicKeyHex(hex);
+        return key && update_crypto::verifyP256(*key, message, signature);
+    }
+#endif
+    for (const auto& key : UPDATE_PUBLIC_KEYS)
+        if (update_crypto::verifyP256(key, message, signature)) return true;
+    return false;
 }
-// The staged manifest, only if its signature still holds.
+
 std::optional<Offer> readStaged() {
     auto read = file::readString(paths.staging / "update.json");
     auto readSignature = file::readBinary(paths.staging / "update.json.sig");
@@ -139,30 +141,30 @@ std::string userAgent() { return "OBSJukebox/" + ur::toString(running()); }
 void refreshPanel();
 void exitForUpdate(bool reopen, unsigned startedOn);
 
-// Downloads (or reuses) the setup for offer and saves its manifest next to it. Background thread.
+
 std::optional<std::filesystem::path> stage(const Offer& o, std::function<void(float)> progress) {
     std::error_code error;
     if (update_platform::pathHasLink(paths.staging)) return std::nullopt;
     std::filesystem::create_directories(paths.staging, error);
     if (error || update_platform::pathHasLink(paths.staging)) return std::nullopt;
     auto entry = *ur::entryFor(o.manifest, platform());
-    // The size is signed, so refuse an impossible setup before any request is made.
+
     if (entry.size > MAX_SETUP) return std::nullopt;
     auto name = ur::assetName(o.manifest.version, platform());
     auto setup = paths.staging / name;
     if (!matches(setup, entry)) {
-        // Anything else in staging belongs to another version.
-        // Collect first: removing entries while iterating is unspecified. This also deletes a setup that failed matches().
+
+
         std::vector<std::filesystem::path> old;
-        // increment(error), not ++: a throw on this thread would end GD.
+
         for (std::filesystem::directory_iterator it(paths.staging, error), end; !error && it != end; it.increment(error)) old.push_back(it->path());
         for (auto& item : old) std::filesystem::remove_all(item, error);
-        // rename() on Windows won't replace it. The error_code overload, since a throw here would end GD.
+
         bool remains = std::filesystem::exists(setup, error);
         if (error || remains) return std::nullopt;
         auto url = fmt::format("{}/download/v{}/{}", baseUrl(), ur::toString(o.manifest.version), name);
         auto head = web::WebRequest().userAgent(userAgent()).timeout(std::chrono::seconds(15)).transferBody(false).getSync(url);
-        // An error page has its own length, so only a successful answer's length counts.
+
         if (auto length = head.ok() ? head.header("Content-Length") : std::nullopt) {
             uint64_t size = 0;
             std::string_view text = *length;
@@ -187,8 +189,8 @@ struct Launch {
     std::vector<std::string> args;
     update_platform::Job job = update_platform::Job::Free;
 };
-// Re-checks what is about to run and prepares its command. Background thread: it hashes
-// the whole setup and, on macOS, unzips it. gdFolder comes from the main thread.
+
+
 std::optional<Launch> prepareLaunch(ur::Version version, const std::filesystem::path& gdFolder) {
     auto staged = readStaged();
     if (!staged || staged->manifest.version != version) return std::nullopt;
@@ -196,7 +198,7 @@ std::optional<Launch> prepareLaunch(ur::Version version, const std::filesystem::
     auto setup = paths.staging / ur::assetName(version, platform());
     if (!entry || !matches(setup, *entry)) return std::nullopt;
     Launch launch{.job = update_platform::job()};
-    if (launch.job == update_platform::Job::Trapped) return launch; // the caller shows the link panel
+    if (launch.job == update_platform::Job::Trapped) return launch;
 #if defined(GEODE_IS_WINDOWS)
     launch.program = setup;
     launch.args = {"--update", "--gd", utils::string::pathToString(gdFolder), "--result", utils::string::pathToString(paths.result),
@@ -204,7 +206,7 @@ std::optional<Launch> prepareLaunch(ur::Version version, const std::filesystem::
 #elif defined(GEODE_IS_ARM_MAC)
     auto folder = paths.staging / fmt::format("{}-{:08x}", ur::toString(version), std::random_device{}());
     std::error_code folderError;
-    // Reserve the folder first, so ditto can never merge into an existing tree.
+
     if (!std::filesystem::create_directory(folder, folderError) || folderError) return std::nullopt;
     if (!update_platform::unzip(setup, folder)) { std::filesystem::remove_all(folder, folderError); return std::nullopt; }
     launch.program = "/bin/zsh";
@@ -216,11 +218,11 @@ std::optional<Launch> prepareLaunch(ur::Version version, const std::filesystem::
     return launch;
 }
 
-// "Update now", the "now" mode, and "After I close GD and OBS" all end here. Main thread.
+
 void startUpdate(bool restart, bool viaNotice) {
     if (!offer) return;
     auto o = *offer;
-    // Only the panel's "Update now" shows progress; the automatic mode shows no panel.
+
     bool showProgress = restart && !viaNotice;
     if (showProgress) { panel = Panel::Progress; panelVersion = o.manifest.version; progressText = "Downloading..."; refreshPanel(); }
     unsigned startedOn = menuGeneration;
@@ -232,7 +234,7 @@ void startUpdate(bool restart, bool viaNotice) {
     auto gdFolder = std::filesystem::path{};
 #endif
     std::thread([o, restart, viaNotice, showProgress, startedOn, gdFolder] {
-        // Redraw the panel only when the whole percentage changes, not on every network callback.
+
         auto shown = std::make_shared<std::atomic<int>>(-1);
         auto setup = stage(o, [showProgress, shown](float percent) {
             int whole = static_cast<int>(percent);
@@ -246,22 +248,24 @@ void startUpdate(bool restart, bool viaNotice) {
                 panel = Panel::Link; panelVersion = version; refreshPanel();
                 return;
             }
-            // The player asked for a restart, so GD comes back after the install even if they leave the menu
-            // and close GD themselves. Written before the setup starts, so no slow start can skip it.
+
+
             bool reopen = restart && file::writeString(paths.reopenFlag, "").isOk();
             if (restart && !reopen) log::warn("Could not write the reopen flag; GD won't reopen after the update");
             if (!launch || !update_platform::startSetup(launch->program, launch->args, launch->job == update_platform::Job::Breakaway)) {
+                std::error_code error;
+                std::filesystem::remove(paths.reopenFlag, error);
                 log::warn("The update setup didn't start (download or launch failed)");
                 if (panel == Panel::Progress) panel = Panel::None;
                 refreshPanel();
                 notify("The OBS Jukebox update couldn't start.");
                 return;
             }
-            // A cold start of the setup takes several seconds; say so, or the panel looks stuck at 100%.
+
             if (panel == Panel::Progress) { progressText = "Starting the setup..."; refreshPanel(); }
             std::thread([version, restart, viaNotice, startedOn, reopen] {
-                // Unpacking, a virus scan, or GD loading a level can slow the setup's first start a lot.
-                // Either sign counts: its "waiting" result, or the lock it holds while it waits.
+
+
                 auto start = std::chrono::steady_clock::now();
                 bool ready = false;
                 for (int i = 0; i < 240 && !ready; ++i) {
@@ -272,7 +276,14 @@ void startUpdate(bool restart, bool viaNotice) {
                 auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
                 log::info("Update setup {} after {} ms", ready ? "is waiting" : "never reported in", waited);
                 Loader::get()->queueInMainThread([ready, restart, viaNotice, startedOn, reopen] {
-                    if (!ready) { panel = Panel::None; refreshPanel(); notify("The OBS Jukebox update couldn't start."); return; }
+                    if (!ready) {
+                        std::error_code error;
+                        std::filesystem::remove(paths.reopenFlag, error);
+                        panel = Panel::None;
+                        refreshPanel();
+                        notify("The OBS Jukebox update couldn't start.");
+                        return;
+                    }
                     if (!restart) {
                         notify("Update installs after you close GD and OBS.");
                         return;
@@ -294,10 +305,10 @@ void startUpdate(bool restart, bool viaNotice) {
     }).detach();
 }
 
-// Leaves the game so the setup can install: only from the main menu, and only with the reopen flag in place.
+
 void exitForUpdate(bool reopen, unsigned startedOn) {
     panel = Panel::None;
-    // Leaving the menu at any point since the click, even after coming back, turns this into after-close.
+
     bool left = !onMainMenu() || menuGeneration != startedOn;
     if (left || !reopen || update_platform::obsRunning()) {
         log::info("Not closing GD for the update (left the menu: {}, reopen flag: {})", left, reopen);
@@ -311,13 +322,13 @@ void exitForUpdate(bool reopen, unsigned startedOn) {
 
 void showLinkPanel(ur::Version version) { panel = Panel::Link; panelVersion = version; refreshPanel(); }
 
-// Main thread, with a verified manifest from the check.
+
 void decide(Offer o, bool obsRunning, ur::Mode mode) {
     auto saved = loadSaved();
     auto hasEntry = ur::entryFor(o.manifest, platform()).has_value();
     auto choice = ur::planOffer({mode, platform(), running(), o.manifest.version, hasEntry, obsRunning, onMainMenu(), saved});
-    // A setup started in this job would die with GD. That can't be fixed later, so link to the download,
-    // once per version; after that there is nothing more this launch can do.
+
+
     if (choice != ur::Offer::None && choice != ur::Offer::LinkPanel && platform() == ur::Platform::Windows
         && update_platform::job() == update_platform::Job::Trapped) {
         if (saved.notified == o.manifest.version) return;
@@ -335,7 +346,7 @@ void decide(Offer o, bool obsRunning, ur::Mode mode) {
     }
 }
 
-// Background thread: fetch and verify the latest manifest.
+
 void check(ur::Mode mode) {
     auto get = [](const std::string& url, size_t cap) -> std::optional<ByteVector> {
         auto response = web::WebRequest().userAgent(userAgent()).timeout(std::chrono::seconds(15)).getSync(url);
@@ -359,22 +370,25 @@ void firstLaunch() {
     auto mode = ur::parseMode(Mod::get()->getSettingValue<std::string>("update-mode"));
     if (mode == ur::Mode::Off) return;
     paths = {Mod::get()->getSaveDir() / "update", Mod::get()->getSaveDir() / "update-result.json", Mod::get()->getSaveDir() / "update-reopen-gd"};
-    // A waiting setup owns staging and the result file; touch nothing.
+
     if (update_platform::setupWaiting()) return;
     if (update_platform::pathHasLink(paths.staging)) { log::warn("The update folder is a link; skipping updates this launch"); return; }
     std::error_code error;
     auto staged = readStaged();
-    if (!staged) std::filesystem::remove_all(paths.staging, error);
     auto plan = ur::planLaunch({running(), false, staged ? std::optional(staged->manifest.version) : std::nullopt, readResult(), loadSaved()});
     if (plan.deleteReopenFlag) std::filesystem::remove(paths.reopenFlag, error);
     if (plan.deleteResult) std::filesystem::remove(paths.result, error);
-    if (plan.deleteStaging) std::filesystem::remove_all(paths.staging, error);
     store(plan.saved);
     if (!plan.message.empty()) log::warn("The update setup reported: {}", plan.message);
     if (plan.notice != ur::Notice::None) notify(ur::noticeText(plan.notice, staged ? staged->manifest.version : running()));
     if (plan.linkPanel) showLinkPanel(*plan.linkPanel);
-    if (plan.stop) return;
-    std::thread(check, mode).detach();
+    std::thread([mode, cleanup = !staged || plan.deleteStaging, stop = plan.stop] {
+        if (cleanup) {
+            std::error_code error;
+            std::filesystem::remove_all(paths.staging, error);
+        }
+        if (!stop) check(mode);
+    }).detach();
 }
 
 CCMenuItemSpriteExtra* button(const char* text, std::function<void()> action) {
@@ -382,7 +396,7 @@ CCMenuItemSpriteExtra* button(const char* text, std::function<void()> action) {
     sprite->setScale(.5f);
     return CCMenuItemExt::createSpriteExtra(sprite, [action](CCMenuItemSpriteExtra*) { action(); });
 }
-// A small panel in the top-right corner. It takes no input outside its own buttons.
+
 void drawPanel(MenuLayer* menu) {
     if (auto old = menu->getChildByID("update-panel"_spr)) old->removeFromParent();
     if (panel == Panel::None) return;
@@ -390,14 +404,14 @@ void drawPanel(MenuLayer* menu) {
     bool progress = panel == Panel::Progress;
     auto root = CCNode::create();
     root->setID("update-panel"_spr);
-    // Progress has no buttons, so it is a single line.
+
     root->setContentSize({230.f, progress ? 28.f : 52.f});
     root->setAnchorPoint({1.f, 1.f});
     root->setScale(.7f);
     root->setPosition({win.width - 4.f, win.height - 4.f});
     auto background = CCScale9Sprite::create("square02b_001.png");
     background->setColor({0, 0, 0});
-    // Dark enough that the GD logo underneath doesn't show through the text.
+
     background->setOpacity(200);
     background->setContentSize(root->getContentSize());
     background->setAnchorPoint({0.f, 0.f});
@@ -431,13 +445,13 @@ void refreshPanel() {
     auto scene = CCDirector::get()->getRunningScene();
     if (auto menu = scene ? scene->getChildByType<MenuLayer>(0) : nullptr) drawPanel(menu);
 }
-} // namespace
+}
 
 namespace updater {
 void onMainMenu(MenuLayer* menu) {
     ++menuGeneration;
 #ifdef OBS_JUKEBOX_QA
-    // Visual checks: OBS_JUKEBOX_UPDATE_PREVIEW=toasts queues every update toast; link, ask or progress draws that panel.
+
     if (auto preview = std::getenv("OBS_JUKEBOX_UPDATE_PREVIEW"); preview && !launched) {
         launched = true;
         std::string_view what = preview;
@@ -459,4 +473,4 @@ void onMainMenu(MenuLayer* menu) {
     pendingNotices.clear();
     drawPanel(menu);
 }
-} // namespace updater
+}

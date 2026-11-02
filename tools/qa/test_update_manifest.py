@@ -1,6 +1,6 @@
-"""Checks the release manifest script and that the mod's key matches the committed public key."""
 import importlib.util
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -16,6 +16,7 @@ def load(name):
 
 manifest_script = load("make-update-manifest")
 key_script = load("update-key-header")
+verify_script = load("verify-update-signature")
 
 
 class ManifestTests(unittest.TestCase):
@@ -55,6 +56,34 @@ class ManifestTests(unittest.TestCase):
 
 
 class KeyTests(unittest.TestCase):
+    def test_rotation_and_empty_trust(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = pathlib.Path(directory)
+            message = folder / "update.json"
+            message.write_bytes(b"release manifest\n")
+            public = []
+            signatures = []
+            for name in ("old", "new", "untrusted"):
+                private, pem, sig = (folder / (name + suffix) for suffix in (".key", ".pem", ".sig"))
+                subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(private)], check=True, capture_output=True)
+                subprocess.run(["openssl", "pkey", "-in", str(private), "-pubout", "-out", str(pem)], check=True, capture_output=True)
+                subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(private), "-out", str(sig), str(message)], check=True)
+                public.append(pem.read_text())
+                signatures.append(sig)
+            bundle = folder / "bundle.pem"
+            bundle.write_text(public[0] + public[1])
+            self.assertEqual(len(key_script.public_keys(bundle.read_text())), 2)
+            self.assertIn(">, 2> UPDATE_PUBLIC_KEYS", key_script.key_header(bundle.read_text()))
+            self.assertTrue(verify_script.verify(bundle, signatures[0], message))
+            self.assertTrue(verify_script.verify(bundle, signatures[1], message))
+            self.assertFalse(verify_script.verify(bundle, signatures[2], message))
+            message.write_bytes(b"tampered manifest\n")
+            self.assertFalse(verify_script.verify(bundle, signatures[0], message))
+            bundle.write_text("# Not provisioned\n")
+            self.assertFalse(verify_script.verify(bundle, signatures[0], message))
+            with self.assertRaises(ValueError):
+                key_script.public_keys("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----")
+
     def test_header_matches_committed_key(self):
         pem = (ROOT / "scripts" / "update-signing-public.pem").read_text()
         self.assertEqual(key_script.key_header(pem), (ROOT / "src" / "UpdateKey.hpp").read_text())

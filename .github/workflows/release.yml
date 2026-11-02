@@ -5,7 +5,6 @@ on:
 permissions: {}
 jobs:
   build:
-    # A called workflow can't raise the caller's permissions, so grant read here.
     permissions:
       contents: read
     uses: ./.github/workflows/native.yml
@@ -106,7 +105,7 @@ jobs:
         with:
           name: update-signature
       - name: Verify the signature against the committed key
-        run: openssl dgst -sha256 -verify scripts/update-signing-public.pem -signature update.json.sig update.json
+        run: python3 scripts/verify-update-signature.py scripts/update-signing-public.pem update.json.sig update.json
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}

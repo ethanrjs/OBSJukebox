@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libobs-dev cmake pkg-config ninja-build xvfb libgl1-mesa-dri python3-tk ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y libobs-dev cmake pkg-config ninja-build xvfb libgl1-mesa-dri python3-tk ffmpeg zsh
       - name: Build OBS plugin
         run: |
           cmake -S obs-plugin -B build-linux/plugin -G Ninja -DCMAKE_BUILD_TYPE=Release -DOBS_JUKEBOX_QA=ON
@@ -30,8 +30,13 @@ jobs:
         run: python3 tools/qa/test_link_protocol.py
       - name: Check the mod package check
         run: python3 tools/qa/test_check_mod_package.py
-      - name: Check the update manifest
-        run: python3 tools/qa/test_update_manifest.py
+      - name: Check updater rules, signatures and wrapper outcomes
+        run: |
+          python3 tools/qa/test_update_manifest.py
+          python3 tools/qa/test_update_wrapper.py
+          bash tools/qa/make-update-fixtures.sh "$RUNNER_TEMP/update-fixtures"
+          c++ -std=c++20 -Wall -Wextra -DUPDATE_RULES_ONLY tools/qa/update-rules-validation.cpp src/UpdateRules.cpp -o "$RUNNER_TEMP/update-rules"
+          "$RUNNER_TEMP/update-rules" "$RUNNER_TEMP/update-fixtures"
       - name: Check timestamped playback
         run: bash scripts/tests/audio/run.sh
       - name: Build the audio benchmark
@@ -44,7 +49,6 @@ jobs:
         run: |
           cmake -S tools/qa -B build-linux/qa -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build-linux/qa --parallel 2
-          # Verbose, so the log says whether the transport tests checked the SHA instructions.
           ctest --test-dir build-linux/qa -V
       - name: Check OBS audio
         env:

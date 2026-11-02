@@ -29,16 +29,16 @@ static std::optional<std::array<uint8_t, 32>> hash(std::string_view hex) {
 }
 std::optional<Manifest> parseManifest(std::string_view bytes) {
     if (bytes.size() > 16 * 1024) return std::nullopt;
-    // The re(...)re delimiter, because the pattern itself contains )" sequences.
+
     static const std::regex shape(
         R"re(\{"files":\{(?:"macos-arm64":\{"sha256":"([0-9a-f]{64})","size":(0|[1-9][0-9]{0,11})\}(,?))?)re"
         R"re((?:"windows":\{"sha256":"([0-9a-f]{64})","size":(0|[1-9][0-9]{0,11})\})?\},"schema":1,)re"
         R"re("version":"([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})"\}\n)re");
     std::cmatch m;
     if (!std::regex_match(bytes.data(), bytes.data() + bytes.size(), m, shape)) return std::nullopt;
-    // The comma belongs between two entries, and only there.
+
     if (m[3].length() != (m[1].matched && m[4].matched ? 1 : 0)) return std::nullopt;
-    // A manifest with no file at all is not a valid release.
+
     if (!m[1].matched && !m[4].matched) return std::nullopt;
     Manifest out{*parseVersion(m[6].str()), {}, {}};
     auto entry = [](const std::csub_match& sha, const std::csub_match& size) {
@@ -69,8 +69,8 @@ std::optional<std::array<uint8_t, 64>> derToRaw(std::span<const uint8_t> der) {
         if (length < 1 || length > 33 || at + length > der.size()) return std::nullopt;
         auto value = der.subspan(at, length);
         at += length;
-        if (value[0] & 0x80) return std::nullopt; // negative
-        if (value[0] == 0) {                       // allowed only before a byte with its top bit set
+        if (value[0] & 0x80) return std::nullopt;
+        if (value[0] == 0) {
             if (value.size() == 1 || !(value[1] & 0x80)) return std::nullopt;
             value = value.subspan(1);
         }
@@ -116,7 +116,7 @@ std::optional<Status> parseStatus(std::string_view text) {
     if (text == "failed") return Status::Failed;
     return std::nullopt;
 }
-// Kept to one short line: a toast doesn't wrap, and a longer one runs off the screen.
+
 std::string noticeText(Notice notice, Version version) {
     switch (notice) {
     case Notice::Installed: return "OBS Jukebox updated to " + toString(version) + ".";
@@ -139,10 +139,11 @@ LaunchPlan planLaunch(const LaunchInput& in) {
     plan.saved = in.saved;
     if (in.setupWaiting) { plan.stop = true; return plan; }
     plan.deleteReopenFlag = true;
-    // Every result is read once, so the file goes whether it parsed or not.
+
     plan.deleteResult = true;
-    if (plan.saved.blocked && in.running > *plan.saved.blocked) plan.saved.blocked.reset();
-    // A result counts only for the authentic staged version; anything else is deleted unread.
+
+    if (plan.saved.blocked && in.running >= *plan.saved.blocked) plan.saved.blocked.reset();
+
     auto result = in.result && in.staged && in.result->version == *in.staged ? in.result : std::nullopt;
     if (result && result->repair) {
         plan.notice = Notice::Repair;
@@ -175,11 +176,11 @@ LaunchPlan planLaunch(const LaunchInput& in) {
 Offer planOffer(const OfferInput& in) {
     if (in.mode == Mode::Off || in.latest <= in.running) return Offer::None;
     auto link = in.saved.notified == in.latest ? Offer::None : Offer::LinkPanel;
-    if (in.saved.blocked && in.running <= *in.saved.blocked) return in.latest > *in.saved.blocked ? link : Offer::None;
+    if (in.saved.blocked && in.running < *in.saved.blocked) return in.latest > *in.saved.blocked ? link : Offer::None;
     if (in.saved.attemptsVersion == in.latest && in.saved.attempts >= 3) return Offer::None;
     if (in.platform == Platform::Other || !in.hasEntry) return link;
     if (in.mode == Mode::AfterClose) return Offer::StartAfterClose;
     if (in.mode == Mode::Now) return in.obsRunning || !in.onMainMenu ? Offer::StartAfterClose : Offer::StartNow;
     return Offer::AskPanel;
 }
-} // namespace update_rules
+}
