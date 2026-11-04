@@ -19,6 +19,13 @@
 using namespace geode::prelude;
 namespace separate_song::audio_tap {
 namespace {
+void warnKeptTap() {
+    static bool logged = false;
+    if (logged)
+        return;
+    logged = true;
+    log::warn("OBS effects tap could not be retired from FMOD's graph; keeping it as a pass-through until the game exits");
+}
 struct Tap {
     static constexpr unsigned capacity = 64;
     std::array<EffectsPacketV3, capacity> queue;
@@ -35,7 +42,13 @@ struct Tap {
     std::counting_semaphore<capacity + 1> ready{0};
     std::thread worker;
     SongSocket transport = BAD_SOCKET;
-    ~Tap() { shutdown(); }
+    ~Tap() {
+        shutdown();
+        // A DSP FMOD would not unlock still has a callback pointed at this object. retireTap leaks
+        // such a tap, and the other owners (a failed attach's unique_ptr) end the same way here.
+        if (dsp)
+            warnKeptTap();
+    }
     // True when the DSP is still in FMOD's graph: it happens only when FMOD would not lock the DSP
     // chain for the teardown, and then nothing here may free the Tap, because a render callback that
     // is already past getuserdata would touch a freed object.
@@ -191,8 +204,9 @@ struct Tap {
                 }
             });
         } catch (...) {
-            dsp->release();
-            dsp = nullptr;
+            // The DSP is already in the graph, so this must not release it here: no lock excludes a
+            // render that already read userdata. attach() failing destroys the Tap, and its locked
+            // teardown (shutdown) detaches and releases the DSP safely, or keeps it if FMOD won't lock.
             return false;
         }
         return true;
@@ -211,15 +225,11 @@ void retireTap(Tap *&owned) {
     auto *tap = owned;
     owned = nullptr;
     tap->shutdown();
-    if (!tap->dspAlive()) {
-        delete tap;
+    if (tap->dspAlive()) {
+        warnKeptTap();
         return;
     }
-    static bool logged = false;
-    if (!logged) {
-        logged = true;
-        log::warn("OBS effects tap could not be retired from FMOD's graph; keeping it as a pass-through until OBS exits");
-    }
+    delete tap;
 }
 bool captureEnabled = true;
 bool terminated = false;

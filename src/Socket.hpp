@@ -34,6 +34,9 @@ inline constexpr SongSocket BAD_SOCKET = -1;
 inline bool socketsReady() { return true; }
 inline void closeSocket(SongSocket s) { close(s); }
 inline void nonblocking(SongSocket s) { fcntl(s, F_SETFL, O_NONBLOCK); }
+// POSIX has no such option: a closed peer surfaces as an ordinary receive error, which the
+// receivers already tolerate.
+inline void ignoreConnReset(SongSocket) {}
 #endif
 
 // Returns a nonblocking UDP socket bound to 127.0.0.1, so it never listens on other interfaces, or
