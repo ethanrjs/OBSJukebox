@@ -31,8 +31,8 @@ def fetch(platform, destination, include_obs):
         if not (target / '.git').exists() or run('git', '-C', str(target), 'rev-parse', 'HEAD') != revision:
             raise RuntimeError(f'{target} is not the locked checkout; choose a new destination')
         # Untracked content counts here too: a planted header or CMake fragment would enter the build
-        # even though every tracked file is exactly the pinned revision. Submodule changes show as
-        # " m" entries under --untracked-files=all.
+        # even though every tracked file is exactly the pinned revision. Submodule drift shows as a
+        # modified entry too.
         if run('git', '-C', str(target), 'status', '--porcelain', '--untracked-files=all'):
             raise RuntimeError(f'{target} is not a clean pinned checkout; choose a new destination')
     for name, asset in lock['assets'].items():
