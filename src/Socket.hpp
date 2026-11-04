@@ -2,6 +2,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 using SongSocket = SOCKET;
 inline constexpr SongSocket BAD_SOCKET = INVALID_SOCKET;
 inline bool socketsReady() {
@@ -15,6 +16,12 @@ inline void closeSocket(SongSocket s) { closesocket(s); }
 inline void nonblocking(SongSocket s) {
     u_long mode = 1;
     ioctlsocket(s, FIONBIO, &mode);
+}
+// Windows reports a datagram sent to a port that later closed as an error on the NEXT recvfrom.
+// These sockets talk to processes that come and go, so tell Winsock not to surface that yet.
+inline void ignoreConnReset(SongSocket s) {
+    DWORD behavior = 0, returned = 0;
+    WSAIoctl(s, SIO_UDP_CONNRESET, &behavior, sizeof(behavior), nullptr, 0, &returned, nullptr, nullptr);
 }
 #else
 #include <sys/socket.h>
@@ -45,6 +52,7 @@ inline SongSocket openLoopbackSocket() {
         return BAD_SOCKET;
     }
     nonblocking(udp);
+    ignoreConnReset(udp);
     return udp;
 }
 
