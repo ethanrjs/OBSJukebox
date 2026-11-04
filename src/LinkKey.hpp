@@ -1,7 +1,8 @@
 #pragma once
 // A random key the mod makes at launch and writes to a file in this user's own app data folder. The key
 // itself never travels: every packet carries an HMAC-SHA256 tag made with it, so the plugin follows only
-// this user's mod, and a program that can see loopback traffic still can't forge a packet.
+// this user's mod. Another user's programs cannot read the key; a program running as this user can, and
+// it can then forge packets, so the trust boundary is the user account, not loopback secrecy (README).
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -329,8 +330,12 @@ inline bool writeLinkKey(const LinkKey &key, const std::filesystem::path &file =
             return false;
     }
 #ifndef _WIN32
+    // Only this user must be able to read the key back, so when the mode cannot be applied, refuse
+    // to pair instead of pairing through a file with default permissions.
     std::filesystem::permissions(file, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
                                  error);
+    if (error)
+        return false;
 #endif
     return true;
 }
