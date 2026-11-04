@@ -338,6 +338,9 @@ static class InstallerTests
             File.WriteAllText(flag, ""); events.Clear();
             UpdateMode.Run(o,FakeHost(events,[(false,false)],()=>{},installed:"999.0.0"));
             Check(events.SequenceEqual(["start-gd"]) && !File.Exists(flag),"newer version detected before waiting still reopens GD");
+            File.WriteAllText(flag, ""); events.Clear();
+            UpdateMode.Run(o,FakeHost(events,[(true,false)],()=>{},installed:"999.0.0"));
+            Check(!events.Contains("start-gd") && File.Exists(flag),"a wrapper exiting while GD is still closing leaves the reopen flag to the mod's cleanup");
             File.Delete(result);
             Check(UpdateMode.Run(o,FakeHost([],[(false,false)],()=>{},installed:"999.0.0"))==0 && !File.Exists(result),"a newer installed mod stops the update before it writes anything");
             UpdateMode.Run(o,FakeHost([],[(false,false)],()=>throw new NewerVersionInstalledException()));
