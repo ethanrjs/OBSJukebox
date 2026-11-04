@@ -42,13 +42,7 @@ struct Tap {
     std::counting_semaphore<capacity + 1> ready{0};
     std::thread worker;
     SongSocket transport = BAD_SOCKET;
-    ~Tap() {
-        shutdown();
-        // A DSP FMOD would not unlock still has a callback pointed at this object. retireTap leaks
-        // such a tap, and the other owners (a failed attach's unique_ptr) end the same way here.
-        if (dsp)
-            warnKeptTap();
-    }
+    ~Tap() { shutdown(); }
     // True when the DSP is still in FMOD's graph: it happens only when FMOD would not lock the DSP
     // chain for the teardown, and then nothing here may free the Tap, because a render callback that
     // is already past getuserdata would touch a freed object.
@@ -181,8 +175,9 @@ struct Tap {
             dsp = nullptr;
             return false;
         }
-        // A DSP joined to the graph must always find its sender, so a failed thread start undoes the
-        // attach exactly like a failed addDSP instead of throwing out of the scheduler.
+        // A DSP joined to the graph must always find its sender. A failed thread start returns an
+        // attach failure and lets the caller's retirement do the locked teardown, instead of
+        // throwing out of the scheduler.
         try {
             worker = std::thread([this] {
                 sockaddr_in target{};
@@ -205,8 +200,9 @@ struct Tap {
             });
         } catch (...) {
             // The DSP is already in the graph, so this must not release it here: no lock excludes a
-            // render that already read userdata. attach() failing destroys the Tap, and its locked
-            // teardown (shutdown) detaches and releases the DSP safely, or keeps it if FMOD won't lock.
+            // render that already read userdata. attach() fails and the caller retires the Tap
+            // through retireTap, whose locked teardown detaches and releases it, or keeps it when
+            // FMOD will not lock.
             return false;
         }
         return true;
@@ -249,9 +245,12 @@ void install() {
         return;
     retireTap(effects);
     retireTap(reference);
-    auto tap = std::make_unique<Tap>();
+    auto *tap = new Tap();
     tap->enabled = captureEnabled;
     if (!tap->attach(engine, engine->m_globalChannel, 0)) {
+        // A failed attach is retired like any replaced tap: its sender stops, and the DSP is
+        // released under FMOD's lock, or the object is kept when the lock is refused.
+        retireTap(tap);
         nextAttach = now + uint64_t(retrySeconds) * 1000000000;
         retrySeconds = std::min(retrySeconds * 2, 30u);
         if (!attachFailureLogged) {
@@ -260,7 +259,7 @@ void install() {
         }
         return;
     }
-    effects = tap.release();
+    effects = tap;
     attachFailureLogged = false;
     retrySeconds = 1;
     log::info("OBS effects tap attached at {} Hz", effects->rate);
@@ -269,9 +268,11 @@ void install() {
     if (calibrate) {
         engine->setBackgroundMusicVolume(.5f);
         engine->setEffectsVolume(.5f);
-        auto ref = std::make_unique<Tap>();
+        auto *ref = new Tap();
         if (ref->attach(engine, engine->m_backgroundMusicChannel, 1))
-            reference = ref.release();
+            reference = ref;
+        else
+            retireTap(ref);
     }
 #endif
 }
