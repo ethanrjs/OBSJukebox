@@ -42,7 +42,11 @@ std::optional<Manifest> parseManifest(std::string_view bytes) {
     if (!m[1].matched && !m[4].matched) return std::nullopt;
     Manifest out{*parseVersion(m[6].str()), {}, {}};
     auto entry = [](const std::csub_match& sha, const std::csub_match& size) {
-        FileEntry e{*hash(sha.str()), std::stoull(size.str())};
+        // stoull can throw, and the guideline says avoid throwing calls. The regex matches digits
+        // only, so from_chars cannot fail here, exactly as it does in parseVersion.
+        uint64_t sizeValue = 0;
+        std::from_chars(size.first, size.first + size.length(), sizeValue);
+        FileEntry e{*hash(sha.str()), sizeValue};
         return e;
     };
     if (m[1].matched) out.macArm64 = entry(m[1], m[2]);
