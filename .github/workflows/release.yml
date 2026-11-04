@@ -35,10 +35,6 @@ jobs:
           mkdir release
           cp "dist/windows/OBS-Jukebox-$version-Windows-Setup.exe" "dist/macos/OBS-Jukebox-$version-macOS-arm64.zip" dist/linux/OBS-Jukebox-Linux-x86_64.tar.gz release/
           python3 scripts/make-update-manifest.py --tag "$GITHUB_REF_NAME" --out update.json "release/OBS-Jukebox-$version-Windows-Setup.exe" "release/OBS-Jukebox-$version-macOS-arm64.zip"
-      # The glob expands before SHA256SUMS.txt exists, so the sums cover exactly the three artifacts.
-      # Linux is not in the signed manifest, so a published checksum is its only user-verifiable check.
-      - name: Write the release checksums
-        run: (cd release && sha256sum -- * > SHA256SUMS.txt)
       - name: Check the committed public key matches UpdateKey.hpp
         run: python3 tools/qa/test_update_manifest.py
       - name: Write the approver's summary
@@ -57,6 +53,11 @@ jobs:
             if [ -n "$previous" ]; then changes=$(git diff "$previous" "$GITHUB_SHA" -- .github); echo "${changes:-(no changes)}"; else echo "(no earlier release tag)"; fi
             echo '~~~~~~~~~~~~~~~~'
           } >> "$GITHUB_STEP_SUMMARY"
+      # Written after the summary, so the summary's own file list stays the three artifacts. The glob
+      # expands before SHA256SUMS.txt exists either way. Linux is not in the signed manifest, so a
+      # published checksum is its only user-verifiable check.
+      - name: Write the release checksums
+        run: (cd release && sha256sum -- * > SHA256SUMS.txt)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: update-json
@@ -112,15 +113,21 @@ jobs:
           name: update-signature
       - name: Verify the signature against the committed key
         run: python3 scripts/verify-update-signature.py scripts/update-signing-public.pem update.json.sig update.json
-      # During a rotation, a bridge release signed with the wrong-key still passes the committed
+      # During a rotation, a bridge release signed with the wrong key still passes the committed
       # bundle, which holds both keys, while clients that trust only the old key reject it with just
       # a log line. The bundle at the previous release tag is what those clients verify against, so
-      # this fails the release instead. With no earlier tag there is nothing to check.
+      # this fails the release instead. Tags from before the updater have no bundle to check against;
+      # the committed-key step above already stands in for those.
       - name: Verify the signature against the previous release's key bundle
         run: |
           previous=$(git tag --list 'v*.*.*' --sort=-v:refname | grep -vxF "$GITHUB_REF_NAME" | head -n 1 || true)
           [ -n "$previous" ] || { echo "No earlier release tag; the committed-key check stands in."; exit 0; }
-          git show "$previous:scripts/update-signing-public.pem" > previous-bundle.pem
+          if git cat-file -e "$previous:scripts/update-signing-public.pem" 2>/dev/null; then
+            git show "$previous:scripts/update-signing-public.pem" > previous-bundle.pem
+          else
+            echo "No key bundle at $previous; the committed-key check stands in."
+            cp scripts/update-signing-public.pem previous-bundle.pem
+          fi
           python3 scripts/verify-update-signature.py previous-bundle.pem update.json.sig update.json
       - name: Create the draft release
         env:
