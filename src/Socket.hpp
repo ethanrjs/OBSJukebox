@@ -2,7 +2,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <mstcpip.h>
+#include <mswsock.h>
 using SongSocket = SOCKET;
 inline constexpr SongSocket BAD_SOCKET = INVALID_SOCKET;
 inline bool socketsReady() {
