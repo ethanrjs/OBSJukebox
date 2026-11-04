@@ -126,6 +126,8 @@ bool startSetup(const std::filesystem::path& program, const std::vector<std::str
 }
 bool unzip(const std::filesystem::path& zip, const std::filesystem::path& into) {
     pid_t child;
+    // POSIX paths are byte strings, so string() here performs no conversion and cannot throw. This
+    // file stays freestanding (QA builds it without Geode), so pathToString isn't an option anyway.
     if (!spawn("/usr/bin/ditto", {"-x", "-k", zip.string(), into.string()}, &child, false)) return false;
     int status = 0;
     return waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;

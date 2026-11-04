@@ -40,10 +40,16 @@ ur::Platform platform() {
 }
 
 
+// Heap-held, like the bridge and the Jukebox file cache: an app exit can run static destructors
+// while an update or progress thread is still touching these paths, so no global here owns a
+// destructor above them.
 struct Paths {
     std::filesystem::path staging, result, reopenFlag;
 };
-Paths paths;
+Paths &paths() {
+    static auto *p = new Paths;
+    return *p;
+}
 
 struct Offer {
     ur::Manifest manifest;
@@ -108,8 +114,8 @@ bool authentic(std::string_view bytes, std::span<const uint8_t> signature) {
 }
 
 std::optional<Offer> readStaged() {
-    auto read = file::readString(paths.staging / "update.json");
-    auto readSignature = file::readBinary(paths.staging / "update.json.sig");
+    auto read = file::readString(paths().staging / "update.json");
+    auto readSignature = file::readBinary(paths().staging / "update.json.sig");
     if (read.isErr() || readSignature.isErr()) return std::nullopt;
     auto bytes = read.unwrap();
     auto signature = readSignature.unwrap();
@@ -119,7 +125,7 @@ std::optional<Offer> readStaged() {
     return Offer{*manifest, bytes, signature};
 }
 std::optional<ur::Result> readResult() {
-    auto text = file::readString(paths.result);
+    auto text = file::readString(paths().result);
     if (text.isErr()) return std::nullopt;
     auto parsed = matjson::parse(text.unwrap());
     if (parsed.isErr()) return std::nullopt;
@@ -144,20 +150,20 @@ void exitForUpdate(bool reopen, unsigned startedOn);
 
 std::optional<std::filesystem::path> stage(const Offer& o, std::function<void(float)> progress) {
     std::error_code error;
-    if (update_platform::pathHasLink(paths.staging)) return std::nullopt;
-    std::filesystem::create_directories(paths.staging, error);
-    if (error || update_platform::pathHasLink(paths.staging)) return std::nullopt;
+    if (update_platform::pathHasLink(paths().staging)) return std::nullopt;
+    std::filesystem::create_directories(paths().staging, error);
+    if (error || update_platform::pathHasLink(paths().staging)) return std::nullopt;
     auto entry = *ur::entryFor(o.manifest, platform());
 
     if (entry.size > MAX_SETUP) return std::nullopt;
     auto name = ur::assetName(o.manifest.version, platform());
-    auto setup = paths.staging / name;
+    auto setup = paths().staging / name;
     if (!matches(setup, entry)) {
 
 
         std::vector<std::filesystem::path> old;
 
-        for (std::filesystem::directory_iterator it(paths.staging, error), end; !error && it != end; it.increment(error)) old.push_back(it->path());
+        for (std::filesystem::directory_iterator it(paths().staging, error), end; !error && it != end; it.increment(error)) old.push_back(it->path());
         for (auto& item : old) std::filesystem::remove_all(item, error);
 
         bool remains = std::filesystem::exists(setup, error);
@@ -180,7 +186,7 @@ std::optional<std::filesystem::path> stage(const Offer& o, std::function<void(fl
         std::filesystem::rename(part, setup, error);
         if (error) return std::nullopt;
     }
-    if (file::writeString(paths.staging / "update.json", o.bytes).isErr() || file::writeBinary(paths.staging / "update.json.sig", o.signature).isErr()) return std::nullopt;
+    if (file::writeString(paths().staging / "update.json", o.bytes).isErr() || file::writeBinary(paths().staging / "update.json.sig", o.signature).isErr()) return std::nullopt;
     return setup;
 }
 
@@ -195,23 +201,23 @@ std::optional<Launch> prepareLaunch(ur::Version version, const std::filesystem::
     auto staged = readStaged();
     if (!staged || staged->manifest.version != version) return std::nullopt;
     auto entry = ur::entryFor(staged->manifest, platform());
-    auto setup = paths.staging / ur::assetName(version, platform());
+    auto setup = paths().staging / ur::assetName(version, platform());
     if (!entry || !matches(setup, *entry)) return std::nullopt;
     Launch launch{.job = update_platform::job()};
     if (launch.job == update_platform::Job::Trapped) return launch;
 #if defined(GEODE_IS_WINDOWS)
     launch.program = setup;
-    launch.args = {"--update", "--gd", utils::string::pathToString(gdFolder), "--result", utils::string::pathToString(paths.result),
-                   "--reopen-flag", utils::string::pathToString(paths.reopenFlag)};
+    launch.args = {"--update", "--gd", utils::string::pathToString(gdFolder), "--result", utils::string::pathToString(paths().result),
+                   "--reopen-flag", utils::string::pathToString(paths().reopenFlag)};
 #elif defined(GEODE_IS_ARM_MAC)
-    auto folder = paths.staging / fmt::format("{}-{:08x}", ur::toString(version), std::random_device{}());
+    auto folder = paths().staging / fmt::format("{}-{:08x}", ur::toString(version), std::random_device{}());
     std::error_code folderError;
 
     if (!std::filesystem::create_directory(folder, folderError) || folderError) return std::nullopt;
     if (!update_platform::unzip(setup, folder)) { std::filesystem::remove_all(folder, folderError); return std::nullopt; }
     launch.program = "/bin/zsh";
-    launch.args = {(folder / "OBS Jukebox Setup.app/Contents/Resources/Install.command").string(), "--update", "--result", paths.result.string(),
-                   "--reopen-flag", paths.reopenFlag.string(), gdFolder.string()};
+    launch.args = {utils::string::pathToString(folder / "OBS Jukebox Setup.app/Contents/Resources/Install.command"), "--update", "--result", utils::string::pathToString(paths().result),
+                   "--reopen-flag", utils::string::pathToString(paths().reopenFlag), utils::string::pathToString(gdFolder)};
 #else
     return std::nullopt;
 #endif
@@ -250,11 +256,11 @@ void startUpdate(bool restart, bool viaNotice) {
             }
 
 
-            bool reopen = restart && file::writeString(paths.reopenFlag, "").isOk();
+            bool reopen = restart && file::writeString(paths().reopenFlag, "").isOk();
             if (restart && !reopen) log::warn("Could not write the reopen flag; GD won't reopen after the update");
             if (!launch || !update_platform::startSetup(launch->program, launch->args, launch->job == update_platform::Job::Breakaway)) {
                 std::error_code error;
-                std::filesystem::remove(paths.reopenFlag, error);
+                std::filesystem::remove(paths().reopenFlag, error);
                 log::warn("The update setup didn't start (download or launch failed)");
                 if (panel == Panel::Progress) panel = Panel::None;
                 refreshPanel();
@@ -278,7 +284,7 @@ void startUpdate(bool restart, bool viaNotice) {
                 Loader::get()->queueInMainThread([ready, restart, viaNotice, startedOn, reopen] {
                     if (!ready) {
                         std::error_code error;
-                        std::filesystem::remove(paths.reopenFlag, error);
+                        std::filesystem::remove(paths().reopenFlag, error);
                         panel = Panel::None;
                         refreshPanel();
                         notify("The OBS Jukebox update couldn't start.");
@@ -369,15 +375,15 @@ void firstLaunch() {
     if (Mod::get()->getID() != "local.separate_song" || version.getTag()) return;
     auto mode = ur::parseMode(Mod::get()->getSettingValue<std::string>("update-mode"));
     if (mode == ur::Mode::Off) return;
-    paths = {Mod::get()->getSaveDir() / "update", Mod::get()->getSaveDir() / "update-result.json", Mod::get()->getSaveDir() / "update-reopen-gd"};
+    paths() = {Mod::get()->getSaveDir() / "update", Mod::get()->getSaveDir() / "update-result.json", Mod::get()->getSaveDir() / "update-reopen-gd"};
 
     if (update_platform::setupWaiting()) return;
-    if (update_platform::pathHasLink(paths.staging)) { log::warn("The update folder is a link; skipping updates this launch"); return; }
+    if (update_platform::pathHasLink(paths().staging)) { log::warn("The update folder is a link; skipping updates this launch"); return; }
     std::error_code error;
     auto staged = readStaged();
     auto plan = ur::planLaunch({running(), false, staged ? std::optional(staged->manifest.version) : std::nullopt, readResult(), loadSaved()});
-    if (plan.deleteReopenFlag) std::filesystem::remove(paths.reopenFlag, error);
-    if (plan.deleteResult) std::filesystem::remove(paths.result, error);
+    if (plan.deleteReopenFlag) std::filesystem::remove(paths().reopenFlag, error);
+    if (plan.deleteResult) std::filesystem::remove(paths().result, error);
     store(plan.saved);
     if (!plan.message.empty()) log::warn("The update setup reported: {}", plan.message);
     if (plan.notice != ur::Notice::None) notify(ur::noticeText(plan.notice, staged ? staged->manifest.version : running()));
@@ -385,7 +391,7 @@ void firstLaunch() {
     std::thread([mode, cleanup = !staged || plan.deleteStaging, stop = plan.stop] {
         if (cleanup) {
             std::error_code error;
-            std::filesystem::remove_all(paths.staging, error);
+            std::filesystem::remove_all(paths().staging, error);
         }
         if (!stop) check(mode);
     }).detach();
