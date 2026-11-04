@@ -34,8 +34,8 @@ inline constexpr SongSocket BAD_SOCKET = -1;
 inline bool socketsReady() { return true; }
 inline void closeSocket(SongSocket s) { close(s); }
 inline void nonblocking(SongSocket s) { fcntl(s, F_SETFL, O_NONBLOCK); }
-// POSIX has no such option: a closed peer surfaces as an ordinary receive error, which the
-// receivers already tolerate.
+// POSIX has no such option; unconnected UDP sockets there don't normally report a closed peer, and
+// the receivers tolerate any receive error anyway.
 inline void ignoreConnReset(SongSocket) {}
 #endif
 

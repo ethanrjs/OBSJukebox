@@ -1391,10 +1391,10 @@ bool obs_module_load(void) {
         PitchShifter::prepareTables();
         receiver = std::make_shared<Receiver>();
     } catch (const std::exception &error) {
-        blog(LOG_ERROR, "[OBS Jukebox] Could not start the game link receiver: %s", error.what());
+        blog(LOG_ERROR, "[OBS Jukebox] Could not initialize OBS Jukebox: %s", error.what());
         return false;
     } catch (...) {
-        blog(LOG_ERROR, "[OBS Jukebox] Could not start the game link receiver");
+        blog(LOG_ERROR, "[OBS Jukebox] Could not initialize OBS Jukebox");
         return false;
     }
     obs_source_info info{};
