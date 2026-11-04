@@ -114,6 +114,15 @@ static void rulesPart2() {
     Saved blocked{.blocked = v125};
     check(!launch({v125, false, std::nullopt, std::nullopt, blocked}).saved.blocked, "reinstalling the blocked version clears the block");
     check(!launch({v126, false, std::nullopt, std::nullopt, blocked}).saved.blocked, "a newer version clears the block");
+    // The two-launch repair sequence: a 1.2.5 install ends with its rollback incomplete and the mod
+    // file left at 1.2.5. Launch one blocks that version; launch two, which finds no staging left,
+    // clears the block, so when 1.2.6 ships the game gets the normal offer, including a restart,
+    // instead of only the download link.
+    auto afterRepair = launch({v124, false, v125, Result{v125, Status::Failed, true, "rollback incomplete"}, {}}).saved;
+    check(afterRepair.blocked == v125, "the repair result blocks the target version");
+    auto second = launch({v125, false, std::nullopt, std::nullopt, afterRepair});
+    check(!second.saved.blocked && second.notice == Notice::None && !second.stop, "the launch after a repair clears the block");
+    check(planOffer({Mode::Now, Platform::Windows, v125, v126, true, false, true, second.saved}) == Offer::StartNow, "after the cleared block, a newer release installs right away");
 
     OfferInput base{Mode::Ask, Platform::Windows, v124, v125, true, false, true, {}};
     auto offer = [&](auto change) { auto in = base; change(in); return planOffer(in); };
