@@ -73,9 +73,13 @@ struct Tap {
             // only its sender stops below. dspAlive() keeps the manager from freeing this object.
         }
         stopping = true;
-        ready.release();
-        if (worker.joinable())
+        // Wake a worker only when one exists to consume the wake. A failed thread start leaves none,
+        // so the second shutdown that follows retireTap's delete must not add another permit: the
+        // counting semaphore enforces its maximum as a precondition.
+        if (worker.joinable()) {
+            ready.release();
             worker.join();
+        }
         if (transport != BAD_SOCKET) {
             closeSocket(transport);
             transport = BAD_SOCKET;
