@@ -265,7 +265,7 @@ class Receiver {
     std::array<std::deque<PlaybackPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
     std::deque<EffectsPacket> effects, pendingEffects;
     LinkClock clock;
-    uint64_t session = 0, lastProbe = 0, lastSessionPacket = 0, lastSongReceived = 0,
+    uint64_t session = 0, lastProbe = 0, lastSongReceived = 0,
              lastOldModPacket = 0, lastNewModPacket = 0,
              lastUnverifiedPacket = 0, lastLoggedOld = 0, lastLoggedNew = 0, lastLoggedUnverified = 0;
     std::array<uint64_t, 2> lastEffectsReceived{};
@@ -337,9 +337,6 @@ class Receiver {
     // ports and timeline.
     void resetSession(uint64_t id) {
         session = id;
-        // The fresh session has not spoken yet, so the clock probes wait for a signed packet from
-        // it rather than aiming at whoever the last session was.
-        lastSessionPacket = 0;
         clock.reset();
         pending.clear();
         pendingEffects.clear();
@@ -385,16 +382,17 @@ class Receiver {
         if (!state.connected || p.timestamp >= state.packet.timestamp)
             state = {p, Clock::now(), true};
     }
-    // A repeated support hint is due once every logRepeatNs; the stamp starts at 0, which is long ago.
+    // A repeated support hint is due once every logRepeatNs. A zero stamp means it never logged;
+    // now counts from boot, so only compare intervals after a first log.
     bool logDue(uint64_t &stamp, uint64_t now) {
-        if (now - stamp < logRepeatNs)
+        if (stamp && now - stamp < logRepeatNs)
             return false;
         stamp = now;
         return true;
     }
     void probe(uint64_t now) {
-        if (!session || !lastSessionPacket || now - lastProbe < 250000000 ||
-            now - lastSessionPacket > probeTimeoutNs)
+        if (!session || !lastSongReceived || now - lastProbe < 250000000 ||
+            now - lastSongReceived > probeTimeoutNs)
             return;
         ClockSyncPacket p;
         p.sessionID = session;
@@ -428,7 +426,6 @@ class Receiver {
                 handleEffects(*effect, from, now);
         } else if (auto song = parseSongPacket(data, size)) {
             if (auto key = signingKey(*song, now)) {
-                lastSessionPacket = now;
                 handleSong(*song, *key, from, now);
                 return;
             }
@@ -536,6 +533,8 @@ class Receiver {
             return;
         }
         nonblocking(sock);
+        // Probes go to the mod's port, which dies whenever GD exits; don't surface that as an error.
+        ignoreConnReset(sock);
         int receiveBuffer = 1024 * 1024;
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char *>(&receiveBuffer),
                    sizeof(receiveBuffer));
@@ -1385,11 +1384,11 @@ static obs_properties_t *properties(void *data) {
     return props;
 }
 bool obs_module_load(void) {
-    // Build the shifter tables before any source thread can process audio.
-    PitchShifter::prepareTables();
-    // obs_module_load is a C boundary too: a receiver startup failure turns into a failed module
-    // load, which OBS reports, instead of a terminating escape.
+    // obs_module_load is a C boundary, and both calls below allocate (the shifter tables and the
+    // receiver's thread), so a failure turns into a failed module load that OBS reports instead of
+    // a terminating escape. The tables are built before any source thread can process audio.
     try {
+        PitchShifter::prepareTables();
         receiver = std::make_shared<Receiver>();
     } catch (const std::exception &error) {
         blog(LOG_ERROR, "[OBS Jukebox] Could not start the game link receiver: %s", error.what());
