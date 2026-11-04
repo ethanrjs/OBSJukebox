@@ -1,6 +1,6 @@
 #pragma once
-// Signature and hash checks through the operating system's own crypto: BCrypt on Windows,
-// Security and CommonCrypto on macOS.
+// Signature checks through the operating system's own crypto: BCrypt on Windows, Security on macOS.
+// sha256File hashes with link_key::Sha256, shared with the link key, so both work the same everywhere.
 #include <array>
 #include <cstdint>
 #include <filesystem>
