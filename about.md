@@ -16,6 +16,10 @@ This mod works only together with the OBS Jukebox plugin for OBS Studio, which a
 - In the pause menu, the **Game / OBS** button switches the volume sliders between the game and OBS.
 - GD Sounds shows what it is playing, or what it is waiting for, in its properties in OBS.
 
+## Updates
+
+Unless **Updates** is set to **Don't check**, the mod asks github.com once per launch whether a new OBS Jukebox is out. A new release is offered in a small panel on the main menu. The mod and the OBS plugin update together when Geometry Dash and OBS are closed; the updater never closes OBS.
+
 ## Requirements
 
 - Windows, or a Mac with Apple Silicon (macOS 13 or later). Linux works only through Proton, with the experimental installer on the releases page.

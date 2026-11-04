@@ -35,6 +35,13 @@
       "type": "custom:obs-offset",
       "name": "Song offset (seconds)",
       "default": 0.0
+    },
+    "update-mode": {
+      "type": "string",
+      "name": "Updates",
+      "description": "Checks GitHub for a new OBS Jukebox once per launch. Updates install when Geometry Dash and OBS are closed, and never close OBS.",
+      "default": "Ask me",
+      "one-of": ["Ask me", "Install after I close GD and OBS", "Install right away", "Don't check"]
     }
   },
   "tags": [

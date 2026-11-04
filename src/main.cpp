@@ -18,6 +18,7 @@
 #include "MusicSampling.hpp"
 #include "PitchStages.hpp"
 #include "GamePolicies.hpp"
+#include "Updater.hpp"
 #include "MonotonicClock.hpp"
 #include <array>
 #include <map>
@@ -718,6 +719,7 @@ class $modify(SeparateSongMenu, MenuLayer) {
         selectOffsetLevel(nullptr);
         publish("Ready", false);
         jukebox_link::showVersionNotice();
+        updater::onMainMenu(this);
         return true;
     }
 };
