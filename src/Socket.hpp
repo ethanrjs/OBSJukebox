@@ -34,8 +34,8 @@ inline constexpr SongSocket BAD_SOCKET = -1;
 inline bool socketsReady() { return true; }
 inline void closeSocket(SongSocket s) { close(s); }
 inline void nonblocking(SongSocket s) { fcntl(s, F_SETFL, O_NONBLOCK); }
-// POSIX has no such option. Linux may report a closed peer as an error on a later receive
-// (RFC 1122), while BSD/macOS normally does not; the receivers tolerate any receive error anyway.
+// POSIX has no such option. These sockets never connect() and never set IP_RECVERR, so Linux
+// normally does not report a closed peer on receive; the receivers tolerate any receive error anyway.
 inline void ignoreConnReset(SongSocket) {}
 #endif
 
