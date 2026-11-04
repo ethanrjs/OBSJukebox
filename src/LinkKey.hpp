@@ -331,11 +331,15 @@ inline bool writeLinkKey(const LinkKey &key, const std::filesystem::path &file =
     }
 #ifndef _WIN32
     // Only this user must be able to read the key back, so when the mode cannot be applied, refuse
-    // to pair instead of pairing through a file with default permissions.
+    // to pair instead of pairing through a file with default permissions. The file is removed too,
+    // so nothing can read a key that this process will not use.
     std::filesystem::permissions(file, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
                                  error);
-    if (error)
+    if (error) {
+        std::error_code removal;
+        std::filesystem::remove(file, removal);
         return false;
+    }
 #endif
     return true;
 }
