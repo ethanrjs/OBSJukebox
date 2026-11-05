@@ -77,6 +77,7 @@ struct EffectsPacketV3 {
     float samples[512 * 2]{};
 };
 inline constexpr int SONG_LINK_MAX_CHANNELS = 64;
+inline constexpr uint64_t SONG_LINK_MAX_FADE_OFFSET_NS = 86400000000000ULL;
 #pragma pack(pop)
 inline constexpr unsigned SONG_LINK_V2_SIZE = 1288, SONG_LINK_V3_SIZE = 1296, SONG_LINK_V4_SIZE = 1304,
                           SONG_LINK_V5_SIZE = 1436, SONG_LINK_V6_SIZE = 1452;

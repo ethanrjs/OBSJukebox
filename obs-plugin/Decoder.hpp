@@ -44,6 +44,7 @@ inline bool localSongPath(const std::string &path) {
 // Gives an MP3 decoder opened without seek points miniaudio's own `wanted`-point table, and the length
 // when the file doesn't state it (else 0), in one pass. False: reopen with miniaudio's seek points.
 bool indexMp3(ma_decoder &decoder, ma_uint32 wanted, ma_uint64 &lengthFrames);
+inline constexpr double maxSongSeconds = 31536000.0;
 class Decoder {
     static constexpr ma_uint32 seekPointCount = 2048;
     ma_decoder decoder{};
@@ -216,7 +217,7 @@ class Decoder {
         // Reject known EOF positions before touching the backend. An indexed MP3
         // seek beyond EOF can fail with its cursor at zero but its stream exhausted;
         // miniaudio then optimizes away a subsequent seek(0), leaving silence.
-        bool valid = std::isfinite(seconds) && seconds >= 0 && seconds <= 31536000.0 &&
+        bool valid = std::isfinite(seconds) && seconds >= 0 && seconds <= maxSongSeconds &&
                      (!lengthFrames || seconds * 48000 < double(lengthFrames));
         if (valid) {
 #ifdef _WIN32

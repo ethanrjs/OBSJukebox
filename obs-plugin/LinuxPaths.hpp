@@ -8,6 +8,9 @@
 #include <vector>
 #include "../src/LinkKey.hpp"
 
+// Geometry Dash's Steam app ID, which names the game's compatdata folder.
+inline constexpr char steamAppId[] = "322170";
+
 class LinuxPaths {
     using Path = std::filesystem::path;
     std::vector<Path> prefixes;
@@ -60,11 +63,11 @@ public:
             auto wine=env("WINEPREFIX"),compat=env("STEAM_COMPAT_DATA_PATH");
             if(!wine.empty())add(wine);
             else if(!compat.empty())add(Path(compat)/"pfx");
-            else if(!game.empty())add(game.parent_path().parent_path()/"compatdata/322170/pfx");
+            else if(!game.empty())add(game.parent_path().parent_path()/"compatdata"/steamAppId/"pfx");
             else if(!home.empty()){
-                add(Path(home)/".local/share/Steam/steamapps/compatdata/322170/pfx");
-                add(Path(home)/".steam/steam/steamapps/compatdata/322170/pfx");
-                add(Path(home)/".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/322170/pfx");
+                add(Path(home)/".local/share/Steam/steamapps/compatdata"/steamAppId/"pfx");
+                add(Path(home)/".steam/steam/steamapps/compatdata"/steamAppId/"pfx");
+                add(Path(home)/".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata"/steamAppId/"pfx");
             }
         }
     }

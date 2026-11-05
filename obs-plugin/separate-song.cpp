@@ -160,7 +160,7 @@ static std::optional<SongLinkPacket> parseSongPacket(const unsigned char *data, 
     uint64_t previous = 0;
     for (unsigned i = 0; i < p.fadeCount; ++i) {
         const auto &f = p.fades[i];
-        if (f.offsetNs < previous || f.offsetNs > 86400000000000ULL || !std::isfinite(f.gain) || f.gain < 0 ||
+        if (f.offsetNs < previous || f.offsetNs > SONG_LINK_MAX_FADE_OFFSET_NS || !std::isfinite(f.gain) || f.gain < 0 ||
             f.gain > 16)
             return std::nullopt;
         previous = f.offsetNs;
@@ -262,7 +262,9 @@ class Receiver {
         SongLinkPacket packet;
         uint64_t senderTimestamp;
     };
+    static constexpr size_t voicePacketLimit = 256;
     std::array<std::deque<PlaybackPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
+    static constexpr size_t effectsPacketLimit = 128;
     std::deque<EffectsPacket> effects, pendingEffects;
     LinkClock clock;
     uint64_t session = 0, lastProbe = 0, lastSongReceived = 0,
@@ -277,8 +279,10 @@ class Receiver {
     // Observed problems repeat their support hint at most this often, so a mod that goes stale
     // again after hours still gets its line. The status reads use the packet stamps, not these.
     static constexpr uint64_t logRepeatNs = 600000000000ULL;
+    static constexpr size_t probeLimit = 8;
     std::deque<uint64_t> probes;
     sockaddr_in peer{};
+    static constexpr size_t pendingSongLimit = 256;
     std::deque<SongLinkPacket> pending;
     FILE *reference = nullptr;
     // Only the receiver thread touches these. The followed game signs with sessionKey; keyFileKeys
@@ -324,7 +328,7 @@ class Receiver {
                                      [](const auto &a, uint64_t t) { return a.timestamp < t; });
         if (next == effects.end() || next->timestamp != effect.timestamp)
             effects.insert(next, effect);
-        while (effects.size() > 128)
+        while (effects.size() > effectsPacketLimit)
             effects.pop_front();
     }
     void clearTimeline() {
@@ -377,7 +381,7 @@ class Receiver {
             *next = {p, senderTimestamp};
         else
             voice.insert(next, {p, senderTimestamp});
-        while (voice.size() > 256)
+        while (voice.size() > voicePacketLimit)
             voice.pop_front();
         if (!state.connected || p.timestamp >= state.packet.timestamp)
             state = {p, Clock::now(), true};
@@ -399,7 +403,7 @@ class Receiver {
         p.t1 = now;
         signPacket(sessionKey, p);
         probes.push_back(now);
-        while (probes.size() > 8)
+        while (probes.size() > probeLimit)
             probes.pop_front();
         lastProbe = now;
         sendto(sock, reinterpret_cast<const char *>(&p), sizeof(p), 0, reinterpret_cast<sockaddr *>(&peer),
@@ -471,7 +475,7 @@ class Receiver {
         if (!clock.valid()) {
             if (effect.stream == 0) {
                 pendingEffects.push_back(effect);
-                while (pendingEffects.size() > 128)
+                while (pendingEffects.size() > effectsPacketLimit)
                     pendingEffects.pop_front();
             }
             return;
@@ -500,7 +504,7 @@ class Receiver {
         lastSongReceived = now;
         if (!clock.valid()) {
             pending.push_back(p);
-            while (pending.size() > 256)
+            while (pending.size() > pendingSongLimit)
                 pending.pop_front();
             probe(now);
             return;
@@ -937,7 +941,7 @@ struct SongSource {
             sourcePosition = p.loopStart + std::fmod(sourcePosition - p.loopStart, p.loopEnd - p.loopStart);
         double target = sourcePosition + p.offset;
         bool playing = live && (p.flags & 3) == 3 && active && std::isfinite(target) && target >= 0 &&
-                       target <= 31536000.0 && decoder.ready();
+                       target <= maxSongSeconds && decoder.ready();
         const bool expectedAudio = playing && decoder.hasAudioAt(target);
         bool starved = false;
         bool seek = playing && (v.lastEpoch != p.epoch || !v.wasPlaying || std::abs(decoder.position - target) > .04);

@@ -9,10 +9,11 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $metadata = Get-Content -LiteralPath (Join-Path $projectRoot 'mod.json') -Raw | ConvertFrom-Json
 $releaseVersion = $metadata.version.TrimStart('v')
+$geodeVersion = $metadata.geode.TrimStart('v')
 if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'mod.json must contain a release version such as v1.2.0.' }
 if (!$ModPath) { $ModPath = Join-Path $projectRoot 'artifacts/windows/local.separate_song.geode' }
 if (!$PluginPath) { $PluginPath = Join-Path $projectRoot 'artifacts/windows/separate-song.dll' }
-if (!$GeodeRoot) { $GeodeRoot = Join-Path $projectRoot ('tools/pinned/geode-windows-' + $metadata.geode.TrimStart('v')) }
+if (!$GeodeRoot) { $GeodeRoot = Join-Path $projectRoot ('tools/pinned/geode-windows-' + $geodeVersion) }
 if (!$OutputDirectory) { $OutputDirectory = Join-Path $projectRoot 'artifacts/windows/release' }
 foreach ($file in @($ModPath, $PluginPath)) {
     if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Payload not found: $file" }
@@ -28,7 +29,7 @@ try {
         throw "The mod package does not match mod.json ($($metadata.id) $releaseVersion). Rebuild the mod before packaging."
     }
 } finally { $modArchive.Dispose() }
-if (!(Test-Path -LiteralPath (Join-Path $GeodeRoot 'geode/resources/geode.loader'))) { throw 'Complete official Geode 5.11.2 resources are required.' }
+if (!(Test-Path -LiteralPath (Join-Path $GeodeRoot 'geode/resources/geode.loader'))) { throw "Complete official Geode $geodeVersion resources are required." }
 $staging = Join-Path $projectRoot ('artifacts/windows/package-' + [Guid]::NewGuid().ToString('N'))
 $installerRoot = Join-Path $projectRoot 'installer/windows'
 New-Item -ItemType Directory -Path $staging, $OutputDirectory -Force | Out-Null
@@ -56,7 +57,8 @@ try {
     $source = Join-Path $OutputDirectory 'Source'
     if (Test-Path -LiteralPath $source) { Remove-Item -LiteralPath $source -Recurse -Force }
     $sourceArchive = Join-Path $staging 'source.zip'
-    & git -C $projectRoot archive --format=zip -o $sourceArchive HEAD -- src obs-plugin vendor installer scripts tools/qa .github CMakeLists.txt mod.json logo.png LICENSE README.md
+    $sourceFiles = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts/source-files.txt')
+    & git -C $projectRoot archive --format=zip -o $sourceArchive HEAD -- $sourceFiles
     if ($LASTEXITCODE -ne 0) { throw "git archive failed: $LASTEXITCODE" }
     Expand-Archive -LiteralPath $sourceArchive -DestinationPath $source
     Write-Output "Installer: $exe"

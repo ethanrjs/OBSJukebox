@@ -1,4 +1,5 @@
 #pragma once
+#include "LinkPacket.hpp"
 #include "MusicSampling.hpp"
 #include <algorithm>
 #include <span>
@@ -25,7 +26,7 @@ inline unsigned normalizePacketFades(std::span<Point, Extent> points, unsigned c
     unsigned written = 0;
     for (unsigned i = 0; i < count; ++i) {
         auto point = points[i];
-        if (!point.offsetNs || point.offsetNs > 86400000000000ULL) continue;
+        if (!point.offsetNs || point.offsetNs > SONG_LINK_MAX_FADE_OFFSET_NS) continue;
         point.gain = finiteMusicGain(point.gain);
         if (written && points[written - 1].offsetNs == point.offsetNs) points[written - 1] = point;
         else points[written++] = point;
