@@ -5,9 +5,11 @@
 #include <cmath>
 
 using namespace geode::prelude;
+
 namespace separate_song::offset_setting {
 namespace {
 std::string selectedLevel;
+
 class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
     CCLabelBMFont* m_levelLabel = nullptr;
     TextInput* m_input = nullptr;
@@ -47,11 +49,14 @@ class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
         updateState(nullptr);
         return true;
     }
+
     void updateState(CCNode* invoker) override {
         SettingValueNodeV3::updateState(invoker);
         if (!m_input || !m_slider) return;
         auto enabled = getSetting()->shouldEnable() && !selectedLevel.empty();
-        m_levelLabel->setString(selectedLevel.empty() ? "Select a level to edit its offset" : selectedLevel.c_str());
+        m_levelLabel->setString(
+            selectedLevel.empty() ? "Select a level to edit its offset" : selectedLevel.c_str()
+        );
         m_levelLabel->limitLabelWidth(getContentWidth() - 20.f, .25f, .1f);
         m_input->setEnabled(enabled);
         m_left->setEnabled(enabled);
@@ -62,50 +67,77 @@ class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
             m_input->setString(numToString(displayed));
         }
         m_slider->m_touchLogic->m_thumb->setValue(
-            static_cast<float>(std::clamp((getValue() + 10.0) / 20.0, 0.0, 1.0)));
+            static_cast<float>(std::clamp((getValue() + 10.0) / 20.0, 0.0, 1.0))
+        );
         m_slider->updateBar();
         m_slider->m_touchLogic->m_thumb->setEnabled(enabled);
         m_slider->m_sliderBar->setColor(enabled ? ccWHITE : ccGRAY);
         m_slider->m_touchLogic->m_thumb->setColor(enabled ? ccWHITE : ccGRAY);
     }
-    void onLeft(CCObject*) { setValue(getValue() - .1, m_left); }
-    void onRight(CCObject*) { setValue(getValue() + .1, m_right); }
+
+    void onLeft(CCObject*) {
+        setValue(getValue() - .1, m_left);
+    }
+
+    void onRight(CCObject*) {
+        setValue(getValue() + .1, m_right);
+    }
+
     void onSlider(CCObject*) {
         auto value = m_slider->m_touchLogic->m_thumb->getValue() * 20.0 - 10.0;
         setValue(std::round(value * 100.0) / 100.0, m_slider);
     }
+
 public:
     static OffsetNode* create(std::shared_ptr<OffsetSetting> setting, float width) {
         auto node = new OffsetNode();
-        if (node->init(std::move(setting), width)) { node->autorelease(); return node; }
+        if (node->init(std::move(setting), width)) {
+            node->autorelease();
+            return node;
+        }
         delete node;
         return nullptr;
     }
 };
+
 std::shared_ptr<OffsetSetting> get() {
     return std::dynamic_pointer_cast<OffsetSetting>(Mod::get()->getSetting("offset"));
 }
 }
 
 Result<std::shared_ptr<SettingV3>> OffsetSetting::parse(
-    std::string key, std::string modID, matjson::Value const& json) {
+    std::string key, std::string modID, matjson::Value const& json
+) {
     auto setting = std::make_shared<OffsetSetting>();
     auto result = setting->parseBaseProperties(std::move(key), std::move(modID), json);
     if (!result) return Err(result.unwrapErr());
     return Ok(std::static_pointer_cast<SettingV3>(setting));
 }
+
 Result<> OffsetSetting::isValid(double value) const {
     if (!std::isfinite(value)) return Err("Enter a finite number");
     return Ok();
 }
+
 SettingNodeV3* OffsetSetting::createNode(float width) {
     return OffsetNode::create(std::static_pointer_cast<OffsetSetting>(shared_from_this()), width);
 }
-void selectLevel(std::string name) { selectedLevel = std::move(name); }
+
+void selectLevel(std::string name) {
+    selectedLevel = std::move(name);
+}
+
 void initialize() {
     auto result = Mod::get()->registerCustomSettingType("obs-offset", OffsetSetting::parse);
     if (!result) log::error("Could not register OBS offset setting: {}", result.unwrapErr());
 }
-double value() { auto setting = get(); return setting ? setting->getValue() : 0.0; }
-void setValue(double value) { if (auto setting = get()) setting->setValue(value); }
+
+double value() {
+    auto setting = get();
+    return setting ? setting->getValue() : 0.0;
+}
+
+void setValue(double value) {
+    if (auto setting = get()) setting->setValue(value);
+}
 }

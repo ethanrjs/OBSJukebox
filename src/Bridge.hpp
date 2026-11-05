@@ -6,6 +6,7 @@
 #include <algorithm>
 #include "LinkPacket.hpp"
 #include "Socket.hpp"
+
 namespace separate_song {
 struct Snapshot {
     bool playing = false, enabled = true;
@@ -24,6 +25,7 @@ struct Snapshot {
     std::array<PitchStage, 8> stages{}, effectsStages{};
     uint8_t stageCount = 0, effectsStageCount = 0;
     bool groupExcluded = false;
+
     // A stop must not predate the last mixer-dated sample. Keep its stages and exclusion so OBS
     // fades the voice through the same processing, even after the game's channel disappears.
     void markStopped(uint64_t now, unsigned newEpoch) {
@@ -32,19 +34,21 @@ struct Snapshot {
         epoch = newEpoch;
     }
 };
+
 class Bridge {
     SongSocket socket = BAD_SOCKET;
     std::atomic<bool> stop{false};
     std::thread worker;
     bool longPathLogged = false, invalidPathLogged = false;
 
-  public:
+public:
     ~Bridge();
     bool start();
     void shutdown();
-    void publish(const Snapshot &snapshot);
+    void publish(Snapshot const& snapshot);
 };
-Bridge &bridge();
+
+Bridge& bridge();
 // Whether a datagram is a clock probe the game should answer.
-bool answersProbe(const ClockSyncPacket &probe, long size, const sockaddr_in &peer);
+bool answersProbe(ClockSyncPacket const& probe, long size, sockaddr_in const& peer);
 } // namespace separate_song

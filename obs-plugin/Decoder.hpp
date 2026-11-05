@@ -1,6 +1,6 @@
 #pragma once
 #ifdef _WIN32
-#include "WindowsMediaDecoder.hpp"
+    #include "WindowsMediaDecoder.hpp"
 #endif
 #define MA_NO_DEVICE_IO
 #define MA_NO_ENGINE
@@ -12,9 +12,9 @@
 #undef STB_VORBIS_HEADER_ONLY
 #include <array>
 #ifdef OBS_JUKEBOX_QA
-#include <atomic>
-#include <chrono>
-#include <thread>
+    #include <atomic>
+    #include <chrono>
+    #include <thread>
 #endif
 #include <algorithm>
 #include <cmath>
@@ -22,29 +22,32 @@
 #include <filesystem>
 #include <string>
 #ifdef _WIN32
-#include <memory>
+    #include <memory>
 #endif
 // Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares, so only
 // strings that name a local file get through. Two leading separators name a network share or a device
 // path, and a colon before the first separator is a URL scheme except for a Windows drive letter: the
 // plain "://" check alone would still let "file:C:/x.mp3" reach Media Foundation as a URL.
-inline bool localSongPath(const std::string &path) {
-    auto separator = [](char c) { return c == '/' || c == '\\'; };
-    if (path.size() >= 2 && separator(path[0]) && separator(path[1]))
-        return false;
+inline bool localSongPath(std::string const& path) {
+    auto separator = [](char c) {
+        return c == '/' || c == '\\';
+    };
+    if (path.size() >= 2 && separator(path[0]) && separator(path[1])) return false;
     auto colon = path.find(':');
     if (colon != std::string::npos) {
         auto slash = path.find_first_of("/\\");
-        bool drive = colon == 1 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'));
-        if (colon < slash && !drive)
-            return false;
+        bool drive = colon == 1 &&
+            ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'));
+        if (colon < slash && !drive) return false;
     }
     return true;
 }
+
 // Gives an MP3 decoder opened without seek points miniaudio's own `wanted`-point table, and the length
 // when the file doesn't state it (else 0), in one pass. False: reopen with miniaudio's seek points.
-bool indexMp3(ma_decoder &decoder, ma_uint32 wanted, ma_uint64 &lengthFrames);
+bool indexMp3(ma_decoder& decoder, ma_uint32 wanted, ma_uint64& lengthFrames);
 inline constexpr double maxSongSeconds = 31536000.0;
+
 class Decoder {
     static constexpr ma_uint32 seekPointCount = 2048;
     ma_decoder decoder{};
@@ -62,7 +65,7 @@ class Decoder {
     bool testFailedSeek = false;
 #endif
 
-  public:
+public:
 #ifdef OBS_JUKEBOX_QA
     inline static std::atomic<int> testOpenDelayMs{0};
     inline static std::atomic<int> testOpenHandles{0};
@@ -78,15 +81,17 @@ class Decoder {
 #endif
     double position = 0;
     std::string error;
-    ~Decoder() { close(); }
+
+    ~Decoder() {
+        close();
+    }
+
     void close() {
 #ifdef OBS_JUKEBOX_QA
-        if (opened)
-            --testOpenHandles;
+        if (opened) --testOpenHandles;
 #endif
 #ifdef _WIN32
-        if (windowsDecoder)
-            windowsDecoder.reset();
+        if (windowsDecoder) windowsDecoder.reset();
         else
 #endif
             if (opened)
@@ -103,7 +108,8 @@ class Decoder {
         testFailedSeek = false;
 #endif
     }
-    bool open(const std::string &path) {
+
+    bool open(std::string const& path) {
         close();
         error.clear();
 #ifdef OBS_JUKEBOX_QA
@@ -121,15 +127,19 @@ class Decoder {
         auto config = ma_decoder_config_init(ma_format_f32, 2, 48000);
 #ifdef _WIN32
         auto wide = std::filesystem::path(std::u8string(path.begin(), path.end())).wstring();
-        auto init = [&] { return ma_decoder_init_file_w(wide.c_str(), &config, &decoder); };
+        auto init = [&] {
+            return ma_decoder_init_file_w(wide.c_str(), &config, &decoder);
+        };
 #else
-        auto init = [&] { return ma_decoder_init_file(path.c_str(), &config, &decoder); };
+        auto init = [&] {
+            return ma_decoder_init_file(path.c_str(), &config, &decoder);
+        };
 #endif
         // An MP3 gets its seek points from indexMp3's single pass over the file; if that fails, from
         // miniaudio's own.
         auto result = init();
 #ifdef OBS_JUKEBOX_QA
-        const bool indexFails = testIndexFailsOnNextOpen.exchange(false);
+        bool const indexFails = testIndexFailsOnNextOpen.exchange(false);
 #else
         constexpr bool indexFails = false;
 #endif
@@ -154,39 +164,47 @@ class Decoder {
 #endif
         if (opened) {
 #ifdef _WIN32
-            if (windowsDecoder)
-                lengthFrames = windowsDecoder->lengthInFrames();
+            if (windowsDecoder) lengthFrames = windowsDecoder->lengthInFrames();
             else
 #endif
                 if (!lengthFrames)
-                    ma_decoder_get_length_in_pcm_frames(&decoder, &lengthFrames);
+                ma_decoder_get_length_in_pcm_frames(&decoder, &lengthFrames);
         }
         seekValid = opened;
 #ifdef OBS_JUKEBOX_QA
-        if (opened)
-            ++testOpenHandles;
+        if (opened) ++testOpenHandles;
 #endif
         if (!opened) {
 #ifdef _WIN32
-            error = "Cannot decode this song. Use MP3, WAV, FLAC, Ogg Vorbis, AAC, M4A or uncompressed AIFF.";
+            error =
+                "Cannot decode this song. Use MP3, WAV, FLAC, Ogg Vorbis, AAC, M4A or uncompressed "
+                "AIFF.";
 #else
             error = "Cannot decode this song. Use MP3, WAV, FLAC, Ogg Vorbis or uncompressed AIFF.";
 #endif
         }
         return opened;
     }
-    bool ready() const { return opened; }
-    bool starvedBeforeEnd() const { return unexpectedStarvation; }
+
+    bool ready() const {
+        return opened;
+    }
+
+    bool starvedBeforeEnd() const {
+        return unexpectedStarvation;
+    }
 #ifdef OBS_JUKEBOX_QA
-    ma_uint64 testLengthFrames() const { return lengthFrames; }
+    ma_uint64 testLengthFrames() const {
+        return lengthFrames;
+    }
 #endif
     bool hasAudioAt(double seconds) const {
         return opened && lengthFrames && std::isfinite(seconds) && seconds >= 0 &&
-               seconds * 48000 + 4800 < double(lengthFrames);
+            seconds * 48000 + 4800 < double(lengthFrames);
     }
+
     bool seek(double seconds) {
-        if (!opened)
-            return false;
+        if (!opened) return false;
 #ifdef OBS_JUKEBOX_QA
         testFailedSeek |= testFailOnNextSeek.exchange(false);
         if (testFailedSeek) {
@@ -205,7 +223,8 @@ class Decoder {
         // position describes phase within the retained PCM window, not the backend's read-ahead cursor.
         double cachedStart = position - phase / 48000.;
         double cachedPhase = (seconds - cachedStart) * 48000.;
-        if (seekValid && std::isfinite(cachedPhase) && cachedPhase >= 0 && cachedPhase < double(count)) {
+        if (seekValid && std::isfinite(cachedPhase) && cachedPhase >= 0 &&
+            cachedPhase < double(count)) {
             phase = cachedPhase;
             position = seconds;
             error.clear();
@@ -218,14 +237,14 @@ class Decoder {
         // seek beyond EOF can fail with its cursor at zero but its stream exhausted;
         // miniaudio then optimizes away a subsequent seek(0), leaving silence.
         bool valid = std::isfinite(seconds) && seconds >= 0 && seconds <= maxSongSeconds &&
-                     (!lengthFrames || seconds * 48000 < double(lengthFrames));
+            (!lengthFrames || seconds * 48000 < double(lengthFrames));
         if (valid) {
 #ifdef _WIN32
-            if (windowsDecoder)
-                valid = windowsDecoder->seek(seconds);
+            if (windowsDecoder) valid = windowsDecoder->seek(seconds);
             else
 #endif
-                valid = ma_decoder_seek_to_pcm_frame(&decoder, ma_uint64(seconds * 48000)) == MA_SUCCESS;
+                valid = ma_decoder_seek_to_pcm_frame(&decoder, ma_uint64(seconds * 48000)) ==
+                    MA_SUCCESS;
         }
         if (!valid) {
             error = "Cannot seek this song. Music is silent until a valid position is available.";
@@ -236,7 +255,8 @@ class Decoder {
         error.clear();
         return true;
     }
-    void render(float *output, size_t frames, double rate) {
+
+    void render(float* output, size_t frames, double rate) {
         unexpectedStarvation = false;
         if (!opened || !seekValid) {
             std::fill_n(output, frames * 2, 0.f);
@@ -244,7 +264,9 @@ class Decoder {
         }
         size_t consumed = std::min(count, size_t(phase));
         if (consumed) {
-            std::memmove(cache.data(), cache.data() + consumed * 2, (count - consumed) * 2 * sizeof(float));
+            std::memmove(
+                cache.data(), cache.data() + consumed * 2, (count - consumed) * 2 * sizeof(float)
+            );
             count -= consumed;
             phase -= consumed;
         }
@@ -255,12 +277,13 @@ class Decoder {
             if (!testStarved && !testStarveAllReads.load()) {
 #endif
 #ifdef _WIN32
-            if (windowsDecoder)
-                got = windowsDecoder->read(cache.data() + count * 2, cache.size() / 2 - count);
-            else
+                if (windowsDecoder)
+                    got = windowsDecoder->read(cache.data() + count * 2, cache.size() / 2 - count);
+                else
 #endif
-                ma_decoder_read_pcm_frames(&decoder, cache.data() + count * 2, cache.size() / 2 - count,
-                                           &got);
+                    ma_decoder_read_pcm_frames(
+                        &decoder, cache.data() + count * 2, cache.size() / 2 - count, &got
+                    );
 #ifdef OBS_JUKEBOX_QA
             }
 #endif

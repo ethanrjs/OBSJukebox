@@ -8,6 +8,7 @@ namespace separate_song {
 inline uint64_t framesToNs(uint64_t frames, uint32_t rate) {
     return frames / rate * 1000000000 + frames % rate * 1000000000 / rate;
 }
+
 // Wall-clock timestamps for the effects tap's mixer blocks. Timestamps follow the frame count, so
 // blocks butt up against each other and the OBS plugin can play them back to back. Each block
 // steers the timeline at most one sample towards the wall clock, which follows the output
@@ -15,6 +16,7 @@ inline uint64_t framesToNs(uint64_t frames, uint32_t rate) {
 // more than 20 ms behind (a stall) or runs more than 100 ms ahead.
 struct TapClock {
     uint64_t start = 0, frames = 0;
+
     // Timestamp of the block about to be processed. Call advance() with its length afterwards.
     uint64_t stamp(uint64_t wall, uint32_t rate) {
         auto behind = int64_t(wall - (start + framesToNs(frames, rate)));
@@ -27,6 +29,9 @@ struct TapClock {
         start = uint64_t(int64_t(start) + std::clamp(behind / 256, -sample, sample));
         return start + framesToNs(frames, rate);
     }
-    void advance(uint32_t count) { frames += count; }
+
+    void advance(uint32_t count) {
+        frames += count;
+    }
 };
 } // namespace separate_song
