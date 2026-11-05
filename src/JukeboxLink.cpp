@@ -253,7 +253,7 @@ std::optional<Choice> choice(int id) {
     auto data = saved();
     auto k = std::to_string(id);
     if (!data.contains(k)) return std::nullopt;
-    auto v = data[k];
+    auto const& v = data[k];
     Choice c{
         id,
         static_cast<int>(v["offset"].asInt().unwrapOr(0)),
@@ -320,7 +320,7 @@ std::string originalPath(int id) {
         auto name = LevelTools::getAudioFileName(-id - 1);
         return CCFileUtils::get()->fullPathForFilename(name.c_str(), false);
     }
-    auto folder = utf8Path(MusicDownloadManager::sharedState()->pathForSongFolder(id).c_str());
+    auto folder = utf8Path(MusicDownloadManager::sharedState()->pathForSongFolder(id));
     if (!folder) return {};
     auto name =
         string::pathToString(*folder / fmt::format("{}.{}", id, id > 9999999 ? "ogg" : "mp3"));
@@ -749,7 +749,7 @@ Readiness prepare(GJGameLevel* level, bool retry) {
 
 LevelSongs snapshotSongs(GJGameLevel* level) {
     int id = songID(level);
-    return levelSongIDs(id, std::string(level->m_songIDs));
+    return levelSongIDs(id, level->m_songIDs);
 }
 
 bool fill(Snapshot& state, LevelSongs const* songs, MusicSource const& source) {
