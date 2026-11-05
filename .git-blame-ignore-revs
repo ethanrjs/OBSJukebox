@@ -1,0 +1,7 @@
+# Formatting-only commits, hidden from git blame. GitHub's blame view reads this file; locally, run
+# `git config blame.ignoreRevsFile .git-blame-ignore-revs` once.
+
+# Reformat the dense plugin and clock headers with the Geode-derived .clang-format.
+c1f75f4d86e0d76655d83f8c8230bf18971719bf
+# Apply the Geode clang-format config to the files PR 35 leaves alone.
+08726765ed65cff98f46e0b6425eecabaafb6fc0
