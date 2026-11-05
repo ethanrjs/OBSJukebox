@@ -9,8 +9,10 @@ python3 scripts/fetch-dependencies.py mac --destination "$DEPENDENCY_ROOT"
 : ${CMAKE:=cmake}
 : ${GEODE_CLI:="$DEPENDENCY_ROOT/geode-cli/geode"}
 : ${MAC_ARCH:=$(uname -m)}
-mkdir -p "$GEODE_SDK/bin/5.11.2"
-cp "$DEPENDENCY_ROOT/geode-macos-5.11.2/Geode.dylib" "$GEODE_SDK/bin/5.11.2/Geode.dylib"
+geode_version=$(/usr/bin/plutil -extract geode raw -o - mod.json)
+geode_version="${geode_version#v}"
+mkdir -p "$GEODE_SDK/bin/$geode_version"
+cp "$DEPENDENCY_ROOT/geode-macos-$geode_version/Geode.dylib" "$GEODE_SDK/bin/$geode_version/Geode.dylib"
 export GEODE_SDK
 export OBS_SDK="${OBS_SDK:-$DEPENDENCY_ROOT/obs-sdk}"
 export SIMDE_INCLUDE="${SIMDE_INCLUDE:-$DEPENDENCY_ROOT/simde}"

@@ -38,6 +38,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   find_package(Threads REQUIRED)
   target_link_libraries(separate-song PRIVATE PkgConfig::LIBOBS Threads::Threads ${CMAKE_DL_LIBS} m)
   target_compile_options(separate-song PRIVATE $<$<CONFIG:Release>:-O2> -Wall -Wextra)
+  # Relative to OBS's per-user plugins/ folder, the same path scripts/install-linux.sh installs to.
   install(TARGETS separate-song LIBRARY DESTINATION separate-song/bin/64bit)
 else()
   message(FATAL_ERROR "Unsupported platform")

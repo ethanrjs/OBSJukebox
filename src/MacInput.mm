@@ -3,6 +3,7 @@
 #include <Geode/utils/ObjcHook.hpp>
 #include "JukeboxLink.hpp"
 using namespace geode::prelude;
+
 static void rightMouse(NSView* view, SEL original, NSEvent* event) {
     NSPoint p = [view convertPoint:event.locationInWindow fromView:nil];
     auto bounds = view.bounds;
@@ -17,12 +18,15 @@ static void rightMouse(NSView* view, SEL original, NSEvent* event) {
     }
     [view performSelector:original withObject:event];
 }
+
 $on_mod(Loaded) {
     auto result = ObjcHook::create("EAGLView", "rightMouseDown:", &rightMouse);
     if (result) {
         auto claimed = Mod::get()->claimHook(std::move(result).unwrap());
-        if (!claimed) log::error("Could not claim Jukebox right-click input: {}", claimed.unwrapErr());
-    } else {
+        if (!claimed)
+            log::error("Could not claim Jukebox right-click input: {}", claimed.unwrapErr());
+    }
+    else {
         log::error("Could not install Jukebox right-click input: {}", result.unwrapErr());
     }
 }

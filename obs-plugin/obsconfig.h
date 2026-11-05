@@ -1,5 +1,7 @@
 #pragma once
-#define OBS_INSTALL_PREFIX ""
-#define OBS_DATA_PATH ""
-#define OBS_VERSION "32.2.2"
-#define OBS_VERSION_CANONICAL "32.2.2"
+// Stands in for the obsconfig.h that OBS's own CMake generates from libobs/obsconfig.h.in.
+#define OBS_DATA_PATH "data/obs-studio"
+#define OBS_PLUGIN_PATH "obs-plugins/64bit"
+#define OBS_PLUGIN_DESTINATION "obs-plugins/64bit"
+#define OBS_RELEASE_CANDIDATE 0
+#define OBS_BETA 0

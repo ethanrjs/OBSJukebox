@@ -17,15 +17,19 @@
 #include <semaphore>
 #include <memory>
 using namespace geode::prelude;
+
 namespace separate_song::audio_tap {
 namespace {
 void warnKeptTap() {
     static bool logged = false;
-    if (logged)
-        return;
+    if (logged) return;
     logged = true;
-    log::warn("OBS effects tap could not be retired from FMOD's graph; keeping it as a pass-through until the game exits");
+    log::warn(
+        "OBS effects tap could not be retired from FMOD's graph; keeping it as a pass-through "
+        "until the game exits"
+    );
 }
+
 struct Tap {
     static constexpr unsigned capacity = 64;
     std::array<EffectsPacketV3, capacity> queue;
@@ -35,18 +39,25 @@ struct Tap {
     std::atomic<int64_t> dspClockOrigin{INT64_MIN};
     uint32_t rate = 44100, sequence = 0, stream = 0;
     TapClock clock;
-    FMOD::DSP *dsp = nullptr;
-    FMOD::ChannelGroup *group = nullptr;
-    FMOD::System *system = nullptr;
+    FMOD::DSP* dsp = nullptr;
+    FMOD::ChannelGroup* group = nullptr;
+    FMOD::System* system = nullptr;
     std::atomic<bool> stopping{false};
     std::counting_semaphore<capacity + 1> ready{0};
     std::thread worker;
     SongSocket transport = BAD_SOCKET;
-    ~Tap() { shutdown(); }
+
+    ~Tap() {
+        shutdown();
+    }
+
     // True when the DSP is still in FMOD's graph: it happens only when FMOD would not lock the DSP
     // chain for the teardown, and then nothing here may free the Tap, because a render callback that
     // is already past getuserdata would touch a freed object.
-    bool dspAlive() const { return dsp != nullptr; }
+    bool dspAlive() const {
+        return dsp != nullptr;
+    }
+
     void shutdown() {
         enabled = false;
         // Remove the callback before freeing any queue or userdata storage.
@@ -55,17 +66,22 @@ struct Tap {
             bool locked = system && system->lockDSP() == FMOD_OK;
             if (locked) {
                 auto engine = FMODAudioEngine::get();
-                auto current = engine ? (stream == 1 ? engine->m_backgroundMusicChannel
-                                                    : engine->m_globalChannel) : nullptr;
+                auto current = engine ?
+                    (stream == 1 ? engine->m_backgroundMusicChannel : engine->m_globalChannel) :
+                    nullptr;
                 // A late render callback then passes audio through without touching this Tap.
                 dsp->setUserData(nullptr);
                 // removeDSP reconnects a live group's neighboring DSPs. Only fall
                 // back to disconnecting the obsolete graph when its group changed.
-                auto removed = current && current == group ? current->removeDSP(dsp) : dsp->disconnectAll(true, true);
+                auto removed = current && current == group ? current->removeDSP(dsp) :
+                                                             dsp->disconnectAll(true, true);
                 auto released = dsp->release();
                 if (removed != FMOD_OK || released != FMOD_OK)
-                    log::warn("OBS effects tap teardown: remove returned {}, release returned {}", int(removed),
-                              int(released));
+                    log::warn(
+                        "OBS effects tap teardown: remove returned {}, release returned {}",
+                        int(removed),
+                        int(released)
+                    );
                 dsp = nullptr;
                 system->unlockDSP();
             }
@@ -85,22 +101,23 @@ struct Tap {
             transport = BAD_SOCKET;
         }
     }
-    bool attachedTo(FMOD::ChannelGroup *current) const {
-        if (!dsp || current != group)
-            return false;
+
+    bool attachedTo(FMOD::ChannelGroup* current) const {
+        if (!dsp || current != group) return false;
         int outputs = 0;
         return dsp->getNumOutputs(&outputs) == FMOD_OK && outputs > 0;
     }
-    void push(FMOD_DSP_STATE *state, float *input, unsigned frames, int channels) {
-        if (channels < 1 || frames == 0)
-            return;
+
+    void push(FMOD_DSP_STATE* state, float* input, unsigned frames, int channels) {
+        if (channels < 1 || frames == 0) return;
         auto timestamp = clock.stamp(monotonicNowNs(), rate);
         clock.advance(frames);
         unsigned long long block = 0;
         unsigned offset = 0, length = 0;
         if (state->functions->getclock(state, &block, &offset, &length) == FMOD_OK)
-            dspClockOrigin.store(int64_t(timestamp) - int64_t(framesToNs(block, rate)),
-                                 std::memory_order_relaxed);
+            dspClockOrigin.store(
+                int64_t(timestamp) - int64_t(framesToNs(block, rate)), std::memory_order_relaxed
+            );
         if (!enabled.load(std::memory_order_relaxed)) {
             sequence += (frames + 511) / 512;
             return;
@@ -112,7 +129,7 @@ struct Tap {
                 sequence += (frames - start + 511) / 512;
                 break;
             }
-            auto &p = queue[w % capacity];
+            auto& p = queue[w % capacity];
             p.frames = std::min(512u, frames - start);
             p.sequence = sequence++;
             p.sampleRate = rate;
@@ -128,27 +145,27 @@ struct Tap {
             ready.release();
         }
     }
-    static FMOD_RESULT F_CALL render(FMOD_DSP_STATE *state, float *input, float *output, unsigned frames,
-                                     int channels, int *outChannels) {
+
+    static FMOD_RESULT F_CALL render(
+        FMOD_DSP_STATE* state, float* input, float* output, unsigned frames, int channels,
+        int* outChannels
+    ) {
         *outChannels = channels;
-        void *user = nullptr;
+        void* user = nullptr;
         state->functions->getuserdata(state, &user);
-        if (user && input)
-            static_cast<Tap *>(user)->push(state, input, frames, channels);
+        if (user && input) static_cast<Tap*>(user)->push(state, input, frames, channels);
         if (input && output) {
-            if (input != output)
-                std::memcpy(output, input, frames * channels * sizeof(float));
+            if (input != output) std::memcpy(output, input, frames * channels * sizeof(float));
         }
         return FMOD_OK;
     }
-    bool attach(FMODAudioEngine *engine, FMOD::ChannelGroup *group, uint32_t id) {
-        if (!group || !engine->m_system)
-            return false;
+
+    bool attach(FMODAudioEngine* engine, FMOD::ChannelGroup* group, uint32_t id) {
+        if (!group || !engine->m_system) return false;
         // The socket comes first: a tap that can't send must not sit in FMOD's graph. A failed
         // attach destroys the Tap, which closes it.
         transport = openLoopbackSocket();
-        if (transport == BAD_SOCKET)
-            return false;
+        if (transport == BAD_SOCKET) return false;
         this->group = group;
         system = engine->m_system;
         stream = id;
@@ -161,11 +178,10 @@ struct Tap {
         description.numoutputbuffers = 1;
         description.read = render;
         description.userdata = this;
-        if (engine->m_system->createDSP(&description, &dsp) != FMOD_OK)
-            return false;
+        if (engine->m_system->createDSP(&description, &dsp) != FMOD_OK) return false;
         int position = FMOD_CHANNELCONTROL_DSP_HEAD;
         if (id == 0) {
-            FMOD::DSP *fader = nullptr;
+            FMOD::DSP* fader = nullptr;
             if (group->getDSP(FMOD_CHANNELCONTROL_DSP_FADER, &fader) != FMOD_OK ||
                 group->getDSPIndex(fader, &position) != FMOD_OK) {
                 dsp->release();
@@ -190,19 +206,25 @@ struct Tap {
                 target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
                 for (;;) {
                     ready.acquire();
-                    if (stopping.load(std::memory_order_acquire))
-                        break;
+                    if (stopping.load(std::memory_order_acquire)) break;
                     auto r = read.load(std::memory_order_relaxed);
-                    auto &p = queue[r % capacity];
+                    auto& p = queue[r % capacity];
                     auto size = offsetof(EffectsPacketV3, samples) + p.frames * 2 * sizeof(float);
                     // Signed here rather than in FMOD's mixer callback, which must stay short.
                     signPacket(processLinkKey(), p, size);
-                    sendto(transport, reinterpret_cast<const char *>(&p), static_cast<int>(size), 0,
-                           reinterpret_cast<sockaddr *>(&target), sizeof(target));
+                    sendto(
+                        transport,
+                        reinterpret_cast<char const*>(&p),
+                        static_cast<int>(size),
+                        0,
+                        reinterpret_cast<sockaddr*>(&target),
+                        sizeof(target)
+                    );
                     read.store(r + 1, std::memory_order_release);
                 }
             });
-        } catch (...) {
+        }
+        catch (...) {
             // The DSP is already in the graph, so this must not release it here: no lock excludes a
             // render that already read userdata. attach() fails and the caller retires the Tap
             // through retireTap, whose locked teardown detaches and releases it, or keeps it when
@@ -212,17 +234,18 @@ struct Tap {
         return true;
     }
 };
+
 // Explicit application lifecycle owns cleanup; never join from a DLL destructor.
-Tap *effects = nullptr;
-Tap *reference = nullptr;
+Tap* effects = nullptr;
+Tap* reference = nullptr;
 bool attachFailureLogged = false;
+
 // Normal shutdown frees the Tap after FMOD released its DSP. When FMOD would not lock the DSP chain,
 // the DSP stays in the graph and its render callback still holds the object, so the Tap is leaked on
 // purpose as a pass-through instead of being freed under the mixer.
-void retireTap(Tap *&owned) {
-    if (!owned)
-        return;
-    auto *tap = owned;
+void retireTap(Tap*& owned) {
+    if (!owned) return;
+    auto* tap = owned;
     owned = nullptr;
     tap->shutdown();
     if (tap->dspAlive()) {
@@ -231,25 +254,23 @@ void retireTap(Tap *&owned) {
     }
     delete tap;
 }
+
 bool captureEnabled = true;
 bool terminated = false;
 uint64_t nextAttach = 0;
 unsigned retrySeconds = 1;
 } // namespace
+
 void install() {
-    if (terminated)
-        return;
+    if (terminated) return;
     auto now = monotonicNowNs();
-    if (now < nextAttach)
-        return;
+    if (now < nextAttach) return;
     auto engine = FMODAudioEngine::get();
-    if (!engine || !engine->m_globalChannel)
-        return;
-    if (effects && effects->attachedTo(engine->m_globalChannel))
-        return;
+    if (!engine || !engine->m_globalChannel) return;
+    if (effects && effects->attachedTo(engine->m_globalChannel)) return;
     retireTap(effects);
     retireTap(reference);
-    auto *tap = new Tap();
+    auto* tap = new Tap();
     tap->enabled = captureEnabled;
     if (!tap->attach(engine, engine->m_globalChannel, 0)) {
         // A failed attach is retired like any replaced tap: its sender stops, and the DSP is
@@ -268,37 +289,39 @@ void install() {
     retrySeconds = 1;
     log::info("OBS effects tap attached at {} Hz", effects->rate);
 #ifdef OBS_JUKEBOX_QA
-    static const bool calibrate = std::getenv("SEPARATE_SONG_CALIBRATE") != nullptr;
+    static bool const calibrate = std::getenv("SEPARATE_SONG_CALIBRATE") != nullptr;
     if (calibrate) {
         engine->setBackgroundMusicVolume(.5f);
         engine->setEffectsVolume(.5f);
-        auto *ref = new Tap();
-        if (ref->attach(engine, engine->m_backgroundMusicChannel, 1))
-            reference = ref;
-        else
-            retireTap(ref);
+        auto* ref = new Tap();
+        if (ref->attach(engine, engine->m_backgroundMusicChannel, 1)) reference = ref;
+        else retireTap(ref);
     }
 #endif
 }
+
 void shutdown() {
     terminated = true;
     retireTap(effects);
     retireTap(reference);
 }
+
 void enable(bool value) {
     captureEnabled = value;
-    if (effects)
-        effects->enabled = value;
+    if (effects) effects->enabled = value;
 }
-bool enabled() { return captureEnabled; }
+
+bool enabled() {
+    return captureEnabled;
+}
+
 std::optional<uint64_t> wallAtDspClock(unsigned long long clock) {
-    if (!effects)
-        return std::nullopt;
+    if (!effects) return std::nullopt;
     auto origin = effects->dspClockOrigin.load(std::memory_order_relaxed);
-    if (origin == INT64_MIN)
-        return std::nullopt;
+    if (origin == INT64_MIN) return std::nullopt;
     return uint64_t(origin + int64_t(framesToNs(clock, effects->rate)));
 }
+
 std::optional<int> dspIndex() {
     auto engine = FMODAudioEngine::get();
     int index = 0;
