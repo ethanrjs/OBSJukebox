@@ -7,7 +7,7 @@ cd "$song_root"
 : ${OBS_APP:="/Applications/OBS.app"}
 : ${MAC_ARCH:=$(uname -m)}
 song_version=$(/usr/bin/plutil -extract version raw -o - mod.json)
-rm -rf dist/separate-song.plugin
+rm -rf -- dist/separate-song.plugin
 mkdir -p dist/separate-song.plugin/Contents/MacOS
 clang++ -std=c++20 -O2 -bundle -arch "$MAC_ARCH" -mmacosx-version-min=13.0 \
   -DOBS_JUKEBOX_VERSION="\"$song_version\"" \
