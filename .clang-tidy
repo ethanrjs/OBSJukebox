@@ -1,4 +1,4 @@
-# Based on geode-sdk/geode's .clang-tidy 
+# Based on geode-sdk/geode's .clang-tidy at c4e032c1643fcdd5a869e5a8ed69fb8eb657168c.
 Checks: |
   -*,
 
@@ -40,7 +40,7 @@ Checks: |
   -performance-enum-size,
   -performance-no-int-to-ptr,
 
-  # c++ core guidelines #
+  # c++ core guidlines #
   # cppcoreguidelines-missing-std-forward, ## too many false positives
   cppcoreguidelines-slicing,
   cppcoreguidelines-no-suspend-with-lock,
@@ -101,6 +101,21 @@ Checks: |
   readability-static-definition-in-anonymous-namespace,
   readability-string-compare,
   readability-uniqueptr-delete-release,
+
+  # TODO (v6): these are good but require abi break or massive changes to fix rn
+  -performance-noexcept-move-constructor,
+  -misc-header-include-cycle,
+  -modernize-use-override,
+  -modernize-use-nullptr,
+  -bugprone-unchecked-optional-access, ## this one maybe dont
+  -bugprone-branch-clone, ## often harmless
+  -performance-faster-string-find,
+  -performance-prefer-single-char-overloads,
+  -readability-redundant-member-init, ## CCPoint{}
+  -readability-simplify-boolean-expr,
+  -modernize-use-using, ## cocos
+  ## this one is a bit inaccurate for arc (refs ok in futures, but bad in tasks)
+  -cppcoreguidelines-avoid-reference-coroutine-parameters,
   
 
 HeaderFilterRegex: '.*[\\/](src|obs-plugin)[\\/].*'

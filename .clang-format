@@ -1,4 +1,4 @@
-# Based on geode-sdk/geode's .clang-format
+# Based on geode-sdk/geode's .clang-format at e8fcb57c9fb65e03646c5b908aed4e0556101c56.
 ---
 IndentWidth: 4
 
