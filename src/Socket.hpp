@@ -2,6 +2,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
 using SongSocket = SOCKET;
 inline constexpr SongSocket BAD_SOCKET = INVALID_SOCKET;
 inline bool socketsReady() {
@@ -16,6 +17,12 @@ inline void nonblocking(SongSocket s) {
     u_long mode = 1;
     ioctlsocket(s, FIONBIO, &mode);
 }
+// Windows reports a datagram sent to a port that later closed as an error on the NEXT recvfrom.
+// These sockets talk to processes that come and go, so tell Winsock not to surface that yet.
+inline void ignoreConnReset(SongSocket s) {
+    DWORD behavior = 0, returned = 0;
+    WSAIoctl(s, SIO_UDP_CONNRESET, &behavior, sizeof(behavior), nullptr, 0, &returned, nullptr, nullptr);
+}
 #else
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -27,6 +34,9 @@ inline constexpr SongSocket BAD_SOCKET = -1;
 inline bool socketsReady() { return true; }
 inline void closeSocket(SongSocket s) { close(s); }
 inline void nonblocking(SongSocket s) { fcntl(s, F_SETFL, O_NONBLOCK); }
+// POSIX has no such option. These sockets never connect() and never set IP_RECVERR, so Linux
+// normally does not report a closed peer on receive; the receivers tolerate any receive error anyway.
+inline void ignoreConnReset(SongSocket) {}
 #endif
 
 // Returns a nonblocking UDP socket bound to 127.0.0.1, so it never listens on other interfaces, or
@@ -45,6 +55,7 @@ inline SongSocket openLoopbackSocket() {
         return BAD_SOCKET;
     }
     nonblocking(udp);
+    ignoreConnReset(udp);
     return udp;
 }
 

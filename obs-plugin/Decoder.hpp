@@ -24,11 +24,22 @@
 #ifdef _WIN32
 #include <memory>
 #endif
-// Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares.
-// Windows reads a path that starts with two separators of either kind as a network share.
+// Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares, so only
+// strings that name a local file get through. Two leading separators name a network share or a device
+// path, and a colon before the first separator is a URL scheme except for a Windows drive letter: the
+// plain "://" check alone would still let "file:C:/x.mp3" reach Media Foundation as a URL.
 inline bool localSongPath(const std::string &path) {
     auto separator = [](char c) { return c == '/' || c == '\\'; };
-    return path.find("://") == std::string::npos && !(path.size() >= 2 && separator(path[0]) && separator(path[1]));
+    if (path.size() >= 2 && separator(path[0]) && separator(path[1]))
+        return false;
+    auto colon = path.find(':');
+    if (colon != std::string::npos) {
+        auto slash = path.find_first_of("/\\");
+        bool drive = colon == 1 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'));
+        if (colon < slash && !drive)
+            return false;
+    }
+    return true;
 }
 // Gives an MP3 decoder opened without seek points miniaudio's own `wanted`-point table, and the length
 // when the file doesn't state it (else 0), in one pass. False: reopen with miniaudio's seek points.

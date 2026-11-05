@@ -265,11 +265,18 @@ class Receiver {
     std::array<std::deque<PlaybackPacket>, SONG_LINK_MAX_CHANNELS + 1> playback;
     std::deque<EffectsPacket> effects, pendingEffects;
     LinkClock clock;
-    uint64_t session = 0, lastProbe = 0, lastSongReceived = 0, lastOldModPacket = 0, lastNewModPacket = 0,
-             lastUnverifiedPacket = 0;
+    uint64_t session = 0, lastProbe = 0, lastSongReceived = 0,
+             lastOldModPacket = 0, lastNewModPacket = 0,
+             lastUnverifiedPacket = 0, lastLoggedOld = 0, lastLoggedNew = 0, lastLoggedUnverified = 0;
     std::array<uint64_t, 2> lastEffectsReceived{};
     std::array<uint16_t, 2> effectsPort{};
     static constexpr uint64_t sessionTimeoutNs = 2000000000ULL;
+    // Clock probes follow one adopted game. Five minutes without a signed song packet from that
+    // game means it is gone, so the probes stop instead of knocking on the dead port forever.
+    static constexpr uint64_t probeTimeoutNs = 300000000000ULL;
+    // Observed problems repeat their support hint at most this often, so a mod that goes stale
+    // again after hours still gets its line. The status reads use the packet stamps, not these.
+    static constexpr uint64_t logRepeatNs = 600000000000ULL;
     std::deque<uint64_t> probes;
     sockaddr_in peer{};
     std::deque<SongLinkPacket> pending;
@@ -375,8 +382,17 @@ class Receiver {
         if (!state.connected || p.timestamp >= state.packet.timestamp)
             state = {p, Clock::now(), true};
     }
+    // A repeated support hint is due once every logRepeatNs. A zero stamp means it never logged;
+    // now counts from boot, so only compare intervals after a first log.
+    bool logDue(uint64_t &stamp, uint64_t now) {
+        if (stamp && now - stamp < logRepeatNs)
+            return false;
+        stamp = now;
+        return true;
+    }
     void probe(uint64_t now) {
-        if (!session || now - lastProbe < 250000000)
+        if (!session || !lastSongReceived || now - lastProbe < 250000000 ||
+            now - lastSongReceived > probeTimeoutNs)
             return;
         ClockSyncPacket p;
         p.sessionID = session;
@@ -397,12 +413,12 @@ class Receiver {
             handleClockReply(data, size, from, now);
         else if (fromOlderMod(data, size)) {
             std::lock_guard lock(mutex);
-            if (!lastOldModPacket)
+            if (logDue(lastLoggedOld, now))
                 blog(LOG_WARNING, "[OBS Jukebox] Ignoring packets from an outdated OBS Jukebox mod; update the mod in Geometry Dash");
             lastOldModPacket = now;
         } else if (fromNewerMod(data, size)) {
             std::lock_guard lock(mutex);
-            if (!lastNewModPacket)
+            if (logDue(lastLoggedNew, now))
                 blog(LOG_WARNING, "[OBS Jukebox] Ignoring packets from a newer OBS Jukebox mod; update the OBS plugin");
             lastNewModPacket = now;
         } else if (!memcmp(data, "GDSFX", 5)) {
@@ -414,7 +430,7 @@ class Receiver {
                 return;
             }
             std::lock_guard lock(mutex);
-            if (!lastUnverifiedPacket)
+            if (logDue(lastLoggedUnverified, now))
                 blog(LOG_WARNING, "[OBS Jukebox] Ignoring song packets not signed with this user's OBS Jukebox link key");
             lastUnverifiedPacket = now;
         }
@@ -517,6 +533,8 @@ class Receiver {
             return;
         }
         nonblocking(sock);
+        // Probes go to the mod's port, which dies whenever GD exits; don't surface that as an error.
+        ignoreConnReset(sock);
         int receiveBuffer = 1024 * 1024;
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char *>(&receiveBuffer),
                    sizeof(receiveBuffer));
@@ -1262,8 +1280,19 @@ struct SongSource {
         // Prefill one block while retaining the existing 40 ms output timeline delay.
         uint64_t timestamp = os_gettime_ns() - bufferingNs + blockNs;
         wantedTimestamp = timestamp;
-        decoderWorker = std::thread([this] { decodeMusic(); });
-        effectsWorker = std::thread([this] { renderEffectsBlocks(); });
+        // The threads this starts belong to OBS: an uncaught thread-start failure would terminate
+        // the whole process. Stopping ends any started worker's loop promptly, so joining is short.
+        try {
+            decoderWorker = std::thread([this] { decodeMusic(); });
+            effectsWorker = std::thread([this] { renderEffectsBlocks(); });
+        } catch (...) {
+            stop = true;
+            for (auto *thread : {&decoderWorker, &effectsWorker})
+                if (thread->joinable())
+                    thread->join();
+            blog(LOG_WARNING, "[OBS Jukebox] A GD Sounds source could not start its workers and stays silent until re-added");
+            return;
+        }
 #ifdef OBS_JUKEBOX_QA
         testWorkersStarted.store(true, std::memory_order_release);
 #endif
@@ -1323,10 +1352,20 @@ struct SongSource {
 };
 
 static const char *sourceName(void *) { return "GD Sounds"; }
+// libobs calls create as plain C, so nothing here may throw: a failed thread or allocation escaping
+// would cross out of C code. A null result tells OBS the source is unavailable, and it drops the
+// failure into its own log.
 static void *create(obs_data_t *, obs_source_t *source) {
-    auto s = new SongSource(source);
-    s->worker = std::thread([s] { s->run(); });
-    return s;
+    try {
+        auto s = std::make_unique<SongSource>(source);
+        s->worker = std::thread([s = s.get()] { s->run(); });
+        return s.release();
+    } catch (const std::exception &error) {
+        blog(LOG_WARNING, "[OBS Jukebox] Could not create a GD Sounds source: %s", error.what());
+    } catch (...) {
+        blog(LOG_WARNING, "[OBS Jukebox] Could not create a GD Sounds source");
+    }
+    return nullptr;
 }
 static obs_properties_t *properties(void *data) {
     auto props = obs_properties_create();
@@ -1345,9 +1384,19 @@ static obs_properties_t *properties(void *data) {
     return props;
 }
 bool obs_module_load(void) {
-    // Build the shifter tables before any source thread can process audio.
-    PitchShifter::prepareTables();
-    receiver = std::make_shared<Receiver>();
+    // obs_module_load is a C boundary, and both calls below allocate (the shifter tables and the
+    // receiver's thread), so a failure turns into a failed module load that OBS reports instead of
+    // a terminating escape. The tables are built before any source thread can process audio.
+    try {
+        PitchShifter::prepareTables();
+        receiver = std::make_shared<Receiver>();
+    } catch (const std::exception &error) {
+        blog(LOG_ERROR, "[OBS Jukebox] Could not initialize OBS Jukebox: %s", error.what());
+        return false;
+    } catch (...) {
+        blog(LOG_ERROR, "[OBS Jukebox] Could not initialize OBS Jukebox");
+        return false;
+    }
     obs_source_info info{};
     info.id = "gd_alternate_song";
     info.type = OBS_SOURCE_TYPE_INPUT;
