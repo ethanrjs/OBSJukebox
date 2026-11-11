@@ -2,15 +2,17 @@
 // Timeline arithmetic is checked by the existing sample tests; wall time here
 // detects stalls with scheduler tolerance rather than asserting hard realtime.
 struct StressRun {
-    double rate=1;
+    double rate=1,seconds=11;
     bool loop=false,checkBudget=true;
-    unsigned voices=5,seconds=11,effectsStages=8;
+    unsigned voices=5,effectsStages=8;
     bool voiceStages=true;
     // Windows' default 15.6 ms timer, which it may give OBS while minimized despite libobs's request.
     bool coarseTimer=false;
     uint64_t effectsLatenessNs=0; // how long after its timestamp each effects packet is sent
     // GD's tap sends 512 frames at the game's output rate, often 44.1 kHz.
     unsigned effectsFrames=480,effectsRate=48000;
+    // The staged effects reset and the 100 ms pause, in seconds into the run; 0 leaves one out.
+    double resetAt=0,pauseAt=0;
 };
 // A real-worker stress run: five voices carry ten 4096 stages, the global adds a group stage, and
 // eight post-tap effects stages share the same hop grid. Measured after a 1 s warm-up; the raw miss
@@ -40,7 +42,7 @@ static uint64_t pitchStressRun(const StressRun& run) {
                 p.stages[s]={.85f+float(v)*.02f+float(s)*.01f,4096,0,920+v*8+s};
         }
     }
-    uint64_t media=0,pauseAt=0,lateFrames=0;
+    uint64_t media=0,pausedAt=0,lateFrames=0;
     bool paused=false,resetEffects=false;
     {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
@@ -74,7 +76,7 @@ static uint64_t pitchStressRun(const StressRun& run) {
         });
         for(;;){
             const auto now=os_gettime_ns();const auto elapsed=now-start;
-            if(elapsed>=uint64_t(run.seconds)*1000000000ULL)break;
+            if(elapsed>=uint64_t(run.seconds*1e9))break;
             if(!measuring&&elapsed>=1000000000){
                 source.testMaxMixNs=0;source.testWakeMaxNs=0;source.testMusicMisses=0;source.testEffectsMisses=0;
                 source.testLateFrames=0;
@@ -83,11 +85,12 @@ static uint64_t pitchStressRun(const StressRun& run) {
             }
             const auto delta=now-last;last=now;
             if(!paused)media+=uint64_t(double(delta)*rate);
-            if(elapsed>=6000000000ULL&&elapsed<6100000000ULL&&!paused){paused=true;pauseAt=elapsed;}
-            if(paused&&elapsed>=pauseAt+100000000ULL){
+            if(run.pauseAt&&!paused&&elapsed>=uint64_t(run.pauseAt*1e9)&&
+               elapsed<uint64_t(run.pauseAt*1e9)+100000000ULL){paused=true;pausedAt=elapsed;}
+            if(paused&&elapsed>=pausedAt+100000000ULL){
                 paused=false;for(auto&p:voices)++p.epoch;
             }
-            if(!resetEffects&&elapsed>=5000000000ULL&&effectsStages){
+            if(!resetEffects&&run.resetAt&&elapsed>=uint64_t(run.resetAt*1e9)&&effectsStages){
                 for(unsigned i=0;i<effectsStages;++i)global.effectsStages[i].instance=950+i;
                 resetEffects=true;
             }
@@ -127,18 +130,26 @@ static uint64_t pitchStressRun(const StressRun& run) {
     return lateFrames;
 }
 static void pitchStressTest() {
-    check(pitchStressRun({.loop=true})==0,"on-time effects all reach the staged worker in time");
-    pitchStressRun({.rate=.01});
-    pitchStressRun({.rate=16});
-    pitchStressRun({.loop=true,.coarseTimer=true});
-    pitchStressRun({.checkBudget=false,.voices=64,.seconds=3,.voiceStages=false});
+    // Every scenario runs the effects reset and the pause/resume inside its measured window, after
+    // the 1 s warm-up. 2.6 s still leaves the reset 1.2 s and the resume 0.6 s to show up.
+    constexpr double seconds=2.6,resetAt=1.4,pauseAt=1.9;
+    check(pitchStressRun({.seconds=seconds,.loop=true,.resetAt=resetAt,.pauseAt=pauseAt})==0,
+          "on-time effects all reach the staged worker in time");
+    pitchStressRun({.rate=.01,.seconds=seconds,.resetAt=resetAt,.pauseAt=pauseAt});
+    pitchStressRun({.rate=16,.seconds=seconds,.resetAt=resetAt,.pauseAt=pauseAt});
+    // The default 15.6 ms timer only exists on Windows; elsewhere this would repeat the run above.
+#ifdef _WIN32
+    pitchStressRun({.seconds=seconds,.loop=true,.coarseTimer=true,.resetAt=resetAt,.pauseAt=pauseAt});
+#endif
+    pitchStressRun({.seconds=1.5,.checkBudget=false,.voices=64,.voiceStages=false});
 }
 // The worker renders a staged block when the output starts the block before it, at least 20 ms
 // after the block's timestamp, so each frame may arrive up to 10 ms after its own time: a packet up
 // to 10 ms after its timestamp. A packet 20 ms late has frames 10 to 20 ms late, which are lost.
+// Neither run resets the stages or pauses, so the only events are the packets' own lateness.
 static void effectsLatenessTest() {
     for(const unsigned rate:{48000u,44100u}){
-        StressRun light{.voices=0,.seconds=4,.effectsStages=1};
+        StressRun light{.seconds=1.6,.voices=0,.effectsStages=1};
         if(rate==44100){light.effectsFrames=512;light.effectsRate=44100;}
         auto within=light;within.effectsLatenessNs=5000000;
         auto beyond=light;beyond.effectsLatenessNs=20000000;
@@ -173,7 +184,7 @@ static void effectsDelayTest(bool staged) {
     {
         SongSource source(nullptr);source.active=true;
         source.worker=std::thread([&]{source.run();});
-        for(unsigned k=0;k<150;++k){
+        for(unsigned k=0;k<190;++k){
             const auto now=os_gettime_ns();
             if(k==60){delayFrom=now;source.testEffectsDelayMs=int(delayNs/1000000);}
             music.position=.1+std::fmod(double(k)*.01,.8);
@@ -184,7 +195,7 @@ static void effectsDelayTest(bool staged) {
             sendto(socketFd,reinterpret_cast<const char*>(&effect),int(size),0,
                    reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
             sentAt.push_back(now);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sleepTick();
         }
     }
     auto blocks=capturedBlocks();
@@ -257,7 +268,7 @@ static void musicDeadlineTest(bool delayedOpen) {
         SongSource source(nullptr);source.active=true;
         source.worker=std::thread([&]{source.run();});
         sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-        for(unsigned i=0;i<90;++i){
+        for(unsigned i=0;i<120;++i){
             auto now=os_gettime_ns();
             p.position=190+(i%10)*.01;p.epoch=i/10;
             p.flags=i%10==4?1:3;
@@ -267,7 +278,7 @@ static void musicDeadlineTest(bool delayedOpen) {
             std::fill_n(effect.samples,960,.02f);
             auto size=offsetof(EffectsPacketV3,samples)+effect.frames*8;signPacket(processLinkKey(),effect,size);
             sendto(effects,reinterpret_cast<const char*>(&effect),int(size),0,reinterpret_cast<sockaddr*>(&addr),sizeof(addr));
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sleepTick();
         }
     }
     Decoder::testOpenDelayMs=0;

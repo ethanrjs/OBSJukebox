@@ -14,11 +14,20 @@ if ($LASTEXITCODE) { throw 'Dependency verification failed.' }
 $buildRoot = Join-Path $root 'build-windows'
 $output = Join-Path $root 'artifacts\windows'
 New-Item -ItemType Directory -Force -Path $buildRoot,$output | Out-Null
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (!$vs) { throw 'Visual Studio 2022 C++ Build Tools are required.' }
+# Ninja is single-config and is the only generator that honours a compiler launcher, which is
+# what lets ccache cache these builds. It needs the MSVC environment rather than a -A flag.
+. (Join-Path $PSScriptRoot 'windows-env.ps1')
+$vs = Enter-MsvcEnvironment
+$missing = @('cmake','ninja') | Where-Object { !(Get-Command "$_.exe" -ErrorAction SilentlyContinue) }
+if ($missing) {
+    throw "$($missing -join ' and ') not found on PATH after entering the Visual Studio environment, which does not provide them; install them with 'pip install cmake ninja' and add that directory to PATH."
+}
 $msvc = Get-ChildItem -LiteralPath "$vs\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
 $nativeTools = Join-Path $msvc.FullName 'bin\Hostx64\x64'
+$launcher = @()
+if (Get-Command ccache -ErrorAction SilentlyContinue) {
+    $launcher = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache','-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
+}
 $requiredSdkVersion = (Get-Content -LiteralPath (Join-Path $root 'mod.json') -Raw | ConvertFrom-Json).geode.TrimStart('v')
 if (!$GeodeSdk) { $GeodeSdk = Join-Path $DependencyRoot 'geode-sdk' }
 $sdk = (Resolve-Path -LiteralPath $GeodeSdk).Path
@@ -33,9 +42,10 @@ New-Item -ItemType Directory -Force -Path $sdkBinaryDirectory | Out-Null
 Copy-Item -LiteralPath "$loaderDirectory\Geode.lib" -Destination "$sdkBinaryDirectory\Geode.lib" -Force
 if (!$SkipMod) {
     $env:GEODE_SDK = $sdk.Replace('\','/')
-    & cmake -S $root -B "$buildRoot\mod" -G 'Visual Studio 17 2022' -A x64 "-DGEODE_BINDINGS_REPO_PATH=$DependencyRoot/bindings" "-DGEODE_CLI=$DependencyRoot/geode-cli/geode.exe" '-DGEODE_DISABLE_PRECOMPILED_HEADERS=ON' '-DSKIP_BUILDING_CODEGEN=OFF' '-DOBS_JUKEBOX_QA=OFF'
+    Reset-CMakeBuildDirectory -BuildDirectory "$buildRoot\mod" -Generator 'Ninja' -RepositoryRoot $root
+    & cmake -S $root -B "$buildRoot\mod" -G Ninja "-DCMAKE_BUILD_TYPE=$Configuration" "-DGEODE_BINDINGS_REPO_PATH=$DependencyRoot/bindings" "-DGEODE_CLI=$DependencyRoot/geode-cli/geode.exe" '-DGEODE_DISABLE_PRECOMPILED_HEADERS=ON' '-DSKIP_BUILDING_CODEGEN=OFF' '-DOBS_JUKEBOX_QA=OFF' @launcher
     if ($LASTEXITCODE) { throw 'Mod configuration failed.' }
-    & cmake --build "$buildRoot\mod" --config $Configuration --parallel $Parallel
+    & cmake --build "$buildRoot\mod" --parallel $Parallel
     if ($LASTEXITCODE) { throw 'Mod compilation failed.' }
     $mod = Get-ChildItem -LiteralPath "$buildRoot\mod" -Filter local.separate_song.geode -Recurse | Select-Object -First 1
     if (!$mod) { throw 'Geode package was not produced.' }
@@ -52,11 +62,12 @@ $def = Join-Path $buildRoot 'obs.def'
 $obsLib = Join-Path $buildRoot 'obs.lib'
 & "$nativeTools\lib.exe" /nologo /machine:x64 "/def:$def" "/out:$obsLib"
 if ($LASTEXITCODE) { throw 'Could not generate the OBS import library.' }
-& cmake -S "$root\obs-plugin" -B "$buildRoot\obs" -G 'Visual Studio 17 2022' -A x64 "-DOBS_IMPORT_LIBRARY=$obsLib" "-DOBS_SDK=$DependencyRoot/obs-sdk" "-DSIMDE_INCLUDE=$DependencyRoot/simde" '-DOBS_JUKEBOX_QA=OFF'
+Reset-CMakeBuildDirectory -BuildDirectory "$buildRoot\obs" -Generator 'Ninja' -RepositoryRoot $root
+& cmake -S "$root\obs-plugin" -B "$buildRoot\obs" -G Ninja "-DCMAKE_BUILD_TYPE=$Configuration" "-DOBS_IMPORT_LIBRARY=$obsLib" "-DOBS_SDK=$DependencyRoot/obs-sdk" "-DSIMDE_INCLUDE=$DependencyRoot/simde" '-DOBS_JUKEBOX_QA=OFF' @launcher
 if ($LASTEXITCODE) { throw 'OBS plugin configuration failed.' }
-& cmake --build "$buildRoot\obs" --config $Configuration --parallel $Parallel
+& cmake --build "$buildRoot\obs" --parallel $Parallel
 if ($LASTEXITCODE) { throw 'OBS plugin compilation failed.' }
-$builtPlugin = "$buildRoot\obs\$Configuration\separate-song.dll"
+$builtPlugin = "$buildRoot\obs\separate-song.dll"
 $stagedPlugin = "$output\separate-song.dll"
 if (!(Test-Path -LiteralPath $stagedPlugin) -or
     (Get-FileHash -LiteralPath $builtPlugin).Hash -ne (Get-FileHash -LiteralPath $stagedPlugin).Hash) {

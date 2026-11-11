@@ -9,34 +9,51 @@ jobs:
   windows:
     runs-on: windows-2022
     timeout-minutes: 45
+    env:
+      # Both caches are keyed by the locked inputs, so a dependency bump starts cold. They live
+      # under the ignored build directory, which also keeps `git status` clean for packaging.
+      CPM_SOURCE_CACHE: ${{ github.workspace }}/build/cpm
+      CCACHE_DIR: ${{ github.workspace }}/build-windows/ccache
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/cpm
+          key: cpm-${{ runner.os }}-${{ hashFiles('scripts/dependencies.lock.json') }}
+          restore-keys: cpm-${{ runner.os }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('installer/windows/SeparateSongSetup.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}-${{ hashFiles('scripts/dependencies.lock.json') }}
+          restore-keys: ${{ github.job }}-${{ runner.os }}-
+          max-size: 2G
+          save: ${{ github.event_name == 'push' }}
+          # Keep the run summary clean; the action still prints its stats in the post step.
+          job-summary: ''
       - name: Fetch locked inputs
         run: python scripts/fetch-dependencies.py windows --include-obs
       - name: Build mod and OBS plugin
         run: ./scripts/build-windows.ps1 -ObsDirectory "$PWD/tools/pinned/obs"
-      - name: Installer regression tests
-        run: dotnet run --project scripts/tests/installer/InstallerTests.csproj -c Release
       - name: Package installer
         run: ./scripts/package-windows.ps1
       - name: Protocol and decoder compilation
-        run: |
-          cmake -S tools/qa -B build-windows/qa -A x64 -DOBS_SDK="$PWD/tools/pinned/obs-sdk" -DSIMDE_INCLUDE="$PWD/tools/pinned/simde" -DOBS_IMPORT_LIBRARY="$PWD/build-windows/obs.lib"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cmake --build build-windows/qa --config Release --parallel 2
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          # Verbose, so the log says whether the transport tests checked the SHA instructions.
-          ctest --test-dir build-windows/qa -C Release -V
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python tools/qa/test_link_protocol.py
-      - name: Audio regressions
         shell: pwsh
         run: |
-          choco install ffmpeg -y --no-progress
+          . ./scripts/windows-env.ps1
+          Enter-MsvcEnvironment | Out-Null
+          cmake -S tools/qa -B build-windows/qa -G Ninja -DCMAKE_BUILD_TYPE=Release -DOBS_SDK="$PWD/tools/pinned/obs-sdk" -DSIMDE_INCLUDE="$PWD/tools/pinned/simde" -DOBS_IMPORT_LIBRARY="$PWD/build-windows/obs.lib" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $env:PATH += ';C:\ProgramData\chocolatey\bin'
-          ./scripts/tests/audio/run.ps1
-          ./scripts/tests/audio/run.ps1 -Bench -BuildOnly
+          cmake --build build-windows/qa --parallel 2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Verbose, so the log says whether the transport tests checked the SHA instructions.
+          ctest --test-dir build-windows/qa -V
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tools/qa/test_link_protocol.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: Windows-installer
@@ -47,11 +64,38 @@ jobs:
           name: Windows-mod
           path: artifacts/windows/local.separate_song.geode
           if-no-files-found: error
+  windows-installer-tests:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # No NuGet cache here: this project restores only framework references, so the cache
+      # restore cost more than the restore it replaced (measured: 22 s without, 27 s with).
+      # The tests build the installer's Program.cs and use only temporary directories.
+      - name: Installer regression tests
+        run: dotnet run --project scripts/tests/installer/InstallerTests.csproj -c Release
   macos:
     runs-on: macos-15
     timeout-minutes: 45
+    env:
+      CPM_SOURCE_CACHE: ${{ github.workspace }}/build/cpm
+      CCACHE_DIR: ${{ github.workspace }}/build-mac/ccache
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/cpm
+          key: cpm-${{ runner.os }}-${{ hashFiles('scripts/dependencies.lock.json') }}
+          restore-keys: cpm-${{ runner.os }}-
+      - uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}-${{ hashFiles('scripts/dependencies.lock.json') }}
+          restore-keys: ${{ github.job }}-${{ runner.os }}-
+          max-size: 2G
+          save: ${{ github.event_name == 'push' }}
+          job-summary: ''
+          # The released binary is universal; brew install would cost ~14 s per run.
+          install: binary
       - name: Fetch locked inputs
         run: python3 scripts/fetch-dependencies.py mac --include-obs
       - name: Mount OBS runtime
@@ -64,22 +108,16 @@ jobs:
         env:
           OBS_APP: ${{ runner.temp }}/OBS.app
         run: zsh scripts/build-macos.sh
-      - name: Audio and protocol regressions
+      - name: Installer checks
         run: |
-          brew install ffmpeg
-          # The hosted macOS runners can't keep 10 ms audio deadlines (a 10 ms sleep takes up to 50 ms).
-          bash scripts/tests/audio/run.sh --skip-timing
-          bash scripts/tests/audio/run.sh --bench --build-only
-          python3 tools/qa/test_link_protocol.py
-          c++ -std=c++20 tools/qa/protocol-layout.cpp -o "$RUNNER_TEMP/protocol-layout"
-          python3 tools/qa/test_protocol_layout.py "$RUNNER_TEMP/protocol-layout"
           python3 tools/qa/check-geode-version.py
           python3 tools/qa/unix-install-state.py --perl /usr/bin/perl
-      - name: Transport tests
+      - name: Transport and protocol tests
         run: |
+          python3 tools/qa/test_link_protocol.py
           cmake -S tools/qa -B build-macos/qa -DCMAKE_BUILD_TYPE=Release -DOBS_APP="$RUNNER_TEMP/OBS.app"
-          cmake --build build-macos/qa --target transport-release transport-qa --parallel 3
-          ctest --test-dir build-macos/qa -R transport -V
+          cmake --build build-macos/qa --target transport-release transport-qa protocol-layout --parallel 3
+          ctest --test-dir build-macos/qa -R 'transport|protocol-layout' -V
       - name: Package installer
         run: |
           zsh scripts/package-macos.sh
@@ -121,7 +159,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Fetch locked inputs
-        run: python scripts/fetch-dependencies.py windows
+        run: python scripts/fetch-dependencies.py windows --only cli-windows
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: Windows-mod

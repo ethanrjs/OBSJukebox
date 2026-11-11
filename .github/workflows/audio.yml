@@ -1,0 +1,53 @@
+name: Audio regressions
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+permissions:
+  contents: read
+jobs:
+  audio:
+    name: audio (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            ffmpeg: choco install ffmpeg -y --no-progress
+            tests: ./scripts/tests/audio/run.ps1
+            bench: ./scripts/tests/audio/run.ps1 -Bench -BuildOnly
+          - os: macos-15
+            ffmpeg: brew install ffmpeg
+            # The hosted macOS runners can't keep 10 ms audio deadlines (a 10 ms sleep takes up to 50 ms).
+            tests: bash scripts/tests/audio/run.sh --skip-timing
+            bench: bash scripts/tests/audio/run.sh --bench --build-only
+          - os: ubuntu-24.04
+            ffmpeg: sudo apt-get update && sudo apt-get install -y ffmpeg
+            tests: bash scripts/tests/audio/run.sh
+            bench: bash scripts/tests/audio/run.sh --bench --build-only
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # The fixtures depend only on scripts/tests/audio/fixtures.py, so a cache hit also
+      # means ffmpeg is not needed at all.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: fixtures
+        with:
+          path: |
+            artifacts/audio-tests/long.mp3
+            artifacts/audio-tests/short.mp3
+            artifacts/audio-tests/long-noxing.mp3
+            artifacts/audio-tests/long-44k-noxing.mp3
+            artifacts/audio-tests/.fixtures-stamp
+          key: audio-fixtures-${{ runner.os }}-${{ hashFiles('scripts/tests/audio/fixtures.py') }}
+      - name: Install ffmpeg
+        if: steps.fixtures.outputs.cache-hit != 'true'
+        run: ${{ matrix.ffmpeg }}
+      - name: Add Chocolatey to PATH
+        if: steps.fixtures.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        run: echo 'C:\ProgramData\chocolatey\bin' >> $env:GITHUB_PATH
+      - name: Audio regressions
+        run: ${{ matrix.tests }}
+      - name: Build the audio benchmark
+        run: ${{ matrix.bench }}
