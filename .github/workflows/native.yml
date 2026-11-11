@@ -145,7 +145,12 @@ jobs:
         with:
           name: Windows-mod
           path: artifacts/windows
-      - run: sudo apt-get update && sudo apt-get install -y libobs-dev cmake pkg-config
+      # CMake comes with the runner image.
+      - name: Install build dependencies
+        uses: ./.github/actions/apt-install
+        timeout-minutes: 4
+        with:
+          packages: libobs-dev pkg-config
       - run: bash scripts/build-linux.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
