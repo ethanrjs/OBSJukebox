@@ -24,8 +24,8 @@ per-block silence rule.
 Command (Windows, against the local Steam install):
 
 ```powershell
-cmake --build build-windows/qa --config Release --target fmod-pitchshift-reference
-build-windows/qa/Release/fmod-pitchshift-reference.exe "C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash" artifacts/fmod-reference-v2
+cmake --build build-windows/qa --target fmod-pitchshift-reference
+build-windows/qa/fmod-pitchshift-reference.exe "C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash" artifacts/fmod-reference-v2
 ```
 
 `fmod.dll` is FMOD 2.02.31 (build 157574), SHA-256

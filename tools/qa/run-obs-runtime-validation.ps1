@@ -7,13 +7,16 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $root 'scripts\windows-env.ps1')
+Enter-MsvcEnvironment | Out-Null
 if (!$PluginPath) {
     $qaPluginBuild = Join-Path $root 'build-windows\obs-runtime-qa'
-    & cmake -S "$root\obs-plugin" -B $qaPluginBuild -G 'Visual Studio 17 2022' -A x64 "-DOBS_IMPORT_LIBRARY=$root/build-windows/obs.lib" '-DOBS_JUKEBOX_QA=ON'
+    Reset-CMakeBuildDirectory -BuildDirectory $qaPluginBuild -Generator 'Ninja' -RepositoryRoot $root
+    & cmake -S "$root\obs-plugin" -B $qaPluginBuild -G Ninja -DCMAKE_BUILD_TYPE=Release "-DOBS_IMPORT_LIBRARY=$root/build-windows/obs.lib" '-DOBS_JUKEBOX_QA=ON'
     if ($LASTEXITCODE) { throw 'QA plugin configuration failed. Build the Windows plugin once to generate its OBS import library.' }
-    & cmake --build $qaPluginBuild --config Release --parallel 2
+    & cmake --build $qaPluginBuild --parallel 2
     if ($LASTEXITCODE) { throw 'QA plugin build failed.' }
-    $PluginPath = Join-Path $qaPluginBuild 'Release\separate-song.dll'
+    $PluginPath = Join-Path $qaPluginBuild 'separate-song.dll'
 }
 if (!$OutputDirectory) { $OutputDirectory = Join-Path $root 'artifacts\windows-validation' }
 $obsBin = Join-Path $ObsDirectory 'bin\64bit'
@@ -22,11 +25,12 @@ if ($endpoint) { throw "UDP $Port is in use. Choose an unused test port." }
 if ($Port -eq 39022 -and (Get-Process -Name GeometryDash -ErrorAction SilentlyContinue)) { throw 'Stop Geometry Dash before synthetic validation; its real link packets would interfere with these cases.' }
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
-& cmake -S "$PSScriptRoot" -B "$root\build-windows\qa" -G 'Visual Studio 17 2022' -A x64
+Reset-CMakeBuildDirectory -BuildDirectory "$root\build-windows\qa" -Generator 'Ninja' -RepositoryRoot $root
+& cmake -S "$PSScriptRoot" -B "$root\build-windows\qa" -G Ninja -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE) { throw 'QA configure failed.' }
-& cmake --build "$root\build-windows\qa" --config Release --parallel 2
+& cmake --build "$root\build-windows\qa" --parallel 2
 if ($LASTEXITCODE) { throw 'QA build failed.' }
-& ctest --test-dir "$root\build-windows\qa" -C Release --output-on-failure
+& ctest --test-dir "$root\build-windows\qa" --output-on-failure
 if ($LASTEXITCODE) { throw 'Game identity regression failed.' }
 if (!$Mp3Path) {
     $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
@@ -45,7 +49,7 @@ try {
     $env:PATH = "$obsBin;$savedPath"
     $arguments = @((Resolve-Path -LiteralPath $PluginPath).Path,(Resolve-Path -LiteralPath $OutputDirectory).Path)
     if ($Mp3Path) { $arguments += (Resolve-Path -LiteralPath $Mp3Path).Path }
-    & "$root\build-windows\qa\Release\obs-runtime-validation.exe" @arguments *> (Join-Path $OutputDirectory 'runtime-log.txt')
+    & "$root\build-windows\qa\obs-runtime-validation.exe" @arguments *> (Join-Path $OutputDirectory 'runtime-log.txt')
     $harnessExit = $LASTEXITCODE
 } finally { $env:PATH = $savedPath; $env:OBS_JUKEBOX_TEST_PORT = $savedTestPort; $env:OBS_QA_DIRECTORY = $savedObsDirectory }
 if (!(Test-Path -LiteralPath (Join-Path $OutputDirectory 'runtime-results.json'))) {
@@ -78,10 +82,10 @@ if ($Mp3Path) {
         }
     }
 }
-& "$root\build-windows\qa\Release\decoder-seek-validation.exe" @decoderFixtures | Tee-Object -FilePath (Join-Path $OutputDirectory 'decoder-seek-results.txt')
+& "$root\build-windows\qa\decoder-seek-validation.exe" @decoderFixtures | Tee-Object -FilePath (Join-Path $OutputDirectory 'decoder-seek-results.txt')
 if ($LASTEXITCODE) { throw 'Decoder seek regression failed.' }
 
-$formatTest = "$root\build-windows\qa\Release\decoder-format-validation.exe"
+$formatTest = "$root\build-windows\qa\decoder-format-validation.exe"
 $formatWave = Join-Path $OutputDirectory 'format-tone.wav'
 & $formatTest --fixture $formatWave
 if ($LASTEXITCODE) { throw 'Decoder format fixture generation failed.' }
