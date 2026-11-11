@@ -90,6 +90,18 @@ static void resetOutput() {
     captured.clear();
 }
 
+// Waits for the game's next 10 ms song packet. A plain sleep_for(10 ms) takes 15.6 ms on Windows'
+// default timer ticks, so the sender would run at 15.6 ms instead of the game's cadence; the
+// waitable timer the plugin's output thread uses is not bound to those ticks.
+static void sleepTick() {
+    static thread_local BlockTimer timer;
+    static thread_local Clock::time_point next{};
+    auto const now = Clock::now();
+    if (next < now) next = now;
+    next += std::chrono::milliseconds(10);
+    timer.sleepUntil(next);
+}
+
 // Runs a receiver and a source on simulated time, with no sockets, threads or sleeps. The receiver
 // polls every 10 ms, as its thread does. After start(), the source outputs the block starting at
 // t when the clock reaches t + bufferingNs, as its output thread does. Packets arrive the moment

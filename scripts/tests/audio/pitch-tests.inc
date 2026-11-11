@@ -582,11 +582,13 @@ template <class Chain> static Signal chain(Signal audio) {
 
 // The shipping stage must give the frozen reference's samples, so an optimization can't trade away
 // any of the error margin against FMOD. Each signal, size and pitch runs with one of the call
-// patterns and gates, taking turns; `bench fidelity` runs every pairing.
+// patterns and gates, taking turns; `bench fidelity` runs every pairing. Half a second of each
+// signal is enough for every FFT size to run well past its latency and for every span in the signals
+// to appear; the comparison is exact, so a shorter run detects the same divergences.
 static void pitchReferenceTest() {
     heldout::Difference difference;
     size_t run = 0;
-    for (const auto &[name, signal] : heldout::suite(72000))
+    for (const auto &[name, signal] : heldout::suite(24000))
         for (uint32_t fft : {256u, 512u, 1024u, 2048u, 4096u})
             for (float pitch : {.5f, .6f, .75f, 1.f, 1.1f, 1.5f, 2.f}) {
                 const auto &calls = heldout::callPatterns[run % heldout::callPatterns.size()];
@@ -620,7 +622,7 @@ static void pitchSimdTest() {
         explicit Portable(size_t gateFrames) : PitchShifter(gateFrames) { portableOnly = true; }
     };
     size_t differing = 0;
-    for (const auto &[name, signal] : heldout::suite(48000))
+    for (const auto &[name, signal] : heldout::suite(24000))
         for (uint32_t fft : {256u, 512u, 1024u, 2048u, 4096u})
             for (float pitch : {.5f, .75f, 1.f, 1.5f}) {
                 const auto wide = heldout::shift<PitchShifter>(signal, pitch, fft, 480, {480});
