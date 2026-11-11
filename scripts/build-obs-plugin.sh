@@ -9,7 +9,10 @@ cd "$song_root"
 song_version=$(/usr/bin/plutil -extract version raw -o - mod.json)
 rm -rf -- dist/separate-song.plugin
 mkdir -p dist/separate-song.plugin/Contents/MacOS
-clang++ -std=c++20 -O2 -bundle -arch "$MAC_ARCH" -mmacosx-version-min=13.0 \
+# ccache is optional locally; CI installs it.
+launcher=()
+command -v ccache >/dev/null && launcher=(ccache)
+"${launcher[@]}" clang++ -std=c++20 -O2 -bundle -arch "$MAC_ARCH" -mmacosx-version-min=13.0 \
   -DOBS_JUKEBOX_VERSION="\"$song_version\"" \
   -I"$OBS_SDK/libobs" -I"$SIMDE_INCLUDE" -Iobs-plugin obs-plugin/separate-song.cpp obs-plugin/Decoder.cpp obs-plugin/PitchSimd.cpp \
   -F"$OBS_APP/Contents/Frameworks" -framework libobs -framework AudioToolbox -framework CoreFoundation \

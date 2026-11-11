@@ -15,10 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 def run(*args):
     return subprocess.check_output(args, text=True).strip()
 
-def fetch(platform, destination, include_obs):
+def fetch(platform, destination, include_obs, only=()):
     lock = json.loads((ROOT / 'scripts/dependencies.lock.json').read_text())
+    unknown = set(only) - lock['sources'].keys() - lock['assets'].keys()
+    if unknown:
+        raise SystemExit(f"Unknown lock entries: {', '.join(sorted(unknown))}")
     destination.mkdir(parents=True, exist_ok=True)
     for name, (url, revision) in lock['sources'].items():
+        if only and name not in only:
+            continue
         target = destination / name
         if not target.exists():
             target.mkdir()
@@ -36,6 +41,8 @@ def fetch(platform, destination, include_obs):
         if run('git', '-C', str(target), 'status', '--porcelain', '--untracked-files=all'):
             raise RuntimeError(f'{target} is not a clean pinned checkout; choose a new destination')
     for name, asset in lock['assets'].items():
+        if only and name not in only:
+            continue
         if asset['platform'] not in ('all', platform) or (name.startswith('obs-') and not include_obs):
             continue
         target = destination / asset['destination']
@@ -91,5 +98,6 @@ if __name__ == '__main__':
     parser.add_argument('platform', choices=('windows', 'mac'))
     parser.add_argument('--destination', type=Path, default=ROOT / 'tools/pinned')
     parser.add_argument('--include-obs', action='store_true', help='Also fetch the pinned OBS runtime')
+    parser.add_argument('--only', nargs='+', metavar='NAME', help='Fetch only these lock entries, for example --only cli-windows')
     args = parser.parse_args()
-    fetch(args.platform, args.destination.resolve(), args.include_obs)
+    fetch(args.platform, args.destination.resolve(), args.include_obs, args.only or ())

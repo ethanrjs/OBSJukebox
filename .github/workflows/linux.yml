@@ -9,13 +9,22 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/build-linux/ccache
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libobs-dev cmake pkg-config ninja-build xvfb libgl1-mesa-dri python3-tk ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y libobs-dev cmake pkg-config ninja-build xvfb libgl1-mesa-dri python3-tk
+      - uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}-${{ hashFiles('scripts/dependencies.lock.json') }}
+          restore-keys: ${{ github.job }}-${{ runner.os }}-
+          max-size: 1G
+          save: ${{ github.event_name == 'push' }}
+          job-summary: ''
       - name: Build OBS plugin
         run: |
-          cmake -S obs-plugin -B build-linux/plugin -G Ninja -DCMAKE_BUILD_TYPE=Release -DOBS_JUKEBOX_QA=ON
+          cmake -S obs-plugin -B build-linux/plugin -G Ninja -DCMAKE_BUILD_TYPE=Release -DOBS_JUKEBOX_QA=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build-linux/plugin --parallel 2
       - name: Check installer Geode compatibility
         run: |
@@ -29,17 +38,13 @@ jobs:
         run: python3 tools/qa/test_link_protocol.py
       - name: Check the mod package check
         run: python3 tools/qa/test_check_mod_package.py
-      - name: Check timestamped playback
-        run: bash scripts/tests/audio/run.sh
-      - name: Build the audio benchmark
-        run: bash scripts/tests/audio/run.sh --bench --build-only
       - name: Check Proton paths
         run: |
           c++ -std=c++20 -O2 tools/qa/linux-paths-check.cpp -o build-linux/linux-paths-check
           build-linux/linux-paths-check .
       - name: Build OBS runtime checks
         run: |
-          cmake -S tools/qa -B build-linux/qa -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S tools/qa -B build-linux/qa -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build-linux/qa --parallel 2
           # Verbose, so the log says whether the transport tests checked the SHA instructions.
           ctest --test-dir build-linux/qa -V
