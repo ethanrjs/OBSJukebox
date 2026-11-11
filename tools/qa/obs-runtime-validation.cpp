@@ -458,8 +458,16 @@ int main(int argc, char** argv) {
     int failures = 0;
     // effects: 1 sends a 0.15 level each tick, 2 the tap's 44.1 kHz bursts of that level, 3 the
     // constant tone at 48 kHz, 30 ms ahead so a coarse timer cannot make a staged block late.
+    // A case sends packets for `settle` + `measure` seconds and measures only the last `measure`:
+    // the settle is the time the previous state needs to leave the speakers and this one to reach
+    // them (the decoder renders two 10 ms blocks ahead, and a changed epoch seeks once), and the
+    // measured window only has to be long enough for its check. 120 ms is 53 cycles at 440 Hz, far
+    // inside the 8% frequency tolerance, and 26 at 220 Hz; the silence, level and mute checks need
+    // a fraction of that.
+    double const settle = .08, measure = .12;
     auto phase = [&](char const* name,
-                     double seconds,
+                     double settleSeconds,
+                     double measureSeconds,
                      double expected,
                      double pos,
                      uint32_t flags,
@@ -469,8 +477,7 @@ int main(int argc, char** argv) {
                      int effects = 0,
                      bool expectedMuted = false,
                      bool expectEffectMean = false,
-                     bool advanceEpoch = true,
-                     double settleSeconds = .55) {
+                     bool advanceEpoch = true) {
         if (std::getenv("OBS_QA_RECOVERY_ONLY") && std::strcmp(name, "mp3_decode") &&
             std::strcmp(name, "failed_seek_music_silence") &&
             std::strcmp(name, "failed_seek_effects_continue") &&
@@ -481,6 +488,7 @@ int main(int argc, char** argv) {
         packet.rate = rate;
         packet.offset = offset;
         if (advanceEpoch) packet.epoch++;
+        double const seconds = settleSeconds + measureSeconds;
         auto start = Clock::now(),
              end = start +
             std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));
@@ -634,27 +642,32 @@ int main(int argc, char** argv) {
         fflush(stdout);
         return m;
     };
-    phase("no_link_silence", 1, 0, 0, 0, 1, 0, false);
-    phase("unicode_wav_decode", 1, 440, 0, 3);
+    phase("no_link_silence", settle, measure, 0, 0, 0, 1, 0, false);
+    // The first case to open a file gets longer, in case the first read of a fresh fixture is slow.
+    phase("unicode_wav_decode", .2, measure, 440, 0, 3);
     packet.musicVolume = 0;
-    phase("active_volume_mute_same_path_and_epoch", 1, 0, 1, 3, 1, 0, true, 0, false, false, false);
+    phase(
+        "active_volume_mute_same_path_and_epoch", settle, measure, 0, 1, 3, 1, 0, true, 0, false, false, false
+    );
     packet.musicVolume = 1;
-    phase("active_volume_restore_same_path_and_epoch", 1, 880, 2, 3, 1, 0, true, 0, false, false, false);
+    phase(
+        "active_volume_restore_same_path_and_epoch", settle, measure, 880, 2, 3, 1, 0, true, 0, false, false, false
+    );
     packet.musicVolume = 0;
-    phase("obs_music_muted", 1, 0, 0, 3);
-    phase("obs_music_muted_effects_unaffected", 1, -1, 0, 3, 1, 0, true, 2);
+    phase("obs_music_muted", settle, measure, 0, 0, 3);
+    phase("obs_music_muted_effects_unaffected", settle, measure, -1, 0, 3, 1, 0, true, 2);
     packet.musicVolume = .5f;
-    phase("obs_music_half_gain", 1, 440, 0, 3);
+    phase("obs_music_half_gain", settle, measure, 440, 0, 3);
     packet.musicVolume = 1;
     packet.effectsVolume = 0;
-    phase("obs_effects_muted", 1, 0, 0, 1, 1, 0, true, 2);
-    phase("obs_effects_muted_music_unaffected", 1, 440, 0, 3, 1, 0, true, 1);
+    phase("obs_effects_muted", settle, measure, 0, 0, 1, 1, 0, true, 2);
+    phase("obs_effects_muted_music_unaffected", settle, measure, 440, 0, 3, 1, 0, true, 1);
     packet.effectsVolume = .5f;
-    phase("obs_effects_half_gain", 1, -1, 0, 1, 1, 0, true, 2);
+    phase("obs_effects_half_gain", settle, measure, -1, 0, 1, 1, 0, true, 2);
     packet.effectsVolume = 1;
-    phase("pause_silence", 1, 0, .3, 1);
-    phase("resume", 1, 440, 0, 3);
-    phase("pause_before_song_switch", 1, 0, 2, 1, 1, 0, true, 0, false, false, false);
+    phase("pause_silence", settle, measure, 0, .3, 1);
+    phase("resume", settle, measure, 440, 0, 3);
+    phase("pause_before_song_switch", settle, measure, 0, 2, 1, 1, 0, true, 0, false, false, false);
     auto alternate = output / "paused-selection.wav";
     wave(alternate, .5);
     auto alternateUtf8 = alternate.u8string();
@@ -662,49 +675,67 @@ int main(int argc, char** argv) {
     std::memcpy(
         packet.path, alternateUtf8.data(), std::min(alternateUtf8.size(), sizeof(packet.path) - 1)
     );
-    phase("song_path_switch_while_paused", 1, 0, 2, 1, 1, 0, true, 0, false, false, false);
-    phase("switched_song_resume_at_current_position", 1, 440, 2, 3, 1, 0, true, 0, false, false, false);
+    phase("song_path_switch_while_paused", settle, measure, 0, 2, 1, 1, 0, true, 0, false, false, false);
+    phase(
+        "switched_song_resume_at_current_position", settle, measure, 440, 2, 3, 1, 0, true, 0, false, false, false
+    );
     std::memset(packet.path, 0, sizeof(packet.path));
-    phase("temporary_empty_path_while_paused", 1, 0, 2, 1, 1, 0, true, 0, false, false, false);
+    phase(
+        "temporary_empty_path_while_paused", settle, measure, 0, 2, 1, 1, 0, true, 0, false, false, false
+    );
     std::memcpy(
         packet.path, alternateUtf8.data(), std::min(alternateUtf8.size(), sizeof(packet.path) - 1)
     );
-    phase("restored_path_remains_paused", 1, 0, 2, 1, 1, 0, true, 0, false, false, false);
-    phase("restored_path_resumes_at_current_position", 1, 440, 2, 3, 1, 0, true, 0, false, false, false);
+    phase("restored_path_remains_paused", settle, measure, 0, 2, 1, 1, 0, true, 0, false, false, false);
+    phase(
+        "restored_path_resumes_at_current_position", settle, measure, 440, 2, 3, 1, 0, true, 0, false, false, false
+    );
     std::memset(packet.path, 0, sizeof(packet.path));
     std::memcpy(packet.path, utf8.data(), std::min(utf8.size(), sizeof(packet.path) - 1));
-    phase("death_stop_silence", 1, 0, 1.2, 1);
-    phase("epoch_reset_seek", 1, 880, 2, 3);
-    phase("rate_half", 1, 220, 0, 3, .5);
-    phase("positive_offset_seek", 1, 880, 0, 3, 1, 2);
-    phase("negative_offset_silence", 1, 0, 0, 3, 1, -2);
-    phase("effects_qpc_timestamp", 1, -1, 0, 1, 1, 0, true, true);
-    phase("effects_fmod_44100_burst_continuity", 2, -1, 0, 1, 1, 0, true, 2);
+    phase("death_stop_silence", settle, measure, 0, 1.2, 1);
+    phase("epoch_reset_seek", settle, measure, 880, 2, 3);
+    phase("rate_half", settle, measure, 220, 0, 3, .5);
+    phase("positive_offset_seek", settle, measure, 880, 0, 3, 1, 2);
+    phase("negative_offset_silence", settle, measure, 0, 0, 3, 1, -2);
+    phase("effects_qpc_timestamp", settle, measure, -1, 0, 1, 1, 0, true, true);
+    // The tap's burst generator starts its timeline with the case, so the first blocks after the
+    // switch from the 48 kHz path need longer than the default settle.
+    phase("effects_fmod_44100_burst_continuity", .3, .2, -1, 0, 1, 1, 0, true, 2);
     std::strcpy(packet.status, "Complete");
-    phase("music_continues_on_completion_screen", 1, 880, 2, 3);
-    phase("completed_music_stops_at_file_end", 1, 0, 6.2, 3);
-    phase("effects_continue_after_level_complete", 1, -1, 0, 1, 1, 0, true, 2);
-    std::strcpy(packet.status, "Ready");
-    phase("effects_menu_continuity", 1, -1, 0, 1, 1, 0, true, 2);
+    phase("music_continues_on_completion_screen", settle, measure, 880, 2, 3);
+    phase("completed_music_stops_at_file_end", settle, measure, 0, 6.2, 3);
+    phase("effects_continue_after_level_complete", settle, measure, -1, 0, 1, 1, 0, true, 2);
     std::strcpy(packet.status, "playing");
-    phase("combined_music_and_effects", 1, 440, 0, 3, 1, 0, true, true, false, true);
-    phase("extreme_offset_music_silent_effects_play", 1, -1, 0, 3, 1, 1e9, true, true, false, true);
+    // The effects add a constant offset to the music, so the zero-crossing count is noisy near zero
+    // and this case measures its frequency by DFT.
+    spectral = true;
+    phase("combined_music_and_effects", settle, measure, 440, 0, 3, 1, 0, true, true, false, true);
+    spectral = false;
+    phase(
+        "extreme_offset_music_silent_effects_play", settle, measure, -1, 0, 3, 1, 1e9, true, true, false, true
+    );
     obs_source_set_muted(source, true);
-    phase("obs_source_mute_flag", 1, 440, 0, 3, 1, 0, true, false, true);
+    phase("obs_source_mute_flag", settle, measure, 440, 0, 3, 1, 0, true, false, true);
     obs_source_set_muted(source, false);
     obs_source_dec_active(source);
-    phase("inactive_music_and_effects_silence", 1, 0, 0, 3, 1, 0, true, true);
+    phase("inactive_music_and_effects_silence", settle, measure, 0, 0, 3, 1, 0, true, true);
     obs_source_inc_active(source);
-    phase("link_timeout_silence", 1, 0, 0, 3, 1, 0, false);
+    // The last packet keeps its voice live for 400 ms after its timestamp, which is the stretch that
+    // covers a gap in the game's packets, and the voice then fades out, so 600 ms leaves 200 ms of
+    // margin before the measured window starts.
+    phase("link_timeout_silence", .6, measure, 0, 0, 3, 1, 0, false);
     auto delayed = output / "delayed-download.wav";
     std::filesystem::remove(delayed);
     auto delayedUtf8 = delayed.u8string();
     std::memset(packet.path, 0, sizeof(packet.path));
     std::memcpy(packet.path, delayedUtf8.data(), std::min(delayedUtf8.size(), sizeof(packet.path) - 1));
-    phase("missing_song_silence", 1, 0, 0, 3);
+    phase("missing_song_silence", settle, measure, 0, 0, 3);
     wave(delayed);
+    // The file appears at the same path and epoch, so only the plugin's reopen can pick it up, and
+    // that runs at most once a second after the failed attempt: a retry can fire up to 1 s into this
+    // case, and 1.2 s of settle leaves 200 ms past it.
     phase(
-        "missing_song_same_path_and_epoch_recovery", 2, -1, 0, 3, 1, 0, true, 0, false, false, false, 1.3
+        "missing_song_same_path_and_epoch_recovery", 1.2, .2, -1, 0, 3, 1, 0, true, 0, false, false, false
     );
     auto replaced = output / "incomplete-download.wav";
     {
@@ -716,10 +747,13 @@ int main(int argc, char** argv) {
     std::memcpy(
         packet.path, replacedUtf8.data(), std::min(replacedUtf8.size(), sizeof(packet.path) - 1)
     );
-    phase("invalid_song_retry_effects_continuity", 2, -1, 0, 3, 1, 0, true, 2);
+    // This case's own failed open schedules the reopen one second in, and the window has to straddle
+    // it: it starts 230 ms before the retry and ends 370 ms after.
+    phase("invalid_song_retry_effects_continuity", .8, .6, -1, 0, 3, 1, 0, true, 2);
     wave(replaced);
+    // The same reopen as above: it can fire up to 1 s into this case, and 1.2 s leaves 200 ms past it.
     phase(
-        "invalid_song_same_path_and_epoch_recovery", 2, -1, 0, 3, 1, 0, true, 0, false, false, false, 1.3
+        "invalid_song_same_path_and_epoch_recovery", 1.2, .2, -1, 0, 3, 1, 0, true, 0, false, false, false
     );
 #ifndef _WIN32
     auto growing = output / "growing-download.wav";
@@ -728,23 +762,26 @@ int main(int argc, char** argv) {
     auto growingUtf8 = growing.u8string();
     std::memset(packet.path, 0, sizeof(packet.path));
     std::memcpy(packet.path, growingUtf8.data(), std::min(growingUtf8.size(), sizeof(packet.path) - 1));
-    phase("partial_valid_song_exhausted", 1, 0, 2, 3);
+    phase("partial_valid_song_exhausted", settle, measure, 0, 2, 3);
     wave(growing);
+    // The same reopen as above: it can fire up to 1 s into this case, and 1.2 s leaves 200 ms past it.
     phase(
-        "growing_song_same_path_and_epoch_recovery", 2, 880, 1, 3, 1, 0, true, 0, false, false, false, 1.3
+        "growing_song_same_path_and_epoch_recovery", 1.2, .2, 880, 1, 3, 1, 0, true, 0, false, false, false
     );
 #endif
     if (argc > 3) {
         std::strncpy(packet.path, argv[3], sizeof(packet.path) - 1);
-        phase("mp3_decode", 1, -1, 0, 3);
-        phase("failed_seek_music_silence", 1, 0, 100, 3);
-        phase("failed_seek_effects_continue", 1, -1, 100, 3, 1, 0, true, true, false, true);
-        phase("failed_seek_restart_recovery", 1, -1, 0, 3);
+        phase("mp3_decode", settle, measure, -1, 0, 3);
+        phase("failed_seek_music_silence", settle, measure, 0, 100, 3);
+        phase(
+            "failed_seek_effects_continue", settle, measure, -1, 100, 3, 1, 0, true, true, false, true
+        );
+        phase("failed_seek_restart_recovery", settle, measure, -1, 0, 3);
     }
     std::memset(packet.path, 0, sizeof(packet.path));
     std::memcpy(packet.path, utf8.data(), std::min(utf8.size(), sizeof(packet.path) - 1));
-    // v7 speed and pitch stages on a constant 440 Hz tone. It lasts 32 s, so 16x for 1.5 s still has
-    // audio after settling. Each case clears its stages, and the previous path comes back after.
+    // v7 speed and pitch stages on a constant 440 Hz tone. The file lasts 32 s, so 16x still has
+    // audio after the settle. Each case clears its stages, and the previous path comes back after.
     {
         auto constant = output / "constant-440.wav";
         wave(constant, 1, 48000 * 32, true);
@@ -756,23 +793,37 @@ int main(int argc, char** argv) {
             packet.path, constantUtf8.data(), std::min(constantUtf8.size(), sizeof(packet.path) - 1)
         );
         spectral = true;
-        phase("rate_hundredth_constant_tone", 8, 4.4, 0, 3, .01);
-        phase("rate_16x_constant_tone", 1.5, 7040, 0, 3, 16);
+        // 0.01x of 4.4 kHz is what 0.01x of the 440 Hz fixture would be at 4.4 Hz: the same one
+        // constant slow tone, with ten times the cycles in the window the DFT needs to find it.
+        auto slowTone = output / "constant-4400.wav";
+        wave(slowTone, 10, 48000 * 4, true);
+        auto slowUtf8 = slowTone.u8string();
+        std::memset(packet.path, 0, sizeof(packet.path));
+        std::memcpy(packet.path, slowUtf8.data(), std::min(slowUtf8.size(), sizeof(packet.path) - 1));
+        phase("rate_hundredth_constant_tone", .25, .6, 44, 0, 3, .01);
+        std::memset(packet.path, 0, sizeof(packet.path));
+        std::memcpy(
+            packet.path, constantUtf8.data(), std::min(constantUtf8.size(), sizeof(packet.path) - 1)
+        );
+        phase("rate_16x_constant_tone", .25, .4, 7040, 0, 3, 16);
         packet.stageCount = 1;
         packet.stages[0] = {.75f, 4096, 0, 0x7001};
         expectedRms = stageRms(.75f, 4096);
-        phase("channel_stage_three_quarters", 2, 330, 2, 3);
+        // A stage holds the audio for its FFT size, 64 ms at 4096, before it outputs anything, so
+        // these cases settle longer than the rest.
+        phase("channel_stage_three_quarters", .18, .17, 330, 2, 3);
         // The same stage at a new pitch keeps its instance, so OBS keeps the stage and its audio. Its
-        // level then depends on the phase it carried over, which no fresh stage reproduces, so only
-        // the frequency is checked; the chain tests cover what the stage keeps.
+        // level then depends on the phase it carried over, which no fresh stage reproduces: it has
+        // measured .026 against .19 for a whole window, so this level only proves the stage is not
+        // silent and the pitch is what this case is for. The chain tests cover what the stage keeps.
         packet.stages[0].pitch = 1.5f;
         expectedRms = 0;
         phase(
-            "channel_stage_same_instance_pitch_change", 2, 660, 4, 3, 1, 0, true, 0, false, false, false
+            "channel_stage_same_instance_pitch_change", .55, 1.45, 660, 4, 3, 1, 0, true, 0, false, false, false
         );
         packet.stages[0] = {1.f, 4096, 0, 0x7002};
         expectedRms = stageRms(1.f, 4096);
-        phase("channel_stage_pitch_one_gain", 2, 440, 2, 3);
+        phase("channel_stage_pitch_one_gain", .18, .17, 440, 2, 3);
         packet.stageCount = 0;
         packet.stages[0] = {};
         auto groupTone = output / "group-pilot-noise.wav";
@@ -783,40 +834,44 @@ int main(int argc, char** argv) {
         global.stageCount = 1;
         global.stages[0] = {1.25f, 2048, 0, 0x7003};
         expectedRms = stageRms(1.25f, 2048, true);
-        phase("group_stage_shifts_music", 2, 550, 0, 3);
+        // The 440 Hz pilot sits 33 dB below the noise and only just above the noise's band, so the
+        // DFT needs a long window to pick it out.
+        phase("group_stage_shifts_music", .18, 1.0, 550, 0, 3);
         std::memset(packet.path, 0, sizeof(packet.path));
         std::memcpy(
             packet.path, constantUtf8.data(), std::min(constantUtf8.size(), sizeof(packet.path) - 1)
         );
         expectedRms = 0;
-        phase("excluded_replacement_skips_group_stage", 2, 440, 2, 3 | 8);
+        phase("excluded_replacement_skips_group_stage", .18, .17, 440, 2, 3 | 8);
         global.stageCount = 0;
         global.stages[0] = {};
         global.effectsStageCount = 1;
         global.effectsStages[0] = {.5f, 1024, 0, 0x7004};
         expectedRms = stageRms(.5f, 1024);
-        phase("effects_stage_shifts_effects", 2, 220, 0, 1, 1, 0, true, 3);
+        phase("effects_stage_shifts_effects", .18, .17, 220, 0, 1, 1, 0, true, 3);
         global.effectsStageCount = 0;
         global.effectsStages[0] = {};
         expectedRms = 0;
         spectral = false;
         std::memcpy(packet.path, previous, sizeof(previous));
     }
-    // A different session can take ownership only after the prior sender is stale.
-    phase("session_handoff_quiet_window", 2.2, 0, 0, 0, 1, 0, false);
+    // A different session can take ownership only after 2 s without a packet from the previous one,
+    // so this case has to stay quiet for longer than that: its length is the wait, not a measurement,
+    // and the 200 ms past the timeout keeps a slow handoff from failing on a busy runner.
+    phase("session_handoff_quiet_window", settle, 2.12, 0, 0, 0, 1, 0, false);
     packet.sessionID = 0x51414e4154495645ULL;
-    phase("v5_clock_synchronized_playback", 1, 440, 0, 3);
+    // The first packet adopts the new session and one clock probe and reply make its clock usable,
+    // which the longer settle covers.
+    phase("v5_clock_synchronized_playback", .3, .2, 440, 0, 3);
     packet.triggerGain = 0;
-    phase("v5_trigger_volume_zero", 1, 0, 0, 3);
+    phase("v5_trigger_volume_zero", settle, measure, 0, 0, 3);
     packet.triggerGain = .5f;
     packet.musicVolume = 1;
-    auto gainResult = phase("v5_trigger_and_obs_independent_gain", 1, -1, 0, 3);
+    auto gainResult = phase("v5_trigger_and_obs_independent_gain", settle, measure, -1, 0, 3);
     if (gainResult.rms < .09 || gainResult.rms > .105) ++failures;
     packet.triggerGain = 1;
     packet.musicVolume = 1;
-    phase("v5_pause_silence", 1, 0, 0, 1);
-    phase("v5_resume_playback", 1, 440, 0, 3);
-    phase("v5_effects_share_clock_mapping", 1, -1, 0, 1, 1, 0, true, 1);
+    phase("v5_effects_share_clock_mapping", settle, measure, -1, 0, 1, 1, 0, true, 1);
     finishClock = true;
     clockResponder.join();
     json << "\n],\"failures\":"
