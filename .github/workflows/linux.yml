@@ -13,8 +13,13 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/build-linux/ccache
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # CMake and Ninja come with the runner image. ccache is listed so that ccache-action finds it
+      # and does not run its own apt install.
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libobs-dev cmake pkg-config ninja-build xvfb libgl1-mesa-dri python3-tk
+        uses: ./.github/actions/apt-install
+        timeout-minutes: 4
+        with:
+          packages: libobs-dev pkg-config xvfb libgl1-mesa-dri python3-tk ccache
       - uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
         with:
           key: ${{ github.job }}-${{ runner.os }}-${{ hashFiles('scripts/dependencies.lock.json') }}
