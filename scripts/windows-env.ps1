@@ -1,4 +1,4 @@
-# Dot-source this file for the Windows build environment helpers.
+﻿# Dot-source this file for the Windows build environment helpers.
 
 # Puts cl.exe, the Windows SDK and the linker tools on PATH for the current session.
 function Enter-MsvcEnvironment {

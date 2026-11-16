@@ -5,10 +5,10 @@ export GEODE_SDK=${GEODE_SDK:-$HOME/geode}
 cmake=${CMAKE:-cmake}
 args=()
 for name in arc asp2 fmt json nontype_functional result tuliphook; do
- if [[ -d "$root/deps/$name-src" ]]; then
-  upper=${(U)name}
-  args+=("-DFETCHCONTENT_SOURCE_DIR_${upper}=$root/deps/$name-src")
- fi
+    if [[ -d "$root/deps/$name-src" ]]; then
+        upper=${(U)name}
+        args+=("-DFETCHCONTENT_SOURCE_DIR_${upper}=$root/deps/$name-src")
+    fi
 done
 [[ -z ${GEODE_BINDINGS_REPO_PATH:-} ]] || args+=("-DGEODE_BINDINGS_REPO_PATH=$GEODE_BINDINGS_REPO_PATH")
 [[ -z ${GEODE_CLI:-} ]] || args+=("-DGEODE_CLI=$GEODE_CLI")

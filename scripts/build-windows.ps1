@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ObsDirectory = "$env:ProgramFiles\obs-studio",
     [string]$GeodeSdk,
     [string]$DependencyRoot,
@@ -13,12 +13,12 @@ if (!$DependencyRoot) { $DependencyRoot = Join-Path $root 'tools/pinned' }
 if ($LASTEXITCODE) { throw 'Dependency verification failed.' }
 $buildRoot = Join-Path $root 'build-windows'
 $output = Join-Path $root 'artifacts\windows'
-New-Item -ItemType Directory -Force -Path $buildRoot,$output | Out-Null
+New-Item -ItemType Directory -Force -Path $buildRoot, $output | Out-Null
 # Ninja is single-config and is the only generator that honours a compiler launcher, which is
 # what lets ccache cache these builds. It needs the MSVC environment rather than a -A flag.
 . (Join-Path $PSScriptRoot 'windows-env.ps1')
 $vs = Enter-MsvcEnvironment
-$missing = @('cmake','ninja') | Where-Object { !(Get-Command "$_.exe" -ErrorAction SilentlyContinue) }
+$missing = @('cmake', 'ninja') | Where-Object { !(Get-Command "$_.exe" -ErrorAction SilentlyContinue) }
 if ($missing) {
     throw "$($missing -join ' and ') not found on PATH after entering the Visual Studio environment, which does not provide them; install them with 'pip install cmake ninja' and add that directory to PATH."
 }
@@ -26,7 +26,7 @@ $msvc = Get-ChildItem -LiteralPath "$vs\VC\Tools\MSVC" -Directory | Sort-Object 
 $nativeTools = Join-Path $msvc.FullName 'bin\Hostx64\x64'
 $launcher = @()
 if (Get-Command ccache -ErrorAction SilentlyContinue) {
-    $launcher = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache','-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
+    $launcher = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
 }
 $requiredSdkVersion = (Get-Content -LiteralPath (Join-Path $root 'mod.json') -Raw | ConvertFrom-Json).geode.TrimStart('v')
 if (!$GeodeSdk) { $GeodeSdk = Join-Path $DependencyRoot 'geode-sdk' }
@@ -41,7 +41,7 @@ $sdkBinaryDirectory = Join-Path $sdk "bin\$sdkVersion"
 New-Item -ItemType Directory -Force -Path $sdkBinaryDirectory | Out-Null
 Copy-Item -LiteralPath "$loaderDirectory\Geode.lib" -Destination "$sdkBinaryDirectory\Geode.lib" -Force
 if (!$SkipMod) {
-    $env:GEODE_SDK = $sdk.Replace('\','/')
+    $env:GEODE_SDK = $sdk.Replace('\', '/')
     Reset-CMakeBuildDirectory -BuildDirectory "$buildRoot\mod" -Generator 'Ninja' -RepositoryRoot $root
     & cmake -S $root -B "$buildRoot\mod" -G Ninja "-DCMAKE_BUILD_TYPE=$Configuration" "-DGEODE_BINDINGS_REPO_PATH=$DependencyRoot/bindings" "-DGEODE_CLI=$DependencyRoot/geode-cli/geode.exe" '-DGEODE_DISABLE_PRECOMPILED_HEADERS=ON' '-DSKIP_BUILDING_CODEGEN=OFF' '-DOBS_JUKEBOX_QA=OFF' @launcher
     if ($LASTEXITCODE) { throw 'Mod configuration failed.' }
@@ -58,7 +58,7 @@ if ($LASTEXITCODE) { throw 'Could not read OBS DLL exports.' }
 $names = @($exports | ForEach-Object { if ($_ -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)') { $Matches[1] } })
 if ($names.Count -lt 100) { throw 'Unexpected OBS DLL export list.' }
 $def = Join-Path $buildRoot 'obs.def'
-@('LIBRARY obs.dll','EXPORTS') + $names | Set-Content -LiteralPath $def -Encoding ascii
+@('LIBRARY obs.dll', 'EXPORTS') + $names | Set-Content -LiteralPath $def -Encoding ascii
 $obsLib = Join-Path $buildRoot 'obs.lib'
 & "$nativeTools\lib.exe" /nologo /machine:x64 "/def:$def" "/out:$obsLib"
 if ($LASTEXITCODE) { throw 'Could not generate the OBS import library.' }
@@ -74,4 +74,4 @@ if (!(Test-Path -LiteralPath $stagedPlugin) -or
     Copy-Item -LiteralPath $builtPlugin -Destination $stagedPlugin -Force
 }
 Copy-Item -LiteralPath "$DependencyRoot\fleym.nongd.geode" -Destination "$output\fleym.nongd.geode" -Force
-Get-ChildItem -LiteralPath $output -File | Get-FileHash -Algorithm SHA256 | Format-Table Path,Hash -AutoSize
+Get-ChildItem -LiteralPath $output -File | Get-FileHash -Algorithm SHA256 | Format-Table Path, Hash -AutoSize
