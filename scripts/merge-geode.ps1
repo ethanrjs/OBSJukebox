@@ -1,4 +1,4 @@
-# Merges the Windows and macOS packages into the one .geode the Geode index takes, checks it, and
+﻿# Merges the Windows and macOS packages into the one .geode the Geode index takes, checks it, and
 # writes its SHA-256 next to it for the release notes.
 [CmdletBinding()]
 param([string]$Cli = (Join-Path $PSScriptRoot '../tools/pinned/geode-cli/geode.exe'))

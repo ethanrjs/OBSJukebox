@@ -10,7 +10,7 @@ static void sourceRecoveryTest(bool failedSeek) {
     auto sendFor=[&](int milliseconds,double position){
         for(int elapsed=0;elapsed<milliseconds;elapsed+=10){
             packet.position=position+elapsed/1000.;sender.send(packet,os_gettime_ns());
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sleepTick();
         }
     };
     {
@@ -59,7 +59,7 @@ static void sourceResyncRecoveryTest() {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         auto sendFor=[&](unsigned count){for(unsigned i=0;i<count;++i){
             sender.send(packet,os_gettime_ns());sender.send(global,os_gettime_ns());
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sleepTick();
         }};
         sendFor(20);
         bool heard=false;for(const auto& block:capturedBlocks())for(float sample:block.samples)heard|=sample>.05f;
@@ -95,7 +95,7 @@ static void sourceToggleRecoveryTest() {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         auto sendFor=[&](unsigned count){for(unsigned i=0;i<count;++i){
             sender.send(packet,os_gettime_ns());sender.send(global,os_gettime_ns());
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sleepTick();
         }};
         sendFor(20);
         bool heard=false;for(const auto& block:capturedBlocks())for(float sample:block.samples)heard|=sample>.05f;
@@ -238,7 +238,7 @@ static void decoderWatchdogBackoffTest() {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         for(unsigned i=0;i<170;++i){
             sender.send(packet,os_gettime_ns());
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sleepTick();
         }
         auto attempts=Decoder::testOpenCount.load()-opens;
         check(attempts>=2 && attempts<=4,"persistent decoder faults are retried with bounded backoff");
@@ -246,7 +246,7 @@ static void decoderWatchdogBackoffTest() {
         auto recoverAt=os_gettime_ns();
         for(unsigned i=0;i<40;++i){
             sender.send(packet,os_gettime_ns());
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sleepTick();
         }
         unsigned heard=0;
         for(const auto& block:capturedBlocks())if(block.timestamp>recoverAt+150000000 && block.samples.front()>.1f)++heard;

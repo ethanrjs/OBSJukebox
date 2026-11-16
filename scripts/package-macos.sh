@@ -4,8 +4,10 @@ song_root="${0:A:h:h}"
 cd "$song_root"
 : ${MAC_ARCH:=$(uname -m)}
 : ${DEPENDENCY_ROOT:="$song_root/tools/pinned"}
+geode_version=$(/usr/bin/plutil -extract geode raw -o - mod.json)
+geode_version="${geode_version#v}"
 python3 scripts/fetch-dependencies.py mac --destination "$DEPENDENCY_ROOT"
-: ${GEODE_PAYLOAD:="$DEPENDENCY_ROOT/geode-macos-5.11.2"}
+: ${GEODE_PAYLOAD:="$DEPENDENCY_ROOT/geode-macos-$geode_version"}
 : ${JUKEBOX_PACKAGE:="$DEPENDENCY_ROOT/fleym.nongd.geode"}
 : ${MOD_PACKAGE:="$song_root/build-mac/local.separate_song.geode"}
 song_version=$(/usr/bin/plutil -extract version raw -o - mod.json)
@@ -17,7 +19,7 @@ song_app="$song_stage/OBS Jukebox Setup.app"
 song_resources="$song_app/Contents/Resources"
 mkdir -p "$song_app/Contents/MacOS" "$song_resources/payload" "$song_resources/Source" "$song_root/artifacts/macos"
 swiftc -O -parse-as-library -target "$MAC_ARCH-apple-macos13.0" installer/Installer.swift -o "$song_app/Contents/MacOS/OBSJukeboxSetup"
-cat > "$song_app/Contents/Info.plist" <<PLIST
+cat > "$song_app/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>OBSJukeboxSetup</string>
@@ -46,7 +48,8 @@ mkdir -p "$song_resources/payload/geode/resources/geode.loader"
 ditto "$DEPENDENCY_ROOT/geode-resources" "$song_resources/payload/geode/resources/geode.loader"
 # Source comes from the commit, so untracked files in a developer's tree never ship.
 [[ -z "$(git status --porcelain)" ]] || print -u2 'warning: Source is taken from HEAD; uncommitted changes are not in it.'
-git archive HEAD -- src obs-plugin vendor scripts installer tools/qa .github CMakeLists.txt mod.json logo.png LICENSE README.md | tar -xf - -C "$song_resources/Source"
+source_paths=("${(@f)$(cat scripts/source-files.txt)}")
+git archive HEAD -- $source_paths | tar -xf - -C "$song_resources/Source"
 codesign --force --deep --sign - "$song_app"
 song_archive="$song_root/artifacts/macos/OBS-Jukebox-$song_version-macOS-$MAC_ARCH.zip"
 ditto -c -k --sequesterRsrc --keepParent "$song_app" "$song_archive"

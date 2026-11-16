@@ -9,13 +9,15 @@
 namespace separate_song {
 template <class Claim, class Generate>
 std::string claimLevelIdentity(std::string value, Claim claim, Generate generate) {
-    while (value.empty() || !claim(value)) value = generate();
+    while (value.empty() || !claim(value))
+        value = generate();
     return value;
 }
 
 // Any downloaded level can declare as many songs as it likes, and each ID costs a manifest read a
 // second, so the list stops at 128. A level that declares more plays only its first 128 songs here.
 inline constexpr size_t MAX_LEVEL_SONGS = 128;
+
 inline std::vector<int> levelSongIDs(int initial, std::string_view declared) {
     std::vector<int> ids{initial};
     while (!declared.empty() && ids.size() < MAX_LEVEL_SONGS) {
@@ -24,18 +26,25 @@ inline std::vector<int> levelSongIDs(int initial, std::string_view declared) {
         int id = 0;
         auto parsed = std::from_chars(token.data(), token.data() + token.size(), id);
         if (parsed.ec == std::errc{} && parsed.ptr == token.data() + token.size() && id != 0 &&
-            std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+            std::find(ids.begin(), ids.end(), id) == ids.end())
+            ids.push_back(id);
         if (end == std::string_view::npos) break;
         declared.remove_prefix(end + 1);
     }
     return ids;
 }
 
-struct MusicCandidate { int id; std::string path; };
-inline std::optional<int> songForPath(std::string_view path, const std::vector<MusicCandidate>& candidates) {
+struct MusicCandidate {
+    int id;
+    std::string path;
+};
+
+inline std::optional<int> songForPath(
+    std::string_view path, std::vector<MusicCandidate> const& candidates
+) {
     if (path.empty()) return std::nullopt;
     std::optional<int> result;
-    for (const auto& candidate : candidates) {
+    for (auto const& candidate : candidates) {
         if (candidate.path != path) continue;
         if (result && *result != candidate.id) return std::nullopt;
         result = candidate.id;

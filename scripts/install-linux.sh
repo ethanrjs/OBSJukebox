@@ -9,19 +9,43 @@ song_plugin="$song_root/payload/separate-song.so"
 song_mod="$song_root/payload/local.separate_song.geode"
 while (($#)); do
     case "$1" in
-        --game-dir) song_game="${2:?Missing game directory}"; shift 2 ;;
-        --wine-prefix) song_prefix="${2:?Missing Wine prefix}"; shift 2 ;;
-        --plugin) song_plugin="${2:?Missing plugin path}"; shift 2 ;;
-        --mod) song_mod="${2:?Missing mod path}"; shift 2 ;;
-        --uninstall) song_uninstall=1; shift ;;
-        --flatpak) song_flatpak=1; shift ;;
-        *) printf 'Usage: %s [--uninstall] [--game-dir directory] [--wine-prefix prefix] [--flatpak] [--plugin file.so] [--mod file.geode]\n' "$0" >&2; exit 1 ;;
+        --game-dir)
+            song_game="${2:?Missing game directory}"
+            shift 2
+            ;;
+        --wine-prefix)
+            song_prefix="${2:?Missing Wine prefix}"
+            shift 2
+            ;;
+        --plugin)
+            song_plugin="${2:?Missing plugin path}"
+            shift 2
+            ;;
+        --mod)
+            song_mod="${2:?Missing mod path}"
+            shift 2
+            ;;
+        --uninstall)
+            song_uninstall=1
+            shift
+            ;;
+        --flatpak)
+            song_flatpak=1
+            shift
+            ;;
+        *)
+            printf 'Usage: %s [--uninstall] [--game-dir directory] [--wine-prefix prefix] [--flatpak] [--plugin file.so] [--mod file.geode]\n' "$0" >&2
+            exit 1
+            ;;
     esac
 done
-fail() { printf '%s\n' "$1" >&2; exit 1; }
+fail() {
+    printf '%s\n' "$1" >&2
+    exit 1
+}
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || fail 'This package requires x86_64 Linux with Geometry Dash running through Proton.'
 ((EUID != 0)) || fail 'Run this installer as your normal desktop user, without sudo.'
-if pgrep -x obs >/dev/null || pgrep -fi '(^|[/\\ ])GeometryDash\.exe([ ]|$)' >/dev/null; then
+if pgrep -x obs > /dev/null || pgrep -fi '(^|[/\\ ])GeometryDash\.exe([ ]|$)' > /dev/null; then
     fail 'Close OBS and Geometry Dash, then run the installer again.'
 fi
 [[ -f "$song_root/install-state.pl" ]] || fail 'The installer is missing its undo helper.'
@@ -42,10 +66,11 @@ fi
 song_game="$(cd -- "$song_game" && pwd -P)"
 [[ -f "$song_game/Geode.dll" && -d "$song_game/geode" ]] || fail 'Install Geode for Windows into Geometry Dash first, then run the game once through Proton.'
 [[ -f "$song_root/check-geode-version.pl" ]] || fail 'The installer is missing its Geode compatibility check. Download the complete package again.'
-command -v perl >/dev/null && perl -MJSON::PP -e 1 >/dev/null 2>&1 || fail 'Install Perl (including its core JSON::PP module) with your Linux package manager, then run this installer again.'
+command -v perl > /dev/null && perl -MJSON::PP -e 1 > /dev/null 2>&1 || fail 'Install Perl (including its core JSON::PP module) with your Linux package manager, then run this installer again.'
 song_geode_version=$(perl "$song_root/check-geode-version.pl" "$song_game/Geode.dll") || fail 'Geode compatibility could not be verified. Update or repair Geode for Windows with the official installer from https://geode-sdk.org (Geode >=5.11.2 and <6.0.0), then try again. No installation files have been changed.'
 song_mods="$song_game/geode/mods"
-song_packages=$(perl -MJSON::PP - "$song_mods" <<'PERL'
+song_packages=$(
+    perl -MJSON::PP - "$song_mods" << 'PERL'
 use strict;
 use warnings;
 my ($directory) = @ARGV;
@@ -102,11 +127,11 @@ song_locals=()
 for song_saves in "$song_prefix"/drive_c/users/*/AppData/Local/GeometryDash; do
     [[ -d "$song_saves" ]] && song_locals+=("${song_saves%/GeometryDash}")
 done
-((${#song_locals[@]} || !song_flatpak)) || fail 'Run Geometry Dash once through Proton, then run the installer again.'
+((${#song_locals[@]} || ! song_flatpak)) || fail 'Run Geometry Dash once through Proton, then run the installer again.'
 song_config="${XDG_CONFIG_HOME:-$HOME/.config}"
 if ((song_flatpak)); then
-    command -v flatpak >/dev/null || fail 'Flatpak is not installed.'
-    flatpak info com.obsproject.Studio >/dev/null 2>&1 || fail 'The OBS Flatpak is not installed.'
+    command -v flatpak > /dev/null || fail 'Flatpak is not installed.'
+    flatpak info com.obsproject.Studio > /dev/null 2>&1 || fail 'The OBS Flatpak is not installed.'
     song_config="$HOME/.var/app/com.obsproject.Studio/config"
 fi
 song_destination="$song_config/obs-studio/plugins/separate-song/bin/64bit"
@@ -126,7 +151,7 @@ song_cleanup() {
     trap - EXIT HUP INT TERM
     set +e
     if ((song_committed == 0)); then
-        for ((song_i=${#song_targets[@]}-1; song_i>=0; song_i--)); do
+        for ((song_i = ${#song_targets[@]} - 1; song_i >= 0; song_i--)); do
             if [[ "${song_changed[song_i]:-0}" == 1 ]]; then
                 if [[ -n "${song_originals[song_i]:-}" ]]; then
                     if ! mv -f -- "${song_originals[song_i]}" "${song_targets[song_i]}"; then
@@ -153,7 +178,7 @@ trap 'exit 143' TERM
 mkdir -p "$song_backup"
 for song_i in "${!song_targets[@]}"; do
     song_target="${song_targets[song_i]}"
-    [[ ! -L "$song_target" && ( ! -e "$song_target" || -f "$song_target" ) ]] || fail "Installation target is not a regular file: $song_target"
+    [[ ! -L "$song_target" && (! -e "$song_target" || -f "$song_target") ]] || fail "Installation target is not a regular file: $song_target"
     song_parent="$(dirname -- "$song_target")"
     mkdir -p "$song_parent"
     song_originals[song_i]=''

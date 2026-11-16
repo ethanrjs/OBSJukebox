@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <optional>
+
 namespace separate_song::audio_tap {
 void install();
 void shutdown();

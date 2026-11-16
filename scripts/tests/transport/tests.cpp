@@ -10,39 +10,53 @@
 #include <iostream>
 #include <random>
 #ifndef _WIN32
-#include <sys/resource.h>
+    #include <sys/resource.h>
 #endif
 
-static std::string hex(const link_key::Sha256::Digest &digest) {
+static std::string hex(link_key::Sha256::Digest const& digest) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string text;
     for (auto byte : digest)
         text += {digits[byte >> 4], digits[byte & 15]};
     return text;
 }
-static std::string sha256(const std::string &data) {
+
+static std::string sha256(std::string const& data) {
     link_key::Sha256 hash;
     hash.update(data.data(), data.size());
     return hex(hash.finish());
 }
-static std::string hmac(const std::string &key, const std::string &data) {
+
+static std::string hmac(std::string const& key, std::string const& data) {
     link_key::HmacSha256 mac(key.data(), key.size());
     mac.update(data.data(), data.size());
     return hex(mac.finish());
 }
+
 // Reference values from Python's hashlib and hmac: FIPS 180-4 examples and RFC 4231 cases 1, 2 and 6.
 static void linkKeyChecks() {
     assert(sha256("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     assert(sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-    assert(sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
-           "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
-    assert(sha256(std::string(1000000, 'a')) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
-    assert(hmac(std::string(20, '\x0b'), "Hi There") ==
-           "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
-    assert(hmac("Jefe", "what do ya want for nothing?") ==
-           "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
-    assert(hmac(std::string(131, '\xaa'), "Test Using Larger Than Block-Size Key - Hash Key First") ==
-           "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+    assert(
+        sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    );
+    assert(
+        sha256(std::string(1000000, 'a')) ==
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+    );
+    assert(
+        hmac(std::string(20, '\x0b'), "Hi There") ==
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+    assert(
+        hmac("Jefe", "what do ya want for nothing?") ==
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    );
+    assert(
+        hmac(std::string(131, '\xaa'), "Test Using Larger Than Block-Size Key - Hash Key First") ==
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+    );
     // A tag covers every byte but itself, and only the same key reproduces it.
     SongLinkPacket packet;
     packet.position = 2.5;
@@ -60,17 +74,21 @@ static void linkKeyChecks() {
     packet.effectsStages[0] = {1.5f, 2048, 0, 42};
     signPacket(processLinkKey(), packet);
     assert(signedWith(processLinkKey(), packet));
-    for (auto at : {offsetof(SongLinkPacket, flags), offsetof(SongLinkPacket, stageCount),
-                    offsetof(SongLinkPacket, stages), offsetof(SongLinkPacket, effectsStages),
-                    offsetof(SongLinkPacket, tag) - 1}) {
+    for (auto at :
+         {offsetof(SongLinkPacket, flags),
+          offsetof(SongLinkPacket, stageCount),
+          offsetof(SongLinkPacket, stages),
+          offsetof(SongLinkPacket, effectsStages),
+          offsetof(SongLinkPacket, tag) - 1}) {
         changed = packet;
-        reinterpret_cast<uint8_t *>(&changed)[at] ^= 1;
+        reinterpret_cast<uint8_t*>(&changed)[at] ^= 1;
         assert(!signedWith(processLinkKey(), changed));
     }
     // The key file holds exactly 64 lowercase hex digits.
     auto file = std::filesystem::temp_directory_path() / "obs-jukebox-key-check" / "link-key";
     assert(writeLinkKey(processLinkKey(), file) && readLinkKey(file) == processLinkKey());
-    for (const char *bad : {"", "0123", "zz", "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"}) {
+    for (char const* bad :
+         {"", "0123", "zz", "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"}) {
         std::ofstream(file, std::ios::trunc) << bad;
         assert(!readLinkKey(file));
     }
@@ -78,12 +96,13 @@ static void linkKeyChecks() {
     assert(readLinkKey(file) && (*readLinkKey(file))[0] == 0xaa);
     std::filesystem::remove_all(file.parent_path());
 }
+
 // The SHA instructions, where this CPU has them, give the portable rounds' digest for every length
 // from empty to several blocks, including each padding case.
 static void shaInstructionChecks() {
     std::mt19937 random(7);
     std::string data(5000, '\0');
-    for (auto &c : data)
+    for (auto& c : data)
         c = char(random());
     for (size_t size = 0; size <= data.size(); size += size < 200 ? 1 : 97) {
         link_key::Sha256 chosen, portable;
@@ -95,9 +114,13 @@ static void shaInstructionChecks() {
     link_key::Sha256 portable;
     portable.portableOnly = true;
     portable.update("abc", 3);
-    assert(hex(portable.finish()) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-    std::cout << (link_key::hasShaInstructions() ? "SHA instructions match the portable rounds\n"
-                                                 : "No SHA instruction path for this CPU; portable rounds only\n");
+    assert(
+        hex(portable.finish()) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    std::cout
+        << (link_key::hasShaInstructions() ?
+                "SHA instructions match the portable rounds\n" :
+                "No SHA instruction path for this CPU; portable rounds only\n");
 }
 
 int main() {
@@ -154,18 +177,20 @@ int main() {
     sockaddr_in endpoint{};
     endpoint.sin_family = AF_INET;
     endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    assert(bind(listener, reinterpret_cast<sockaddr *>(&endpoint), sizeof(endpoint)) == 0);
+    assert(bind(listener, reinterpret_cast<sockaddr*>(&endpoint), sizeof(endpoint)) == 0);
 #ifdef _WIN32
     int length = sizeof(endpoint);
 #else
     socklen_t length = sizeof(endpoint);
 #endif
-    assert(getsockname(listener, reinterpret_cast<sockaddr *>(&endpoint), &length) == 0);
+    assert(getsockname(listener, reinterpret_cast<sockaddr*>(&endpoint), &length) == 0);
     assert(!waitSocketReadable(listener, 1));
     auto sender = socket(AF_INET, SOCK_DGRAM, 0);
-    assert(sendto(sender, "x", 1, 0, reinterpret_cast<sockaddr *>(&endpoint), sizeof(endpoint)) == 1);
+    assert(sendto(sender, "x", 1, 0, reinterpret_cast<sockaddr*>(&endpoint), sizeof(endpoint)) == 1);
     assert(waitSocketReadable(listener, 100));
     closeSocket(sender);
     closeSocket(listener);
-    std::cout << "PASS: SHA-256 and HMAC vectors, link key file, downmix, QA isolation/cache, socket wait" << std::endl;
+    std::cout
+        << "PASS: SHA-256 and HMAC vectors, link key file, downmix, QA isolation/cache, socket wait"
+        << std::endl;
 }

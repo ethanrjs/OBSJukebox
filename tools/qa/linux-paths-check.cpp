@@ -4,51 +4,70 @@
 #include <unistd.h>
 
 int main() {
-    namespace fs=std::filesystem;
-    auto root=fs::temp_directory_path()/("obs-jukebox-path-check-"+std::to_string(getpid()));
-    auto prefix=root/"Steam Library/steamapps/compatdata/322170/pfx";
-    auto game=root/"Steam Library/steamapps/common/Geometry Dash";
-    auto song=prefix/"drive_c/users/steamuser/AppData/Local/GeometryDash/geode/mods/fleym.nongd/nongs/Song Name.mp3";
-    fs::create_directories(song.parent_path());std::ofstream(song)<<"song";
-    fs::create_directories(game/"Resources");std::ofstream(game/"Resources/StayInsideMe.mp3")<<"game";
-    fs::create_directories(prefix/"dosdevices");
-    fs::create_directory_symlink(prefix/"drive_c",prefix/"dosdevices/c:");
-    fs::create_directory_symlink(root,prefix/"dosdevices/z:");
-    fs::create_directories(root/"config/obs-jukebox");
-    std::ofstream(root/"config/obs-jukebox/paths")<<prefix.string()<<'\n'<<game.string()<<'\n';
-    setenv("XDG_CONFIG_HOME",(root/"config").c_str(),1);
-    unsetenv("OBS_JUKEBOX_WINE_PREFIX");unsetenv("OBS_JUKEBOX_GAME_DIRECTORY");
-    unsetenv("WINEPREFIX");unsetenv("STEAM_COMPAT_DATA_PATH");
+    namespace fs = std::filesystem;
+    auto root = fs::temp_directory_path() / ("obs-jukebox-path-check-" + std::to_string(getpid()));
+    auto prefix = root / "Steam Library/steamapps/compatdata/322170/pfx";
+    auto game = root / "Steam Library/steamapps/common/Geometry Dash";
+    auto song = prefix /
+        "drive_c/users/steamuser/AppData/Local/GeometryDash/geode/mods/fleym.nongd/nongs/Song "
+        "Name.mp3";
+    fs::create_directories(song.parent_path());
+    std::ofstream(song) << "song";
+    fs::create_directories(game / "Resources");
+    std::ofstream(game / "Resources/StayInsideMe.mp3") << "game";
+    fs::create_directories(prefix / "dosdevices");
+    fs::create_directory_symlink(prefix / "drive_c", prefix / "dosdevices/c:");
+    fs::create_directory_symlink(root, prefix / "dosdevices/z:");
+    fs::create_directories(root / "config/obs-jukebox");
+    std::ofstream(root / "config/obs-jukebox/paths") << prefix.string() << '\n'
+                                                     << game.string() << '\n';
+    setenv("XDG_CONFIG_HOME", (root / "config").c_str(), 1);
+    unsetenv("OBS_JUKEBOX_WINE_PREFIX");
+    unsetenv("OBS_JUKEBOX_GAME_DIRECTORY");
+    unsetenv("WINEPREFIX");
+    unsetenv("STEAM_COMPAT_DATA_PATH");
     LinuxPaths paths;
-    auto windows="C:\\USERS\\steamuser\\appdata\\local\\geometrydash\\geode\\mods\\fleym.nongd\\nongs\\song name.mp3";
-    assert(fs::equivalent(paths.resolve(windows),song));
-    assert(fs::equivalent(paths.resolve(std::string("\\\\?\\")+windows),song));
-    assert(fs::equivalent(paths.resolve("Resources\\stayinsideme.mp3"),game/"Resources/StayInsideMe.mp3"));
-    assert(fs::equivalent(paths.resolve("Z:/Steam Library/steamapps/common/Geometry Dash/Resources/StayInsideMe.mp3"),game/"Resources/StayInsideMe.mp3"));
-    assert(paths.resolve(song.string())==song.string());
-    assert(paths.resolve("C:/missing.mp3")=="C:/missing.mp3");
-    assert(paths.resolve("C:/../outside.mp3")=="C:/../outside.mp3");
-    fs::remove(prefix/"dosdevices/c:");
-    assert(fs::equivalent(paths.resolve(windows),song));
-    setenv("OBS_JUKEBOX_WINE_PREFIX",(root/"wrong-prefix").c_str(),1);
+    auto windows =
+        "C:\\USERS\\steamuser\\appdata\\local\\geometrydash\\geode\\mods\\fleym.nongd\\nongs\\song "
+        "name.mp3";
+    assert(fs::equivalent(paths.resolve(windows), song));
+    assert(fs::equivalent(paths.resolve(std::string("\\\\?\\") + windows), song));
+    assert(
+        fs::equivalent(paths.resolve("Resources\\stayinsideme.mp3"), game / "Resources/StayInsideMe.mp3")
+    );
+    assert(
+        fs::equivalent(
+            paths.resolve("Z:/Steam Library/steamapps/common/Geometry Dash/Resources/StayInsideMe.mp3"),
+            game / "Resources/StayInsideMe.mp3"
+        )
+    );
+    assert(paths.resolve(song.string()) == song.string());
+    assert(paths.resolve("C:/missing.mp3") == "C:/missing.mp3");
+    assert(paths.resolve("C:/../outside.mp3") == "C:/../outside.mp3");
+    fs::remove(prefix / "dosdevices/c:");
+    assert(fs::equivalent(paths.resolve(windows), song));
+    setenv("OBS_JUKEBOX_WINE_PREFIX", (root / "wrong-prefix").c_str(), 1);
     assert(LinuxPaths().resolve(windows).starts_with("C:/"));
     unsetenv("OBS_JUKEBOX_WINE_PREFIX");
-    fs::remove(root/"config/obs-jukebox/paths");
-    setenv("STEAM_COMPAT_DATA_PATH",prefix.parent_path().c_str(),1);
-    assert(fs::equivalent(LinuxPaths().resolve(windows),song));
-    unsetenv("STEAM_COMPAT_DATA_PATH");setenv("WINEPREFIX",prefix.c_str(),1);
-    assert(fs::equivalent(LinuxPaths().resolve(windows),song));
+    fs::remove(root / "config/obs-jukebox/paths");
+    setenv("STEAM_COMPAT_DATA_PATH", prefix.parent_path().c_str(), 1);
+    assert(fs::equivalent(LinuxPaths().resolve(windows), song));
+    unsetenv("STEAM_COMPAT_DATA_PATH");
+    setenv("WINEPREFIX", prefix.c_str(), 1);
+    assert(fs::equivalent(LinuxPaths().resolve(windows), song));
     // The mod writes its link key in the prefix's AppData under Wine's default permissions. The plugin
     // finds it and makes its folder and file owner-only.
-    auto key=prefix/"drive_c/users/steamuser/AppData/Local/OBS Jukebox/link-key";
+    auto key = prefix / "drive_c/users/steamuser/AppData/Local/OBS Jukebox/link-key";
     assert(LinuxPaths().keyFiles().empty());
-    fs::create_directories(key.parent_path());std::ofstream(key)<<"key";
-    fs::permissions(key.parent_path(),fs::perms::all);fs::permissions(key,fs::perms::all);
-    auto keys=LinuxPaths().keyFiles();
-    assert(keys.size()==1 && fs::equivalent(keys[0],key));
-    auto shared=fs::perms::group_all|fs::perms::others_all;
-    assert((fs::status(key.parent_path()).permissions()&shared)==fs::perms::none);
-    assert((fs::status(key).permissions()&shared)==fs::perms::none);
+    fs::create_directories(key.parent_path());
+    std::ofstream(key) << "key";
+    fs::permissions(key.parent_path(), fs::perms::all);
+    fs::permissions(key, fs::perms::all);
+    auto keys = LinuxPaths().keyFiles();
+    assert(keys.size() == 1 && fs::equivalent(keys[0], key));
+    auto shared = fs::perms::group_all | fs::perms::others_all;
+    assert((fs::status(key.parent_path()).permissions() & shared) == fs::perms::none);
+    assert((fs::status(key).permissions() & shared) == fs::perms::none);
     fs::remove_all(root);
-    std::cout<<"15 path checks passed\n";
+    std::cout << "15 path checks passed\n";
 }

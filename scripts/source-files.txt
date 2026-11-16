@@ -1,0 +1,12 @@
+src
+obs-plugin
+vendor
+installer
+scripts
+tools/qa
+.github
+CMakeLists.txt
+mod.json
+logo.png
+LICENSE
+README.md

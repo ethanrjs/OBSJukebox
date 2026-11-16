@@ -22,17 +22,26 @@
 #include <Geode/modify/CCNode.hpp>
 
 using namespace geode::prelude;
+
 namespace separate_song::jukebox_link {
 namespace {
 using Clock = std::chrono::steady_clock;
+
 struct Choice {
     int id = 0, offset = 0;
     std::string uid, name, path;
     bool original = false;
 };
-struct Request { bool pending = false; std::string error; Clock::time_point started{}; };
+
+struct Request {
+    bool pending = false;
+    std::string error;
+    Clock::time_point started{};
+};
+
 std::unordered_map<std::string, Request> requests;
 std::unordered_map<std::string, Choice> addedSongs;
+
 struct CachedPlayback {
     std::optional<Choice> obs;
     Choice game;
@@ -40,35 +49,65 @@ struct CachedPlayback {
     bool obsReady = false;
     Clock::time_point read{};
 };
+
 std::unordered_map<int, CachedPlayback> playback;
-void invalidate(int id) { playback.erase(id); }
+
+void invalidate(int id) {
+    playback.erase(id);
+}
 
 struct CellAccess : jukebox::NongCell {
-    static int id(jukebox::NongCell* c) { return c->*(&CellAccess::m_songID); }
-    static std::string uid(jukebox::NongCell* c) { return c->*(&CellAccess::m_uniqueID); }
-    static bool original(jukebox::NongCell* c) { return c->*(&CellAccess::m_isDefault); }
-    static jukebox::NongCellUI* ui(jukebox::NongCell* c) { return (c->*(&CellAccess::m_nongCell)).data(); }
+    static int id(jukebox::NongCell* c) {
+        return c->*(&CellAccess::m_songID);
+    }
+
+    static std::string uid(jukebox::NongCell* c) {
+        return c->*(&CellAccess::m_uniqueID);
+    }
+
+    static bool original(jukebox::NongCell* c) {
+        return c->*(&CellAccess::m_isDefault);
+    }
+
+    static jukebox::NongCellUI* ui(jukebox::NongCell* c) {
+        return (c->*(&CellAccess::m_nongCell)).data();
+    }
+
     static std::optional<jukebox::index::IndexSongMetadata*> index(jukebox::NongCell* c) {
         return c->*(&CellAccess::m_indexSongMetadataOpt);
     }
 };
+
 struct UIAccess : jukebox::NongCellUI {
-    static CCMenu* buttons(jukebox::NongCellUI* ui) { return ui->*(&UIAccess::m_buttonsMenu); }
-    static CCMenuItemSpriteExtra* selected(jukebox::NongCellUI* ui) { return ui->*(&UIAccess::m_selectButton); }
-    static CCNode* songInfo(jukebox::NongCellUI* ui) { return ui->*(&UIAccess::m_songInfoNode); }
+    static CCMenu* buttons(jukebox::NongCellUI* ui) {
+        return ui->*(&UIAccess::m_buttonsMenu);
+    }
+
+    static CCMenuItemSpriteExtra* selected(jukebox::NongCellUI* ui) {
+        return ui->*(&UIAccess::m_selectButton);
+    }
+
+    static CCNode* songInfo(jukebox::NongCellUI* ui) {
+        return ui->*(&UIAccess::m_songInfoNode);
+    }
 };
+
 // Rows where Jukebox hides its Game button (e.g. "Download nongs") get no OBS checkbox
 // and can't be picked for OBS by right-click.
 bool gameButtonShown(jukebox::NongCellUI* ui) {
     auto gameCheck = UIAccess::selected(ui);
     return gameCheck && gameCheck->isVisible();
 }
+
 // GD and Jukebox hand over UTF-8 in practice, but nothing guarantees it, and on Windows building a
 // path from anything else throws. Callers treat nullopt as a missing file.
 std::optional<std::filesystem::path> utf8Path(std::string_view path) {
     if (!validUtf8(path)) return std::nullopt;
-    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size()));
+    return std::filesystem::path(
+        std::u8string(reinterpret_cast<char8_t const*>(path.data()), path.size())
+    );
 }
+
 // Filesystem and JSON work never runs on the game/sampling thread. Results are
 // copied under a short lock; failed manifest reads retain the last good value.
 class FileCache {
@@ -78,6 +117,7 @@ class FileCache {
         bool pending = false;
         Clock::time_point checked{}, used{};
     };
+
     std::mutex mutex;
     std::condition_variable wake;
     std::unordered_map<std::string, Entry> entries;
@@ -85,23 +125,28 @@ class FileCache {
     bool stopping = false;
     Clock::time_point lastPrune{};
     std::thread worker;
+
     // Once there are many entries, drops those nobody asked for in a minute, so a long session over
     // many levels doesn't keep every path it ever saw. Runs at most every 10 s.
     void prune(Clock::time_point now) {
         if (entries.size() <= 1024 || now - lastPrune < std::chrono::seconds(10)) return;
         lastPrune = now;
-        std::erase_if(entries, [&](const auto& item) {
+        std::erase_if(entries, [&](auto const& item) {
             return !item.second.pending && now - item.second.used > std::chrono::minutes(1);
         });
     }
+
     void run() {
         for (;;) {
             std::pair<std::string, bool> job;
             {
                 std::unique_lock lock(mutex);
-                wake.wait(lock, [this] { return stopping || !jobs.empty(); });
+                wake.wait(lock, [this] {
+                    return stopping || !jobs.empty();
+                });
                 if (stopping) return;
-                job = std::move(jobs.front()); jobs.pop_front();
+                job = std::move(jobs.front());
+                jobs.pop_front();
             }
             bool present = false;
             std::optional<matjson::Value> parsed;
@@ -109,7 +154,8 @@ class FileCache {
                 if (job.second) {
                     auto result = file::readJson(*path);
                     if (result && result.unwrap().isObject()) parsed = result.unwrap();
-                } else {
+                }
+                else {
                     std::error_code error;
                     present = std::filesystem::is_regular_file(*path, error) &&
                         std::filesystem::file_size(*path, error) > 0 && !error;
@@ -123,19 +169,29 @@ class FileCache {
             entry.checked = Clock::now();
         }
     }
+
 public:
-    FileCache() : worker([this] { run(); }) {}
+    FileCache() :
+        worker([this] {
+            run();
+        }) {}
+
     void shutdown() {
-        { std::lock_guard lock(mutex); stopping = true; }
+        {
+            std::lock_guard lock(mutex);
+            stopping = true;
+        }
         wake.notify_one();
         if (worker.joinable()) worker.join();
     }
-    bool known(const std::string& path) {
+
+    bool known(std::string const& path) {
         std::lock_guard lock(mutex);
         auto found = entries.find(path);
         return found != entries.end() && found->second.checked != Clock::time_point{};
     }
-    std::pair<bool, matjson::Value> get(const std::string& path, bool json = false) {
+
+    std::pair<bool, matjson::Value> get(std::string const& path, bool json = false) {
         if (path.empty()) return {};
         std::lock_guard lock(mutex);
         auto now = Clock::now();
@@ -150,100 +206,150 @@ public:
         return {entry.exists, entry.json};
     }
 };
+
 // Shutdown is explicit before the game exits, never joined under the DLL loader lock.
-FileCache& files() { static auto cache = new FileCache(); return *cache; }
-bool exists(const std::string& path) { return files().get(path).first; }
-std::filesystem::path base() { return Loader::get()->getLoadedMod("fleym.nongd")->getSaveDir(); }
+FileCache& files() {
+    static auto cache = new FileCache();
+    return *cache;
+}
+
+bool exists(std::string const& path) {
+    return files().get(path).first;
+}
+
+std::filesystem::path base() {
+    return Loader::get()->getLoadedMod("fleym.nongd")->getSaveDir();
+}
+
 // CellAccess and UIAccess read Jukebox's protected fields using the vendored headers for
 // JUKEBOX_VERSION (set in CMakeLists.txt). Geode lets the dependency update to any newer 3.x, so
 // skip the row UI on other builds.
 bool cellLayoutMatches() {
-    static const bool matches = [] {
+    static bool const matches = [] {
         auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
         if (!dependency) return false;
         auto version = dependency->getVersion();
         bool ok = version.toNonVString() == JUKEBOX_VERSION;
-        if (!ok) log::warn("Jukebox {} is not {}; OBS Jukebox integration is disabled; following game audio",
-                           version.toVString(), JUKEBOX_VERSION);
+        if (!ok)
+            log::warn(
+                "Jukebox {} is not {}; OBS Jukebox integration is disabled; following game audio",
+                version.toVString(),
+                JUKEBOX_VERSION
+            );
         return ok;
     }();
     return matches;
 }
-std::string key(int id, const std::string& uid) { return fmt::format("{}:{}", id, uid); }
-matjson::Value saved() { return Mod::get()->getSavedValue<matjson::Value>("obs-selections", matjson::Value::object()); }
+
+std::string key(int id, std::string const& uid) {
+    return fmt::format("{}:{}", id, uid);
+}
+
+matjson::Value saved() {
+    return Mod::get()->getSavedValue<matjson::Value>("obs-selections", matjson::Value::object());
+}
+
 std::optional<Choice> choice(int id) {
-    auto data = saved(); auto k = std::to_string(id);
+    auto data = saved();
+    auto k = std::to_string(id);
     if (!data.contains(k)) return std::nullopt;
-    auto v = data[k];
-    Choice c{id, static_cast<int>(v["offset"].asInt().unwrapOr(0)),
-             v["uid"].asString().unwrapOr(""), v["name"].asString().unwrapOr("OBS song"),
-             v["path"].asString().unwrapOr(""), v["original"].asBool().unwrapOr(false)};
+    auto const& v = data[k];
+    Choice c{
+        id,
+        static_cast<int>(v["offset"].asInt().unwrapOr(0)),
+        v["uid"].asString().unwrapOr(""),
+        v["name"].asString().unwrapOr("OBS song"),
+        v["path"].asString().unwrapOr(""),
+        v["original"].asBool().unwrapOr(false)
+    };
     if (c.uid.empty()) return std::nullopt;
     return c;
 }
-void store(const Choice& c) {
+
+void store(Choice const& c) {
     auto data = saved();
-    data[std::to_string(c.id)] = matjson::makeObject({{"uid", c.uid}, {"name", c.name},
-        {"path", c.path}, {"offset", c.offset}, {"original", c.original}});
+    data[std::to_string(c.id)] = matjson::makeObject(
+        {{"uid", c.uid}, {"name", c.name}, {"path", c.path}, {"offset", c.offset}, {"original", c.original}}
+    );
     Mod::get()->setSavedValue("obs-selections", data);
     invalidate(c.id);
 }
+
 void clear(int id) {
-    auto data = saved(); data.erase(std::to_string(id));
+    auto data = saved();
+    data.erase(std::to_string(id));
     Mod::get()->setSavedValue("obs-selections", data);
     invalidate(id);
 }
-std::string manifestPath(int id) { return string::pathToString(base()/"manifest"/fmt::format("{}.json", id)); }
+
+std::string manifestPath(int id) {
+    return string::pathToString(base() / "manifest" / fmt::format("{}.json", id));
+}
+
 matjson::Value manifest(int id) {
     if (!cellLayoutMatches()) return {};
     return files().get(manifestPath(id), true).second;
 }
-matjson::Value find(const matjson::Value& data, const std::string& uid, bool original = false) {
-    if (original || data["default"]["unique_id"].asString().unwrapOr("") == uid) return data["default"];
-    for (const char* group : {"locals", "hosted", "youtube"}) {
+
+matjson::Value find(matjson::Value const& data, std::string const& uid, bool original = false) {
+    if (original || data["default"]["unique_id"].asString().unwrapOr("") == uid)
+        return data["default"];
+    for (char const* group : {"locals", "hosted", "youtube"}) {
         if (!data[group].isArray()) continue;
-        for (const auto& v : data[group].asArray().unwrap())
+        for (auto const& v : data[group].asArray().unwrap())
             if (v["unique_id"].asString().unwrapOr("") == uid) return v;
     }
     return matjson::Value();
 }
+
 // Jukebox opens local and hosted songs from nongs/<filename> when the entry has one, and uses the
 // stored absolute path only without it (nong_serialize.hpp), so a moved save folder still plays its
 // own copy. YouTube entries have no filename, and GD's original song keeps its stored path.
-std::string pathFor(const matjson::Value& song, bool original) {
+std::string pathFor(matjson::Value const& song, bool original) {
     auto path = song["path"].asString().unwrapOr("");
     auto name = song["filename"].asString().unwrapOr("");
     auto inNongs = name.empty() ? std::nullopt : utf8Path(name);
-    if (!original && inNongs) return string::pathToString(base()/"nongs"/ *inNongs);
+    if (!original && inNongs) return string::pathToString(base() / "nongs" / *inNongs);
     if (!path.empty() && (exists(path) || !files().known(path))) return path;
-    if (inNongs) return string::pathToString(base()/"nongs"/ *inNongs);
+    if (inNongs) return string::pathToString(base() / "nongs" / *inNongs);
     return path;
 }
+
 std::string originalPath(int id) {
     if (id < 0) {
-        auto name = LevelTools::getAudioFileName(-id-1);
+        auto name = LevelTools::getAudioFileName(-id - 1);
         return CCFileUtils::get()->fullPathForFilename(name.c_str(), false);
     }
-    auto folder = utf8Path(MusicDownloadManager::sharedState()->pathForSongFolder(id).c_str());
+    auto folder = utf8Path(MusicDownloadManager::sharedState()->pathForSongFolder(id));
     if (!folder) return {};
-    auto name = string::pathToString(*folder / fmt::format("{}.{}", id, id > 9999999 ? "ogg" : "mp3"));
+    auto name =
+        string::pathToString(*folder / fmt::format("{}.{}", id, id > 9999999 ? "ogg" : "mp3"));
     return CCFileUtils::get()->fullPathForFilename(name.c_str(), false);
 }
+
 Choice resolved(Choice c) {
     auto meta = find(manifest(c.id), c.uid, c.original);
     if (meta.isObject()) {
         c.name = meta["name"].asString().unwrapOr(c.name);
         c.offset = static_cast<int>(meta["offset"].asInt().unwrapOr(c.offset));
-        auto p = pathFor(meta, c.original); if (!p.empty()) c.path = p;
-    } else if (auto it = addedSongs.find(key(c.id,c.uid)); it != addedSongs.end()) {
-        c.name = it->second.name; c.offset = it->second.offset;
+        auto p = pathFor(meta, c.original);
+        if (!p.empty()) c.path = p;
+    }
+    else if (auto it = addedSongs.find(key(c.id, c.uid)); it != addedSongs.end()) {
+        c.name = it->second.name;
+        c.offset = it->second.offset;
         if (!it->second.path.empty()) c.path = it->second.path;
     }
-    if (c.original && (c.path.empty() || (files().known(c.path) && !exists(c.path)))) c.path = originalPath(c.id);
+    if (c.original && (c.path.empty() || (files().known(c.path) && !exists(c.path))))
+        c.path = originalPath(c.id);
     return c;
 }
-int songID(GJGameLevel* level) { return level->m_songID > 0 ? level->m_songID : -level->m_audioTrack-1; }
-std::string normalizedMusicPath(const std::string& path) {
+
+int songID(GJGameLevel* level) {
+    return level->m_songID > 0 ? level->m_songID : -level->m_audioTrack - 1;
+}
+
+std::string normalizedMusicPath(std::string const& path) {
     if (path.empty()) return {};
     static std::unordered_map<std::string, std::string> normalized;
     if (auto found = normalized.find(path); found != normalized.end()) return found->second;
@@ -254,15 +360,22 @@ std::string normalizedMusicPath(const std::string& path) {
     auto value = string::pathToString(file->lexically_normal());
     std::replace(value.begin(), value.end(), '\\', '/');
 #ifdef GEODE_IS_WINDOWS
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return std::tolower(c);
+    });
 #endif
     normalized[path] = value;
     return value;
 }
+
 std::unordered_map<std::string, std::pair<Choice, bool>> deferredDownloads;
+
 std::string download(Choice c, bool retry) {
     c = resolved(c);
-    if (exists(c.path)) { requests.erase(key(c.id, c.uid)); return ""; }
+    if (exists(c.path)) {
+        requests.erase(key(c.id, c.uid));
+        return "";
+    }
     auto k = key(c.id, c.uid);
     if ((!c.path.empty() && !files().known(c.path)) || !files().known(manifestPath(c.id))) {
         deferredDownloads[k] = {c, retry};
@@ -277,31 +390,47 @@ std::string download(Choice c, bool retry) {
     if (c.original && c.id > 0) MusicDownloadManager::sharedState()->downloadSong(c.id);
     else if (c.original) request = {false, "Original song file is unavailable."};
     else if ([&] {
-        auto locals = manifest(c.id)["locals"];
-        if (!locals.isArray()) return false;
-        for (const auto& local : locals.asArray().unwrap())
-            if (local["unique_id"].asString().unwrapOr("") == c.uid) return true;
-        return false;
-    }())
+                 auto locals = manifest(c.id)["locals"];
+                 if (!locals.isArray()) return false;
+                 for (auto const& local : locals.asArray().unwrap())
+                     if (local["unique_id"].asString().unwrapOr("") == c.uid) return true;
+                 return false;
+             }())
         request = {false, "Local song file is unavailable.\nChoose an existing file in Jukebox."};
     // Jukebox makes every song it finishes downloading GD's active song, so asking it to fetch the
     // OBS song would switch the song GD plays. The user downloads it in Jukebox, which switches it
     // too, so the message says to pick the Game song again.
-    else request = {false, "OBS song audio is missing.\nDownload it in Jukebox, then pick your Game song again."};
+    else
+        request = {
+            false,
+            "OBS song audio is missing.\nDownload it in Jukebox, then pick your Game song again."
+        };
     return requests[k].error;
 }
+
 Choice active(int id) {
-    auto m = manifest(id); auto uid = m["active"].asString().unwrapOr("");
-    auto v = find(m, uid); bool original = uid.empty() || uid == m["default"]["unique_id"].asString().unwrapOr("");
-    Choice c{id, static_cast<int>(v["offset"].asInt().unwrapOr(0)), uid,
-        v["name"].asString().unwrapOr("In-game song"), pathFor(v, original), original};
-    if (original && (c.path.empty() || (files().known(c.path) && !exists(c.path)))) c.path = originalPath(id);
+    auto m = manifest(id);
+    auto uid = m["active"].asString().unwrapOr("");
+    auto v = find(m, uid);
+    bool original = uid.empty() || uid == m["default"]["unique_id"].asString().unwrapOr("");
+    Choice c{
+        id,
+        static_cast<int>(v["offset"].asInt().unwrapOr(0)),
+        uid,
+        v["name"].asString().unwrapOr("In-game song"),
+        pathFor(v, original),
+        original
+    };
+    if (original && (c.path.empty() || (files().known(c.path) && !exists(c.path))))
+        c.path = originalPath(id);
     return c;
 }
+
 CachedPlayback& forPlayback(int id) {
     auto now = Clock::now();
-    if (auto found = playback.find(id); found != playback.end() &&
-        now-found->second.read < std::chrono::seconds(1)) return found->second;
+    if (auto found = playback.find(id);
+        found != playback.end() && now - found->second.read < std::chrono::seconds(1))
+        return found->second;
     CachedPlayback value;
     value.read = now;
     value.game = active(id);
@@ -317,28 +446,43 @@ CachedPlayback& forPlayback(int id) {
 // The open Jukebox list. Not a WeakRef: assigning a WeakRef that already holds an object
 // repoints its controller without retaining the new one, which left this dangling once the
 // second list opened was closed. Heap-held so no release runs during static teardown.
-Ref<CCNode>& visibleList() { static auto list = new Ref<CCNode>(); return *list; }
+Ref<CCNode>& visibleList() {
+    static auto list = new Ref<CCNode>();
+    return *list;
+}
+
 CCNode* findList(CCNode* scene) {
     auto list = visibleList();
     if (!list) return nullptr;
-    if (!list->isRunning()) { visibleList() = nullptr; return nullptr; }
+    if (!list->isRunning()) {
+        visibleList() = nullptr;
+        return nullptr;
+    }
     for (auto node = list.data(); node; node = node->getParent()) {
         if (!node->isVisible()) return nullptr;
         if (node == scene) return list.data();
     }
     return nullptr;
 }
+
 bool unobscured(CCNode* scene, CCNode* list) {
     CCNode* owner = list;
-    while (owner->getParent() && owner->getParent() != scene) owner = owner->getParent();
+    while (owner->getParent() && owner->getParent() != scene)
+        owner = owner->getParent();
     bool afterOwner = false;
     for (auto child : CCArrayExt<CCNode*>(scene->getChildren())) {
-        if (child == owner) { afterOwner = true; continue; }
+        if (child == owner) {
+            afterOwner = true;
+            continue;
+        }
         if (child->isVisible() && typeinfo_cast<FLAlertLayer*>(child) &&
-            (child->getZOrder() > owner->getZOrder() || (afterOwner && child->getZOrder() == owner->getZOrder()))) return false;
+            (child->getZOrder() > owner->getZOrder() ||
+             (afterOwner && child->getZOrder() == owner->getZOrder())))
+            return false;
     }
     return true;
 }
+
 std::vector<jukebox::NongCell*> cells(CCNode* list) {
     std::vector<jukebox::NongCell*> out;
     auto scroll = list->getChildByID("list");
@@ -352,7 +496,9 @@ std::vector<jukebox::NongCell*> cells(CCNode* list) {
         if (auto cell = typeinfo_cast<jukebox::NongCell*>(child)) out.push_back(cell);
     return out;
 }
+
 void select(jukebox::NongCell* cell);
+
 class OBSRowControl : public CCNode {
     jukebox::NongCell* m_cell = nullptr;
     Ref<CCMenuItemSpriteExtra> m_checkbox;
@@ -360,15 +506,23 @@ class OBSRowControl : public CCNode {
     CCLabelBMFont* m_gameLabel = nullptr;
     CCLabelBMFont* m_obsLabel = nullptr;
     bool m_checked = false;
+
 public:
     static OBSRowControl* create(jukebox::NongCell* cell) {
         auto control = new OBSRowControl();
-        if (!control->init()) { delete control; return nullptr; }
-        control->autorelease(); control->m_cell = cell;
-        control->setID("control"_spr); control->setZOrder(20);
+        if (!control->init()) {
+            delete control;
+            return nullptr;
+        }
+        control->autorelease();
+        control->m_cell = cell;
+        control->setID("control"_spr);
+        control->setZOrder(20);
         control->m_sprite = CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
         control->m_sprite->setScale(.7f);
-        control->m_checkbox = CCMenuItemSpriteExtra::create(control->m_sprite, control, menu_selector(OBSRowControl::onSelect));
+        control->m_checkbox = CCMenuItemSpriteExtra::create(
+            control->m_sprite, control, menu_selector(OBSRowControl::onSelect)
+        );
         control->m_checkbox->setID("checkbox"_spr);
         control->m_checkbox->setContentSize({30.f, 30.f});
         control->m_sprite->setPosition({15.f, 15.f});
@@ -383,28 +537,39 @@ public:
         control->scheduleUpdate();
         return control;
     }
+
     // Jukebox rebuilds the row's buttons menu when the Game song changes, dropping the checkbox.
     // The scheduler runs before drawing, so re-syncing here restores it in the same frame.
     // A rebuild destroys the old menu, which clears the checkbox's parent, so these two checks
     // catch every rebuild. Otherwise the row is still as sync() left it.
     void update(float) override {
-        auto ui = CellAccess::ui(m_cell); if (!ui) return;
-        if (m_checkbox->getParent() == UIAccess::buttons(ui) && m_checkbox->isVisible() == gameButtonShown(ui)) return;
+        auto ui = CellAccess::ui(m_cell);
+        if (!ui) return;
+        if (m_checkbox->getParent() == UIAccess::buttons(ui) &&
+            m_checkbox->isVisible() == gameButtonShown(ui))
+            return;
         sync(ui, m_checked);
     }
+
     void onExit() override {
         // The checkbox lives in Jukebox's menu; detach it before its target dies.
         m_checkbox->setEnabled(false);
         m_checkbox->removeFromParent();
         CCNode::onExit();
     }
+
     void onEnter() override {
         CCNode::onEnter();
         m_checkbox->setEnabled(true);
     }
-    void onSelect(CCObject*) { if (m_cell && isRunning()) select(m_cell); }
+
+    void onSelect(CCObject*) {
+        if (m_cell && isRunning()) select(m_cell);
+    }
+
     void sync(jukebox::NongCellUI* ui, bool checked) {
-        auto menu = UIAccess::buttons(ui); auto gameCheck = UIAccess::selected(ui);
+        auto menu = UIAccess::buttons(ui);
+        auto gameCheck = UIAccess::selected(ui);
         if (!menu || !gameCheck) return;
         // The menu skips invisible children, so hidden rows keep Jukebox's own layout.
         bool shown = gameButtonShown(ui);
@@ -414,13 +579,16 @@ public:
             menu->insertAfter(m_checkbox.data(), gameCheck);
             relayout = true;
         }
-        if (m_checkbox->isVisible() != shown) { m_checkbox->setVisible(shown); relayout = true; }
+        if (m_checkbox->isVisible() != shown) {
+            m_checkbox->setVisible(shown);
+            relayout = true;
+        }
         // The flag lives on the menu but also covers the song info node: Jukebox 3.8.0's build()
         // recreates both together and only sets the Game button's visibility there.
         if (shown && !menu->getUserFlag("widened"_spr)) {
             menu->setUserFlag("widened"_spr);
             // The checkbox plus Jukebox 3.8.0's row gap (setGap(5.f) in upstream nong_cell_ui.cpp).
-            const float widen = m_checkbox->getContentWidth() + 5.f;
+            float const widen = m_checkbox->getContentWidth() + 5.f;
             menu->setContentWidth(menu->getContentWidth() + widen);
             if (auto info = UIAccess::songInfo(ui)) {
                 info->setContentWidth(std::max(0.f, info->getContentWidth() - widen));
@@ -430,42 +598,66 @@ public:
         }
         if (relayout) {
             menu->updateLayout();
-            m_gameLabel->setPosition(convertToNodeSpace(menu->convertToWorldSpace(gameCheck->getPosition()))+CCPoint{0,-23});
+            m_gameLabel->setPosition(
+                convertToNodeSpace(menu->convertToWorldSpace(gameCheck->getPosition())) +
+                CCPoint{0, -23}
+            );
             m_gameLabel->setVisible(shown);
-            m_obsLabel->setPosition(convertToNodeSpace(menu->convertToWorldSpace(m_checkbox->getPosition()))+CCPoint{0,-23});
+            m_obsLabel->setPosition(
+                convertToNodeSpace(menu->convertToWorldSpace(m_checkbox->getPosition())) +
+                CCPoint{0, -23}
+            );
             m_obsLabel->setVisible(shown);
         }
         if (checked != m_checked) {
             m_checked = checked;
-            m_sprite->setDisplayFrame(CCSpriteFrameCache::sharedSpriteFrameCache()->spriteFrameByName(
-                checked ? "GJ_checkOn_001.png" : "GJ_checkOff_001.png"));
+            m_sprite->setDisplayFrame(
+                CCSpriteFrameCache::sharedSpriteFrameCache()->spriteFrameByName(
+                    checked ? "GJ_checkOn_001.png" : "GJ_checkOff_001.png"
+                )
+            );
             m_sprite->setPosition({15.f, 15.f});
         }
     }
 };
+
 void paint(jukebox::NongCell* cell) {
-    auto ui = CellAccess::ui(cell); if (!ui) return;
+    auto ui = CellAccess::ui(cell);
+    if (!ui) return;
     bool checked = false;
     if (auto c = choice(CellAccess::id(cell)))
         checked = c->uid == CellAccess::uid(cell) || (c->original && CellAccess::original(cell));
     auto control = static_cast<OBSRowControl*>(cell->getChildByID("control"_spr));
-    if (!control) { control = OBSRowControl::create(cell); if (!control) return; cell->addChild(control); }
+    if (!control) {
+        control = OBSRowControl::create(cell);
+        if (!control) return;
+        cell->addChild(control);
+    }
     control->sync(ui, checked);
 }
+
 void select(jukebox::NongCell* cell) {
-    auto ui = CellAccess::ui(cell); if (!ui) return;
-    Choice c; c.id = CellAccess::id(cell); c.uid = CellAccess::uid(cell); c.original = CellAccess::original(cell);
+    auto ui = CellAccess::ui(cell);
+    if (!ui) return;
+    Choice c;
+    c.id = CellAccess::id(cell);
+    c.uid = CellAccess::uid(cell);
+    c.original = CellAccess::original(cell);
     c.name = ui->m_songName;
     if (auto old = choice(c.id); old && (old->uid == c.uid || (old->original && c.original))) {
-        clear(c.id); return;
+        clear(c.id);
+        return;
     }
     // Jukebox's index serializer can leave parentID null; without it the path falls back to the manifest.
     if (auto index = CellAccess::index(cell); index && *index) {
         c.offset = (*index)->startOffset;
         if ((*index)->parentID)
-            c.path = string::pathToString(base()/"nongs"/fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid));
+            c.path = string::pathToString(
+                base() / "nongs" / fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid)
+            );
     }
-    c = resolved(c); store(c);
+    c = resolved(c);
+    store(c);
     // Only rows with a Game button can be picked, and Jukebox lists those because it stores the
     // song. Asking it to download one fails with "already downloaded" whenever the async file
     // cache has not caught up. GD's original song is the only one that may still be missing.
@@ -475,18 +667,30 @@ void select(jukebox::NongCell* cell) {
 }
 }
 
-void shutdown() { files().shutdown(); }
+void shutdown() {
+    files().shutdown();
+}
+
 void showVersionNotice() {
     static bool shown = false;
     if (shown || cellLayoutMatches() || !Mod::get()->getSettingValue<bool>("enabled")) return;
     shown = true;
     auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
     auto found = dependency ? dependency->getVersion().toVString() : std::string("none");
-    Notification::create(fmt::format("OBS Jukebox doesn't support Jukebox {} yet.\nOBS plays the game's song.", found),
-                         NotificationIcon::Warning, 6.f)->show();
+    Notification::create(
+        fmt::format("OBS Jukebox doesn't support Jukebox {} yet.\nOBS plays the game's song.", found),
+        NotificationIcon::Warning,
+        6.f
+    )
+        ->show();
 }
+
 // No Jukebox list can be open during unpaused gameplay.
-bool inGameplay() { auto play = PlayLayer::get(); return play && !play->m_isPaused; }
+bool inGameplay() {
+    auto play = PlayLayer::get();
+    return play && !play->m_isPaused;
+}
+
 void refreshUI() {
     static auto lastRequestCheck = Clock::time_point{};
     if (Clock::now() - lastRequestCheck >= std::chrono::seconds(1)) {
@@ -498,14 +702,19 @@ void refreshUI() {
     if (!deferredDownloads.empty()) {
         auto pending = std::move(deferredDownloads);
         deferredDownloads.clear();
-        for (auto& [key, entry] : pending) download(entry.first, entry.second);
+        for (auto& [key, entry] : pending)
+            download(entry.first, entry.second);
     }
     if (inGameplay()) return;
     if (!cellLayoutMatches()) return;
-    auto scene = CCDirector::get()->getRunningScene(); if (!scene) return;
-    auto list = findList(scene); if (!list) return;
-    for (auto cell : cells(list)) paint(cell);
+    auto scene = CCDirector::get()->getRunningScene();
+    if (!scene) return;
+    auto list = findList(scene);
+    if (!list) return;
+    for (auto cell : cells(list))
+        paint(cell);
 }
+
 // Rows get their OBS checkbox as they enter, so a new list or a search rebuild never draws a
 // frame of Jukebox's plain layout while waiting for refreshUI(). This runs for every node that
 // enters a scene, so it leaves gameplay alone and checks types rather than calling getID(),
@@ -515,13 +724,15 @@ void observeList(CCNode* node) {
     if (!cellLayoutMatches()) return;
     if (auto list = typeinfo_cast<jukebox::NongList*>(node)) {
         visibleList() = list;
-        for (auto cell : cells(list)) paint(cell);
+        for (auto cell : cells(list))
+            paint(cell);
         return;
     }
     auto& list = visibleList();
     if (!list || !list->isRunning()) return;
     if (auto cell = typeinfo_cast<jukebox::NongCell*>(node)) paint(cell);
 }
+
 Readiness prepare(GJGameLevel* level, bool retry) {
     if (!Mod::get()->getSettingValue<bool>("enabled") || !level || !cellLayoutMatches()) return {};
     int id = songID(level);
@@ -535,78 +746,122 @@ Readiness prepare(GJGameLevel* level, bool retry) {
     if (!cached.obs->path.empty() && !files().known(cached.obs->path)) return {false, ""};
     return {false, error.empty() ? "OBS replacement unavailable" : error};
 }
+
 LevelSongs snapshotSongs(GJGameLevel* level) {
     int id = songID(level);
-    return levelSongIDs(id, std::string(level->m_songIDs));
+    return levelSongIDs(id, level->m_songIDs);
 }
-bool fill(Snapshot& state, const LevelSongs* songs, const MusicSource& source) {
-    state.path.clear(); state.song.clear();
+
+bool fill(Snapshot& state, LevelSongs const* songs, MusicSource const& source) {
+    state.path.clear();
+    state.song.clear();
     if (!songs) return false;
     // GD's own file, by full path: GD keeps built-in songs as names relative to its resources.
     auto gameSong = [&] {
         state.song = "In-game song";
-        if (!source.path.empty()) state.path = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
+        if (!source.path.empty())
+            state.path = CCFileUtils::get()->fullPathForFilename(source.path.c_str(), false);
     };
-    if (!cellLayoutMatches()) { gameSong(); return false; }
+    if (!cellLayoutMatches()) {
+        gameSong();
+        return false;
+    }
     if (source.path.empty()) return false;
     std::vector<MusicCandidate> candidates;
-    for (const auto* ids : {songs, &source.extraIDs})
-        for (int id : *ids) candidates.push_back({id, forPlayback(id).normalizedGamePath});
-    const auto gamePath = normalizedMusicPath(source.path);
+    for (auto const* ids : {songs, &source.extraIDs})
+        for (int id : *ids)
+            candidates.push_back({id, forPlayback(id).normalizedGamePath});
+    auto const gamePath = normalizedMusicPath(source.path);
     auto matched = songForPath(gamePath, candidates);
-    if (!matched) { gameSong(); return false; }
-    const auto& cached = forPlayback(*matched);
-    if (!cached.obs || !cached.obsReady) { gameSong(); return false; }
+    if (!matched) {
+        gameSong();
+        return false;
+    }
+    auto const& cached = forPlayback(*matched);
+    if (!cached.obs || !cached.obsReady) {
+        gameSong();
+        return false;
+    }
     state.song = cached.obs->name;
     state.path = cached.obs->path;
     state.offset += (cached.obs->offset - cached.game.offset) / 1000.0;
     return normalizedMusicPath(cached.obs->path) != gamePath;
 }
+
 void initialize() {
     if (!cellLayoutMatches()) return;
-    jukebox::event::IndexesLoaded().listen([] {
-        playback.clear();
-        for (auto& [key, request] : requests)
-            if (!request.pending) request.error.clear();
-    }).leak();
-    jukebox::event::SongStateChanged().listen([](const jukebox::event::SongStateChangedData&) {
-        playback.clear();
-    }).leak();
-    jukebox::event::ManualSongAdded().listen([](const jukebox::event::ManualSongAddedData& event) {
-        auto song = event.song(); auto meta = song->metadata();
-        addedSongs[key(meta->gdID,meta->uniqueID)] = {meta->gdID,meta->startOffset,meta->uniqueID,meta->name,
-            song->path().has_value()?string::pathToString(*song->path()):"",false};
-        invalidate(meta->gdID);
-    }).leak();
+    jukebox::event::IndexesLoaded()
+        .listen([] {
+            playback.clear();
+            for (auto& [key, request] : requests)
+                if (!request.pending) request.error.clear();
+        })
+        .leak();
+    jukebox::event::SongStateChanged()
+        .listen([](jukebox::event::SongStateChangedData const&) {
+            playback.clear();
+        })
+        .leak();
+    jukebox::event::ManualSongAdded()
+        .listen([](jukebox::event::ManualSongAddedData const& event) {
+            auto song = event.song();
+            auto meta = song->metadata();
+            addedSongs[key(meta->gdID, meta->uniqueID)] = {
+                meta->gdID,
+                meta->startOffset,
+                meta->uniqueID,
+                meta->name,
+                song->path().has_value() ? string::pathToString(*song->path()) : "",
+                false
+            };
+            invalidate(meta->gdID);
+        })
+        .leak();
 #ifndef GEODE_IS_MACOS
-    MouseInputEvent().listen([](MouseInputData& event) {
-        if (event.button != MouseInputData::Button::Right || event.action != MouseInputData::Action::Press) return ListenerResult::Propagate;
-        rightClick(cocos::getMousePos());
-        return ListenerResult::Propagate;
-    }).leak();
+    MouseInputEvent()
+        .listen([](MouseInputData& event) {
+            if (event.button != MouseInputData::Button::Right ||
+                event.action != MouseInputData::Action::Press)
+                return ListenerResult::Propagate;
+            rightClick(cocos::getMousePos());
+            return ListenerResult::Propagate;
+        })
+        .leak();
 #endif
-    jukebox::event::SongDownloadFinished().listen([](const jukebox::event::SongDownloadFinishedData& event) {
-        auto song = event.destination(); auto meta = song->metadata();
-        requests.erase(key(meta->gdID,meta->uniqueID)); invalidate(meta->gdID);
-        addedSongs.erase(key(meta->gdID,meta->uniqueID));
-        if (auto c = choice(meta->gdID); c && c->uid == meta->uniqueID) {
-            c->path = song->path().has_value()?string::pathToString(*song->path()):"";
-            c->offset = meta->startOffset; c->name = meta->name; store(*c);
-        }
-        log::info("Jukebox song cached for OBS: {}",meta->name);
-    }).leak();
-    jukebox::event::SongDownloadFailed().listen([](const jukebox::event::SongDownloadFailedData& event) {
-        invalidate(event.gdId());
-        auto& r = requests[key(event.gdId(),std::string(event.uniqueId()))]; r = {false,std::string(event.error())};
-        if (auto c = choice(event.gdId()); c && c->uid == event.uniqueId())
-            Notification::create("OBS song download failed",NotificationIcon::Error)->show();
-    }).leak();
-    jukebox::event::NongDeleted().listen([](const jukebox::event::NongDeletedData& event) {
-        invalidate(event.gdId());
-        addedSongs.erase(key(event.gdId(),std::string(event.uniqueId())));
-        if (auto c = choice(event.gdId()); c && c->uid == event.uniqueId()) clear(event.gdId());
-    }).leak();
+    jukebox::event::SongDownloadFinished()
+        .listen([](jukebox::event::SongDownloadFinishedData const& event) {
+            auto song = event.destination();
+            auto meta = song->metadata();
+            requests.erase(key(meta->gdID, meta->uniqueID));
+            invalidate(meta->gdID);
+            addedSongs.erase(key(meta->gdID, meta->uniqueID));
+            if (auto c = choice(meta->gdID); c && c->uid == meta->uniqueID) {
+                c->path = song->path().has_value() ? string::pathToString(*song->path()) : "";
+                c->offset = meta->startOffset;
+                c->name = meta->name;
+                store(*c);
+            }
+            log::info("Jukebox song cached for OBS: {}", meta->name);
+        })
+        .leak();
+    jukebox::event::SongDownloadFailed()
+        .listen([](jukebox::event::SongDownloadFailedData const& event) {
+            invalidate(event.gdId());
+            auto& r = requests[key(event.gdId(), std::string(event.uniqueId()))];
+            r = {false, std::string(event.error())};
+            if (auto c = choice(event.gdId()); c && c->uid == event.uniqueId())
+                Notification::create("OBS song download failed", NotificationIcon::Error)->show();
+        })
+        .leak();
+    jukebox::event::NongDeleted()
+        .listen([](jukebox::event::NongDeletedData const& event) {
+            invalidate(event.gdId());
+            addedSongs.erase(key(event.gdId(), std::string(event.uniqueId())));
+            if (auto c = choice(event.gdId()); c && c->uid == event.uniqueId()) clear(event.gdId());
+        })
+        .leak();
 }
+
 void rightClick(CCPoint point) {
     if (inGameplay()) return;
     if (!cellLayoutMatches()) return;
@@ -614,9 +869,12 @@ void rightClick(CCPoint point) {
     auto list = findList(scene);
     if (!list || !unobscured(scene, list)) return;
     auto scroll = list->getChildByID("list");
-    if (!scroll || !CCRect{{0, 0}, scroll->getContentSize()}.containsPoint(scroll->convertToNodeSpace(point))) return;
+    if (!scroll ||
+        !CCRect{{0, 0}, scroll->getContentSize()}.containsPoint(scroll->convertToNodeSpace(point)))
+        return;
     for (auto cell : cells(list)) {
-        if (!CCRect{{0, 0}, cell->getContentSize()}.containsPoint(cell->convertToNodeSpace(point))) continue;
+        if (!CCRect{{0, 0}, cell->getContentSize()}.containsPoint(cell->convertToNodeSpace(point)))
+            continue;
         if (auto ui = CellAccess::ui(cell); ui && gameButtonShown(ui)) select(cell);
         break;
     }

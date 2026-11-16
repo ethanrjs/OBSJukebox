@@ -1,0 +1,38 @@
+name: Install apt packages
+description: >-
+  Installs apt packages from a cache of their downloaded .deb files, so a job with a warm cache
+  does not contact the Ubuntu mirrors at all.
+inputs:
+  packages:
+    description: Package names, separated by spaces.
+    required: true
+runs:
+  using: composite
+  steps:
+    # The runner image's own package lists decide which versions are installed, so the cache is
+    # only valid for the image version it was filled on.
+    - name: Name the package cache
+      id: cache-key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: echo "key=apt-$ImageOS-$ImageVersion-$(printf '%s' "$PACKAGES" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+    - name: Restore the package cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/apt-archives/*.deb
+        key: ${{ steps.cache-key.outputs.key }}
+    - name: Install the packages
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        archives="$RUNNER_TEMP/apt-archives"
+        mkdir -p "$archives"
+        read -ra packages <<< "$PACKAGES"
+        install() { sudo apt-get install -y -o Dir::Cache::archives="$archives" "$@" "${packages[@]}"; }
+        # 1. From the cache alone, with the lists the image ships. No mirror is contacted.
+        # 2. Download what those lists name. This fills the cache on its first run.
+        # 3. Refresh the lists, for when a mirror no longer carries a version the image names.
+        # `apt-get update` comes last because it takes minutes to give up when the mirrors are down.
+        install --no-download || install || { sudo apt-get update && install; }
