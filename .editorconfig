@@ -15,66 +15,35 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 4
 
-[*.{cs,csx,vb,vbx,csproj,props,targets,sln,ps1,psm1,psd1}]
+[*.{cs,csproj,ps1}]
 end_of_line = crlf
 charset = utf-8-bom
 
 # C and C++ follow .clang-format (Geode's style): 4 spaces, 100 columns.
-[*.{c,c++,cc,cp,cpp,cu,cuh,cxx,h,hh,hpp,hxx,inc,inl,ino,ipp,mpp,proto,tpp,m,mm}]
-indent_style = space
-indent_size = 4
+[*.{cpp,h,hpp,inc,mm}]
 max_line_length = 100
 
 [*.cs]
 indent_style = tab
-indent_size = tab
 tab_width = 4
+insert_final_newline = false
 
 [*.py]
-indent_size = 4
 max_line_length = 100
 
 # shfmt reads these.
-[*.{sh,command}]
-indent_size = 4
+[*.{sh,zsh,command}]
 switch_case_indent = true
 space_redirects = true
 
-[*.{ps1,psm1,psd1}]
-indent_size = 4
-
-[*.swift]
-indent_size = 4
-
-[{CMakeLists.txt,*.cmake}]
+[{CMakeLists.txt,*.{csproj,json,manifest,yml}}]
 indent_size = 2
 
-[*.{asax,ascx,aspx,cshtml,css,htm,html,js,jsx,master,razor,skin,ts,tsx,vb,xaml,xamlx,xoml}]
-indent_style = space
-indent_size = 4
-tab_width = 4
-
-[*.{appxmanifest,axml,build,config,csproj,dbml,discomap,dtd,json,jsproj,lsproj,manifest,njsproj,nuspec,proj,props,resjson,resw,resx,StyleCop,targets,tasks,vbproj,xml,xsd}]
-indent_style = space
-indent_size = 2
-tab_width = 2
-max_line_length = 200
+[*.plist]
+indent_style = tab
 
 [*.md]
-insert_final_newline = true
 trim_trailing_whitespace = false
-
-[*.{yml,yaml}]
-indent_style = space
-indent_size = 2
-
-# Code files
-[*.{cs,csx,vb,vbx}]
-indent_size = 4
-insert_final_newline = false
-
-[*.Designer.cs]
-generated_code = true
 
 # Third-party sources keep their upstream formatting.
 [vendor/**]
@@ -88,7 +57,7 @@ max_line_length = unset
 ###############################
 # .NET Coding Conventions     #
 ###############################
-[*.{cs,vb}]
+[*.cs]
 # Organize usings
 dotnet_sort_system_directives_first = false
 dotnet_separate_import_directive_groups = false
@@ -204,7 +173,7 @@ csharp_preserve_single_line_blocks = true
 # https://docs.microsoft.com/visualstudio/ide/editorconfig-naming-conventions
 ##########################################
 
-[*.{cs,csx,cake,vb,vbx}]
+[*.cs]
 
 ##########################################
 # Styles
