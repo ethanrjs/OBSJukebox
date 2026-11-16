@@ -1,7 +1,7 @@
-﻿using System.IO.Compression;
+﻿using System.Diagnostics;
+using System.IO.Compression;
 using System.Text;
 using System.Text.Json.Nodes;
-using System.Diagnostics;
 
 namespace SeparateSongSetup;
 
@@ -21,14 +21,14 @@ static class InstallerTests
 
 	static Process FakeApp(string folder, string name)
 	{
-		string exe = Path.Combine(folder, name + ".exe");
+		var exe = Path.Combine(folder, name + ".exe");
 		File.Copy(Path.Combine(Environment.SystemDirectory, "PING.EXE"), exe, true);
 		return Process.Start(new ProcessStartInfo(exe, "-n 120 127.0.0.1") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true })!;
 	}
 
 	static UpdateMode.Host FakeHost(List<string> events, (bool Gd, bool Obs)[] states, Action install, string? installed = null)
 	{
-		int at = -1;
+		var at = -1;
 		return new(
 			name => { if (name == "GeometryDash") at = Math.Min(at + 1, states.Length - 1); return name == "GeometryDash" ? states[at].Gd : states[at].Obs; },
 			() => events.Add("sleep"),
@@ -39,7 +39,7 @@ static class InstallerTests
 	static JsonNode ReadResult(string path) => JsonNode.Parse(File.ReadAllText(path))!;
 	static void Main()
 	{
-		byte[] original = Encoding.UTF8.GetBytes("""
+		var original = Encoding.UTF8.GetBytes("""
         {"name":"User scenes","DesktopAudioDevice1":{"muted":false,"volume":0.7},
          "DesktopAudioDevice2":{"muted":true},"sources":[
          {"id":"scene","name":"Game","settings":{"items":[],"id_counter":0}},
@@ -50,15 +50,15 @@ static class InstallerTests
          {"id":"wasapi_input_capture","name":"Mic","muted":true,"volume":0.25,"settings":{}}]}
         """);
 		var before = JsonNode.Parse(original)!;
-		byte[] integrated = Engine.IntegrateCollection(original, out bool changed);
+		var integrated = Engine.IntegrateCollection(original, out var changed);
 		var after = JsonNode.Parse(integrated)!;
 		Check(changed && after["sources"]!.AsArray().Count == before["sources"]!.AsArray().Count + 1, "adds shared GD Sounds source");
 		Check(JsonNode.DeepEquals(before["DesktopAudioDevice1"], after["DesktopAudioDevice1"]) && JsonNode.DeepEquals(before["DesktopAudioDevice2"], after["DesktopAudioDevice2"]), "preserves global desktop audio and mute states");
 		Check(before["sources"]!.AsArray().Skip(1).All(b => after["sources"]!.AsArray().Any(a => JsonNode.DeepEquals(a, b))), "preserves capture audio, individual mutes, volumes and microphone settings");
-		var again = Engine.IntegrateCollection(integrated, out bool changedAgain);
+		var again = Engine.IntegrateCollection(integrated, out var changedAgain);
 		Check(!changedAgain && again.SequenceEqual(integrated), "integration remains idempotent");
 
-		byte[] collisions = Encoding.UTF8.GetBytes("""
+		var collisions = Encoding.UTF8.GetBytes("""
         {"sources":[
          {"id":"image_source","name":"GD Sounds","uuid":"image-1"},
          {"id":"image_source","name":"GD Sounds (OBS Jukebox)","uuid":"image-2"},
@@ -68,17 +68,17 @@ static class InstallerTests
            {"name":"GD Sounds (OBS Jukebox)","source_uuid":"image-2","id":2,"visible":false},
            {"name":"GD Sounds (OBS Jukebox) 2","source_uuid":"image-3","id":3,"visible":true}],"id_counter":3}}]}
         """);
-		byte[] collisionResult = Engine.IntegrateCollection(collisions, out _);
+		var collisionResult = Engine.IntegrateCollection(collisions, out _);
 		var collisionSources = JsonNode.Parse(collisionResult)!["sources"]!.AsArray();
 		var newAudio = collisionSources.Single(s => s!["id"]!.ToString() == "gd_alternate_song")!;
 		var collisionItems = collisionSources.Single(s => s!["id"]!.ToString() == "scene")!["settings"]!["items"]!.AsArray();
 		var originalItems = JsonNode.Parse(collisions)!["sources"]![3]!["settings"]!["items"]!.AsArray();
 		Check(newAudio["name"]!.ToString() == "GD Sounds (OBS Jukebox) 3" && collisionSources.Select(s => s!["name"]!.ToString()).Distinct().Count() == collisionSources.Count, "source names remain unique through repeated fallback collisions");
 		Check(collisionItems.Count == 4 && originalItems.Select((item, index) => JsonNode.DeepEquals(item, collisionItems[index])).All(same => same), "colliding scene visuals remain unchanged while audio is appended");
-		var collisionAgain = Engine.IntegrateCollection(collisionResult, out bool collisionChangedAgain);
+		var collisionAgain = Engine.IntegrateCollection(collisionResult, out var collisionChangedAgain);
 		Check(!collisionChangedAgain && collisionAgain.SequenceEqual(collisionResult), "collision integration remains idempotent");
 
-		byte[] mismatchedNames = Encoding.UTF8.GetBytes("""
+		var mismatchedNames = Encoding.UTF8.GetBytes("""
         {"sources":[
          {"id":"gd_alternate_song","name":"Custom Song","uuid":"audio-1","monitoring_type":0},
          {"id":"image_source","name":"Picture","uuid":"image-1"},
@@ -89,7 +89,7 @@ static class InstallerTests
          {"id":"scene","name":"Legacy","settings":{"items":[{"name":"Custom Song","id":1}],"id_counter":1}},
          {"id":"scene","name":"Wrong UUID only","settings":{"items":[{"name":"Custom Song","source_uuid":"image-1","id":1}],"id_counter":1}}]}
         """);
-		byte[] mismatchResult = Engine.IntegrateCollection(mismatchedNames, out _);
+		var mismatchResult = Engine.IntegrateCollection(mismatchedNames, out _);
 		var mismatchSources = JsonNode.Parse(mismatchResult)!["sources"]!.AsArray();
 		var gameItems = mismatchSources[2]!["settings"]!["items"]!.AsArray();
 		Check(gameItems.Count == 3 && gameItems[0]!["source_uuid"]!.ToString() == "image-1" && gameItems[0]!["name"]!.ToString() == "Custom Song" && gameItems[1]!["source_uuid"] == null && gameItems[2]!["name"]!.ToString() == "GD Sounds", "UUID match takes priority over stale names and legacy name matches");
@@ -97,7 +97,7 @@ static class InstallerTests
 		Check(legacyItems.Count == 1 && legacyItems[0]!["source_uuid"]!.ToString() == "audio-1" && legacyItems[0]!["name"]!.ToString() == "GD Sounds", "legacy item without UUID is migrated by its old name");
 		var wrongUuidItems = mismatchSources[4]!["settings"]!["items"]!.AsArray();
 		Check(wrongUuidItems.Count == 2 && wrongUuidItems[0]!["source_uuid"]!.ToString() == "image-1" && wrongUuidItems[1]!["source_uuid"]!.ToString() == "audio-1", "matching name with another UUID is preserved and audio is appended");
-		var mismatchAgain = Engine.IntegrateCollection(mismatchResult, out bool mismatchChangedAgain);
+		var mismatchAgain = Engine.IntegrateCollection(mismatchResult, out var mismatchChangedAgain);
 		Check(!mismatchChangedAgain && mismatchAgain.SequenceEqual(mismatchResult), "renamed and legacy integration remains idempotent");
 		var rewritten = JsonNode.Parse(integrated)!;
 		rewritten["userLaterEdit"] = 9001;
@@ -107,7 +107,7 @@ static class InstallerTests
 		Check(undone["userLaterEdit"]!.GetValue<int>() == 9001 && undone["sources"]![1]!["volume"]!.GetValue<double>() == 0.23, "semantic undo preserves later user fields and source edits");
 		Check(!undone["sources"]!.AsArray().Any(s => s!["id"]?.ToString() == "gd_alternate_song") && undone["sources"]![0]!["settings"]!["items"]!.AsArray().Count == 0, "semantic undo removes added audio source and scene items after OBS rewrite");
 		var newScene = JsonNode.Parse(integrated)!;
-		string addedUuid = newScene["sources"]!.AsArray().Last()!["uuid"]!.ToString();
+		var addedUuid = newScene["sources"]!.AsArray().Last()!["uuid"]!.ToString();
 		newScene["sources"]!.AsArray().Add(new JsonObject { ["id"] = "scene", ["name"] = "Later user scene", ["settings"] = new JsonObject { ["items"] = new JsonArray(new JsonObject { ["id"] = 1, ["source_uuid"] = addedUuid, ["name"] = "GD Sounds" }) } });
 		var retained = JsonNode.Parse(Engine.UndoCollection(original, integrated, Encoding.UTF8.GetBytes(newScene.ToJsonString())))!;
 		Check(retained["sources"]!.AsArray().Any(s => s?["uuid"]?.ToString() == addedUuid) && retained["sources"]!.AsArray().Last()!["name"]!.ToString() == "Later user scene", "semantic undo retains a source referenced by a later user-added scene");
@@ -121,7 +121,7 @@ static class InstallerTests
 		Check(Encoding.UTF8.GetString(largeResult).Contains("日本語 + <scene>"), "scene JSON preserves readable Unicode and punctuation");
 		var unnamed = Engine.IntegrateCollection(Encoding.UTF8.GetBytes("""{"sources":[{"id":"gd_alternate_song"},{"id":"scene","name":"Game","settings":{"items":[]}}]}"""), out _);
 		Check(JsonNode.Parse(unnamed)!["sources"]![0]!["name"]!.ToString() == "GD Sounds", "unnamed existing audio source receives a safe name");
-		string fixture = Path.Combine(Path.GetTempPath(), "obs-jukebox-test-" + Guid.NewGuid().ToString("N"));
+		var fixture = Path.Combine(Path.GetTempPath(), "obs-jukebox-test-" + Guid.NewGuid().ToString("N"));
 		Directory.CreateDirectory(fixture);
 		try
 		{
@@ -137,25 +137,25 @@ static class InstallerTests
 			Check(JsonNode.DeepEquals(JsonNode.Parse(File.ReadAllBytes(scenePath)), undone) && File.ReadAllText(plugin) == "user replacement", "transaction restore semantically undoes scenes and preserves replaced plugin bytes");
 		}
 		finally { Directory.Delete(fixture, true); }
-		string manifests = Path.Combine(Path.GetTempPath(), "obs-jukebox-manifests-" + Guid.NewGuid().ToString("N"));
+		var manifests = Path.Combine(Path.GetTempPath(), "obs-jukebox-manifests-" + Guid.NewGuid().ToString("N"));
 		Directory.CreateDirectory(manifests);
 		try
 		{
 			bool undoable(string product)
 			{
-				string path = Path.Combine(manifests, Guid.NewGuid().ToString("N") + ".json");
+				var path = Path.Combine(manifests, Guid.NewGuid().ToString("N") + ".json");
 				File.WriteAllText(path, $$"""{"Product":"{{product}}","Status":"installed","Files":[]}""");
 				return Engine.CanUndo(new Options { Manifest = path });
 			}
 			Check(undoable("OBS Jukebox 1.2.1") && undoable("OBS Jukebox 1.1.0") && undoable("Separate Song 1.0.0"), "installs from earlier releases can be undone");
 			Check(!undoable("Something Else 1.0.0"), "other products' manifests are not undone");
-			string noProduct = Path.Combine(manifests, "no-product.json");
+			var noProduct = Path.Combine(manifests, "no-product.json");
 			File.WriteAllText(noProduct, """{"Product":null,"Status":"installed","Files":[]}""");
 			Check(!Engine.CanUndo(new Options { Manifest = noProduct }), "a manifest with no product name is not undone");
 		}
 		finally { Directory.Delete(manifests, true); }
-		string interrupted = Path.Combine(Path.GetTempPath(), "obs-jukebox-interrupted-" + Guid.NewGuid().ToString("N"));
-		string session = Path.Combine(interrupted, "20260101-000000-abcdef");
+		var interrupted = Path.Combine(Path.GetTempPath(), "obs-jukebox-interrupted-" + Guid.NewGuid().ToString("N"));
+		var session = Path.Combine(interrupted, "20260101-000000-abcdef");
 		Directory.CreateDirectory(session);
 		try
 		{
@@ -168,7 +168,7 @@ static class InstallerTests
 				Files = [
 				new ChangedFile { Destination=modFile,Backup=saved,OriginalHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("half-installed mod")),Applied=true }]
 			};
-			string manifest = Path.Combine(session, "manifest.json");
+			var manifest = Path.Combine(session, "manifest.json");
 			File.WriteAllText(manifest, System.Text.Json.JsonSerializer.Serialize(stranded));
 
 			Engine.RecoverInterrupted(new Options { StateRoot = interrupted, GD = interrupted, OBS = interrupted, ModOnly = true }, _ => { }, []);
@@ -176,7 +176,7 @@ static class InstallerTests
 			Engine.RecoverInterrupted(new Options { StateRoot = interrupted, GD = interrupted, OBS = interrupted }, _ => { }, []);
 			Check(File.ReadAllText(modFile) == "previous mod" && File.ReadAllText(manifest).Contains("rolled-back"), "a transaction left installing by a killed setup is restored on the next run");
 
-			string unrecorded = Path.Combine(interrupted, "20260101-000001-abcdef"); Directory.CreateDirectory(unrecorded);
+			var unrecorded = Path.Combine(interrupted, "20260101-000001-abcdef"); Directory.CreateDirectory(unrecorded);
 			File.WriteAllText(Path.Combine(unrecorded, "0000.bak"), "previous mod"); File.WriteAllText(modFile, "half-installed mod");
 			File.WriteAllText(Path.Combine(unrecorded, "manifest.json"), System.Text.Json.JsonSerializer.Serialize(new InstallRecord
 			{
@@ -188,7 +188,7 @@ static class InstallerTests
 			Engine.RecoverInterrupted(new Options { StateRoot = interrupted, GD = interrupted, OBS = interrupted }, _ => { }, []);
 			Check(File.ReadAllText(modFile) == "previous mod", "recovery restores a file replaced just before setup was killed");
 
-			string partial = Path.Combine(interrupted, "20260102-000000-abcdef"); Directory.CreateDirectory(partial);
+			var partial = Path.Combine(interrupted, "20260102-000000-abcdef"); Directory.CreateDirectory(partial);
 			string applied = Path.Combine(interrupted, "applied.dll"), locked = Path.Combine(interrupted, "locked.dll");
 			File.WriteAllText(Path.Combine(partial, "0000.bak"), "previous plugin"); File.WriteAllText(applied, "installed plugin"); File.WriteAllText(locked, "previous scene");
 			File.WriteAllText(Path.Combine(partial, "manifest.json"), System.Text.Json.JsonSerializer.Serialize(new InstallRecord
@@ -207,7 +207,7 @@ static class InstallerTests
 			{
 				var other = new Thread(() => { using var running = new Mutex(false, Engine.SetupLockName); running.WaitOne(); held.Set(); release.Wait(); running.ReleaseMutex(); });
 				other.Start(); held.Wait();
-				bool refused = false;
+				var refused = false;
 				try { Engine.Execute(new Options { DryRun = true, StateRoot = interrupted, GD = interrupted, OBS = interrupted }, _ => { }); }
 				catch (SetupBusyException) { refused = true; }
 				release.Set(); other.Join();
@@ -215,8 +215,8 @@ static class InstallerTests
 			}
 
 			var recover = () => Engine.RecoverInterrupted(new Options { StateRoot = interrupted, GD = interrupted, OBS = interrupted }, _ => { }, []);
-			string lostSession = Path.Combine(interrupted, "20260103-000000-abcdef"); Directory.CreateDirectory(lostSession);
-			string lostManifest = Path.Combine(lostSession, "manifest.json");
+			var lostSession = Path.Combine(interrupted, "20260103-000000-abcdef"); Directory.CreateDirectory(lostSession);
+			var lostManifest = Path.Combine(lostSession, "manifest.json");
 			File.WriteAllText(lostManifest, System.Text.Json.JsonSerializer.Serialize(new InstallRecord
 			{
 				GD = interrupted,
@@ -224,23 +224,23 @@ static class InstallerTests
 				Files = [
 				new ChangedFile { Destination=modFile,Backup=Path.Combine(lostSession,"missing.bak"),OriginalHash="00",InstalledHash=Engine.Hash(Encoding.UTF8.GetBytes("previous mod")),Applied=true }]
 			}));
-			string nullSession = Path.Combine(interrupted, "20260104-000000-abcdef"); Directory.CreateDirectory(nullSession);
+			var nullSession = Path.Combine(interrupted, "20260104-000000-abcdef"); Directory.CreateDirectory(nullSession);
 			File.WriteAllText(Path.Combine(nullSession, "manifest.json"), System.Text.Json.JsonSerializer.Serialize(new InstallRecord { GD = null!, OBS = null!, Files = [] }));
-			bool recovered = true;
+			var recovered = true;
 			try { recover(); recover(); }
 			catch (Exception) { recovered = false; }
 			Check(recovered && File.ReadAllText(lostManifest).Contains("rollback-incomplete"), "a recovery that can't finish, or a manifest with missing fields, doesn't block later installs");
 		}
 		finally { Directory.Delete(interrupted, true); }
-		string gd = Path.Combine(Path.GetTempPath(), "obs-jukebox-mods-" + Guid.NewGuid().ToString("N"));
-		string mods = Path.Combine(gd, "geode", "mods");
+		var gd = Path.Combine(Path.GetTempPath(), "obs-jukebox-mods-" + Guid.NewGuid().ToString("N"));
+		var mods = Path.Combine(gd, "geode", "mods");
 		Directory.CreateDirectory(mods);
 		try
 		{
 			WriteMod(Path.Combine(mods, "my-obs-jukebox.geode"), "local.separate_song", "1.2.2", "local.separate_song.dll");
 			Check(Engine.FindInstalledMod(gd)?.Path == Path.Combine(mods, "my-obs-jukebox.geode") && Engine.InstalledVersion(gd) == "1.2.2", "a renamed OBS Jukebox package is found by its ID");
 			WriteMod(Path.Combine(mods, "local.separate_song.geode"), "local.separate_song", "1.2.3", "local.separate_song.dll");
-			bool refused = false; try { Engine.FindInstalledMod(gd); } catch (IOException) { refused = true; }
+			var refused = false; try { Engine.FindInstalledMod(gd); } catch (IOException) { refused = true; }
 			Check(refused, "two OBS Jukebox packages are refused");
 			WriteMod(Path.Combine(mods, "jukebox.geode"), "fleym.nongd", "3.8.0", "other.dll");
 			Check(Engine.FindJukebox(gd)?.Version == "without Windows support", "a Jukebox package without fleym.nongd.dll is not counted as Windows support");
@@ -249,20 +249,20 @@ static class InstallerTests
 			Check(refused, "two Jukebox packages are refused");
 		}
 		finally { Directory.Delete(gd, true); }
-		string rollback = Path.Combine(Path.GetTempPath(), "obs-jukebox-rollback-" + Guid.NewGuid().ToString("N"));
+		var rollback = Path.Combine(Path.GetTempPath(), "obs-jukebox-rollback-" + Guid.NewGuid().ToString("N"));
 		Directory.CreateDirectory(rollback);
 		try
 		{
 			string added = Path.Combine(rollback, "added.dll"), replaced = Path.Combine(rollback, "replaced.dll");
 			File.WriteAllText(added, "installed"); File.WriteAllText(replaced, "installed");
-			string installedHash = Engine.Hash(Encoding.UTF8.GetBytes("installed"));
+			var installedHash = Engine.Hash(Encoding.UTF8.GetBytes("installed"));
 			var broken = new InstallRecord
 			{
 				Files = [
 				new ChangedFile { Destination=added,InstalledHash=installedHash,Applied=true },
 				new ChangedFile { Destination=replaced,Backup=Path.Combine(rollback,"missing.bak"),OriginalHash="00",InstalledHash=installedHash,Applied=true }]
 			};
-			bool reported = false; try { Engine.Restore(broken, _ => { }); } catch (IOException) { reported = true; }
+			var reported = false; try { Engine.Restore(broken, _ => { }); } catch (IOException) { reported = true; }
 			Check(reported && !File.Exists(added), "a missing backup is reported after the rest of the transaction is restored");
 			File.WriteAllText(added, "installed");
 			string locked = Path.Combine(rollback, "locked.dll"), lockedBackup = Path.Combine(rollback, "locked.bak");
@@ -280,11 +280,11 @@ static class InstallerTests
 		finally { Directory.Delete(rollback, true); }
 		Check(Engine.IsNewer("1.2.10", "1.2.9") && Engine.IsNewer("v2.0.0", "1.9.9"), "a higher installed release counts as newer");
 		Check(!Engine.IsNewer("1.2.9", "1.2.9") && !Engine.IsNewer(null, "1.2.9") && !Engine.IsNewer("1.2.10-beta.1", "1.2.9") && !Engine.IsNewer("1.2.3.4", "1.2.3") && !Engine.IsNewer("1.2", "1.2.9"), "equal, missing, malformed and prerelease versions don't count as newer");
-		string repairRoot = Path.Combine(Path.GetTempPath(), "obs-jukebox-repair-" + Guid.NewGuid().ToString("N"));
+		var repairRoot = Path.Combine(Path.GetTempPath(), "obs-jukebox-repair-" + Guid.NewGuid().ToString("N"));
 		Directory.CreateDirectory(repairRoot);
 		try
 		{
-			string target = Path.Combine(repairRoot, "mod.geode"); File.WriteAllText(target, "installed");
+			var target = Path.Combine(repairRoot, "mod.geode"); File.WriteAllText(target, "installed");
 			var unrestorable = new InstallRecord { Files = [new ChangedFile { Destination = target, Backup = Path.Combine(repairRoot, "missing.bak"), OriginalHash = "00", InstalledHash = Engine.Hash(Encoding.UTF8.GetBytes("installed")), Applied = true }] };
 			var error = new IOException("write failed");
 			Engine.RollBack(unrestorable, error, _ => { });
@@ -306,8 +306,8 @@ static class InstallerTests
 
 			string obsFolder = Path.Combine(repairRoot, "obs"), repairSession = Path.Combine(repairRoot, "state", "20260101-000000-abcdef");
 			Directory.CreateDirectory(Path.Combine(obsFolder, "bin", "64bit")); Directory.CreateDirectory(repairSession);
-			string plugin = Path.Combine(obsFolder, "plugin.dll"); File.WriteAllText(plugin, "half-installed");
-			string manifest = Path.Combine(repairSession, "manifest.json");
+			var plugin = Path.Combine(obsFolder, "plugin.dll"); File.WriteAllText(plugin, "half-installed");
+			var manifest = Path.Combine(repairSession, "manifest.json");
 			File.WriteAllText(manifest, System.Text.Json.JsonSerializer.Serialize(new InstallRecord
 			{
 				GD = Path.Combine(repairRoot, "gd"),
@@ -318,23 +318,23 @@ static class InstallerTests
 			using var fakeObs = FakeApp(repairRoot, "obs64");
 			try
 			{
-				bool waited = false;
+				var waited = false;
 				try { Engine.RecoverInterrupted(new Options { Update = true, StateRoot = Path.Combine(repairRoot, "state"), GD = Path.Combine(repairRoot, "gd"), OBS = obsFolder }, _ => { }, []); }
 				catch (AppRunningException) { waited = true; }
 				Check(waited && File.ReadAllText(manifest).Contains("\"installing\"") && File.ReadAllText(plugin) == "half-installed", "recovery leaves a session for later when an app is open in update mode");
 			}
 			finally { fakeObs.Kill(); fakeObs.WaitForExit(); }
 
-			string newerGd = Path.Combine(repairRoot, "gd-newer");
+			var newerGd = Path.Combine(repairRoot, "gd-newer");
 			Directory.CreateDirectory(Path.Combine(newerGd, "geode", "mods"));
 			WriteMod(Path.Combine(newerGd, "geode", "mods", "local.separate_song.geode"), "local.separate_song", "999.0.0", "local.separate_song.dll");
-			bool stopped = false;
+			var stopped = false;
 			try { Engine.Execute(new Options { Update = true, StateRoot = Path.Combine(repairRoot, "state"), GD = newerGd, OBS = obsFolder }, _ => { }); }
 			catch (NewerVersionInstalledException) { stopped = true; }
 			Check(stopped && File.ReadAllText(manifest).Contains("\"installing\"") && File.ReadAllText(plugin) == "half-installed", "a newer installed mod stops the update before recovery runs");
 		}
 		finally { Directory.Delete(repairRoot, true); }
-		string updates = Path.Combine(Path.GetTempPath(), "obs-jukebox-update-" + Guid.NewGuid().ToString("N"));
+		var updates = Path.Combine(Path.GetTempPath(), "obs-jukebox-update-" + Guid.NewGuid().ToString("N"));
 		Directory.CreateDirectory(updates);
 		try
 		{
@@ -350,7 +350,7 @@ static class InstallerTests
 			File.WriteAllText(flag, ""); events.Clear();
 			UpdateMode.Run(o, FakeHost(events, [(false, true), (false, true), (false, false)], () => { }));
 			Check(events.SequenceEqual(["sleep", "sleep", "install", "start-gd"]), "GD reopens only after OBS closes and installation finishes");
-			events.Clear(); int tries = 0;
+			events.Clear(); var tries = 0;
 			UpdateMode.Run(o, FakeHost(events, [(false, false)], () => { if (++tries == 1) throw new AppRunningException("GD opened"); }));
 			Check(events.SequenceEqual(["install", "sleep", "install"]) && ReadResult(result)["status"]!.ToString() == "installed", "an app opening at the last moment sends the update back to waiting");
 			tries = 0; events.Clear();
@@ -386,7 +386,7 @@ static class InstallerTests
 			Check(parsed.Update && parsed.Silent && !parsed.CloseApps && !parsed.Restart && !parsed.CreateScene && parsed.ResultPath == result && parsed.ReopenFlag == flag, "update mode never closes or reopens apps by itself and never edits scenes");
 			string state = Path.Combine(updates, "state"), recordedObs = Path.Combine(updates, "OBS Studio");
 			Directory.CreateDirectory(Path.Combine(recordedObs, "bin", "64bit")); File.WriteAllText(Path.Combine(recordedObs, "bin", "64bit", "obs64.exe"), "");
-			Directory.CreateDirectory(state); string record = Path.Combine(state, "manifest.json");
+			Directory.CreateDirectory(state); var record = Path.Combine(state, "manifest.json");
 			File.WriteAllText(record, $$"""{"Product":"OBS Jukebox 1.2.3","OBS":{{System.Text.Json.JsonSerializer.Serialize(recordedObs)}},"Status":"installed","Files":[]}""");
 			File.WriteAllText(Path.Combine(state, "latest-manifest.txt"), record);
 			Check(Engine.RecordedOBS(state) == recordedObs, "update mode finds OBS through the last install record");
@@ -411,7 +411,7 @@ static class InstallerTests
 		Check(liveOptions.ModOnly, "mod-only update is available from the command line");
 		liveOptions.GD = Path.Combine(Path.GetTempPath(), "GD");
 		liveOptions.OBS = Path.Combine(Path.GetTempPath(), "OBS");
-		string modDestination = Path.Combine(liveOptions.GD, "geode", "mods", "local.separate_song.geode");
+		var modDestination = Path.Combine(liveOptions.GD, "geode", "mods", "local.separate_song.geode");
 		Check(Engine.AppsForChanges(liveOptions, [modDestination]).Select(a => a.Name).SequenceEqual(["GeometryDash"]), "mod-only changes never request OBS to close");
 		Check(Engine.AppsForChanges(liveOptions, []).Count == 0, "unchanged installation closes no apps");
 		Check(Engine.AppsForChanges(liveOptions, [Path.Combine(liveOptions.OBS, "obs-plugins", "64bit", "separate-song.dll")]).Select(a => a.Name).SequenceEqual(["obs64"]), "plugin-only changes close OBS without closing GD");
@@ -421,7 +421,7 @@ static class InstallerTests
 		Check(Engine.SuccessMessage(new Options()).StartsWith($"Successfully installed OBS Jukebox {Program.ReleaseVersion}."), "fresh installation reports install instead of update");
 		Check(Engine.SuccessMessage(new Options { PreviousVersion = Program.ReleaseVersion, AlreadyCurrent = true }).Contains("already up to date"), "unchanged installation does not claim an update happened");
 		Check(Engine.SuccessMessage(new Options { PreviousVersion = "1.2.0", ModOnly = true }).Contains("OBS was kept running"), "mod-only success explains the deferred plugin update");
-		bool oldOptionRejected = false;
+		var oldOptionRejected = false;
 		try { Options.Parse(["--keep-desktop-audio"]); } catch (ArgumentException) { oldOptionRejected = true; }
 		Check(oldOptionRejected, "removed audio-prevention CLI switch is rejected");
 	}

@@ -1,15 +1,15 @@
-﻿using System.Diagnostics;
+﻿using Microsoft.Win32;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using Microsoft.Win32;
 
 namespace SeparateSongSetup;
 
@@ -61,8 +61,8 @@ sealed class Options
 	public static Options Parse(string[] args)
 	{
 		var o = new Options();
-		bool obsGiven = false;
-		for (int i = 0; i < args.Length; i++)
+		var obsGiven = false;
+		for (var i = 0; i < args.Length; i++)
 		{
 			string Next() => ++i < args.Length ? args[i] : throw new ArgumentException("Missing value for " + args[i - 1]);
 			switch (args[i])
@@ -112,12 +112,12 @@ sealed class Options
 		foreach (var p in Process.GetProcessesByName("GeometryDash"))
 			using (p) try { if (Engine.ProcessPath(p) is string file) return Path.GetDirectoryName(file)!; } catch { }
 		var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-		string steam = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", "")?.ToString() ?? "";
+		var steam = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", "")?.ToString() ?? "";
 		if (steam.Length != 0) roots.Add(steam);
 		roots.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Steam"));
 		foreach (var root in roots.ToArray())
 		{
-			string vdf = Path.Combine(root, "steamapps", "libraryfolders.vdf");
+			var vdf = Path.Combine(root, "steamapps", "libraryfolders.vdf");
 			if (File.Exists(vdf)) foreach (Match m in Regex.Matches(File.ReadAllText(vdf), "\"path\"\\s+\"([^\"]+)\"")) roots.Add(m.Groups[1].Value.Replace("\\\\", "\\"));
 		}
 		foreach (var root in roots)
@@ -198,9 +198,9 @@ static class Engine
 	static List<(string Path, JsonNode Metadata, bool HasDll)> FindPackages(string gd, string id)
 	{
 		var found = new List<(string, JsonNode, bool)>();
-		string mods = Path.Combine(gd, "geode", "mods");
+		var mods = Path.Combine(gd, "geode", "mods");
 		if (!Directory.Exists(mods)) return found;
-		foreach (string file in Directory.GetFiles(mods, "*.geode"))
+		foreach (var file in Directory.GetFiles(mods, "*.geode"))
 		{
 			try
 			{
@@ -238,7 +238,7 @@ static class Engine
 		{
 			using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(60) };
 			client.DefaultRequestHeaders.UserAgent.ParseAdd("OBS-Jukebox-Setup/" + Program.ReleaseVersion);
-			byte[] bytes = client.GetByteArrayAsync(JukeboxUrl).GetAwaiter().GetResult();
+			var bytes = client.GetByteArrayAsync(JukeboxUrl).GetAwaiter().GetResult();
 			if (Hash(bytes) != JukeboxHash) throw new IOException("Jukebox download verification failed. No downloaded files were installed.");
 			if (PackageVersion(bytes, "fleym.nongd") != "3.8.0") throw new IOException("Jukebox download has unexpected metadata.");
 			log("Verified official Jukebox 3.8.0 SHA256=" + JukeboxHash); return bytes;
@@ -255,7 +255,7 @@ static class Engine
 		var parts = text?.TrimStart('v').Split('.');
 		if (parts is not { Length: 3 }) return null;
 		var n = new int[3];
-		for (int i = 0; i < 3; i++) if (!int.TryParse(parts[i], System.Globalization.NumberStyles.None, null, out n[i])) return null;
+		for (var i = 0; i < 3; i++) if (!int.TryParse(parts[i], System.Globalization.NumberStyles.None, null, out n[i])) return null;
 		return (n[0], n[1], n[2]);
 	}
 
@@ -276,7 +276,7 @@ static class Engine
 	{
 		try
 		{
-			string manifest = File.ReadAllText(Path.Combine(stateRoot, "latest-manifest.txt")).Trim();
+			var manifest = File.ReadAllText(Path.Combine(stateRoot, "latest-manifest.txt")).Trim();
 			var record = JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(manifest));
 			return record?.OBS is { Length: > 0 } obs && File.Exists(Path.Combine(obs, "bin", "64bit", "obs64.exe")) ? obs : null;
 		}
@@ -286,7 +286,7 @@ static class Engine
 	{
 		try
 		{
-			string path = o.Manifest ?? File.ReadAllText(Path.Combine(o.StateRoot, "latest-manifest.txt")).Trim();
+			var path = o.Manifest ?? File.ReadAllText(Path.Combine(o.StateRoot, "latest-manifest.txt")).Trim();
 			var record = JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(path));
 			return record is { Status: "installed" } && IsKnownProduct(record.Product);
 		}
@@ -300,7 +300,7 @@ static class Engine
 		" In GD Jukebox, use the Game and OBS checkboxes. Keep Audio Monitoring off. Existing OBS collections and unrelated mods are preserved.";
 	internal static string SuccessMessage(Options o)
 	{
-		string result = o.AlreadyCurrent ? "OBS Jukebox " + Program.ReleaseVersion + " is already up to date." :
+		var result = o.AlreadyCurrent ? "OBS Jukebox " + Program.ReleaseVersion + " is already up to date." :
 			o.PreviousVersion != null ? "Successfully updated to " + Program.ReleaseVersion + "." :
 			"Successfully installed OBS Jukebox " + Program.ReleaseVersion + ".";
 		return result + (o.ModOnly ? " OBS was kept running. Run full setup after your stream to apply OBS plugin fixes." : " You may close setup.");
@@ -315,7 +315,7 @@ static class Engine
 			if (File.Exists(dest) && HashFile(dest) == Hash(data)) { log("Keep unchanged: " + dest); return; }
 			result.Add(new(dest, data, reason));
 		}
-		string loader = Path.Combine(o.GD, "Geode.dll");
+		var loader = Path.Combine(o.GD, "Geode.dll");
 		Version? version = null;
 		if (File.Exists(loader)) Version.TryParse((FileVersionInfo.GetVersionInfo(loader).FileVersion ?? "").Replace(",", ".").Replace(" ", ""), out version);
 		if (File.Exists(loader) && version == null) throw new IOException("Cannot determine installed Geode version. Use the official Geode installer to update to 5.11.2, then retry.");
@@ -338,13 +338,13 @@ static class Engine
 			Add(Path.Combine(o.GD, "geode", "mods", "fleym.nongd.geode"), o.DownloadedJukebox, "Jukebox 3.8.0 (requested download)");
 		}
 		byte[] Required(string key) => payload.TryGetValue(key, out var data) ? data : throw new IOException("This setup is incomplete: missing " + key + ". Download a complete release installer and retry.");
-		byte[] mod = Required("mods/local.separate_song.geode");
+		var mod = Required("mods/local.separate_song.geode");
 		if (PackageVersion(mod, "local.separate_song") != Program.ReleaseVersion) throw new IOException("Unexpected OBS Jukebox payload version.");
 
-		string modDestination = FindInstalledMod(o.GD)?.Path ?? Path.Combine(o.GD, "geode", "mods", "local.separate_song.geode");
+		var modDestination = FindInstalledMod(o.GD)?.Path ?? Path.Combine(o.GD, "geode", "mods", "local.separate_song.geode");
 		Add(modDestination, mod, "OBS Jukebox mod " + Program.ReleaseVersion);
-		bool portable = File.Exists(Path.Combine(o.OBS, "portable_mode.txt")) || File.Exists(Path.Combine(o.OBS, "portable_mode"));
-		string plugin = portable ? Path.Combine(o.OBS, "obs-plugins", "64bit", "separate-song.dll") : Path.Combine(o.PluginRoot, "separate-song", "bin", "64bit", "separate-song.dll");
+		var portable = File.Exists(Path.Combine(o.OBS, "portable_mode.txt")) || File.Exists(Path.Combine(o.OBS, "portable_mode"));
+		var plugin = portable ? Path.Combine(o.OBS, "obs-plugins", "64bit", "separate-song.dll") : Path.Combine(o.PluginRoot, "separate-song", "bin", "64bit", "separate-song.dll");
 		if (o.ModOnly)
 		{
 			if (!File.Exists(plugin)) throw new IOException("Mod-only updates require an existing OBS Jukebox plugin. Run a full installation first.");
@@ -353,13 +353,13 @@ static class Engine
 		else Add(plugin, Required("obs/separate-song.dll"), "Native OBS source GD Sounds");
 		if (o.CreateScene && !o.ModOnly)
 		{
-			string sceneRoot = portable ? Path.Combine(o.OBS, "config", "obs-studio", "basic", "scenes") : o.SceneRoot;
+			var sceneRoot = portable ? Path.Combine(o.OBS, "config", "obs-studio", "basic", "scenes") : o.SceneRoot;
 			o.ScenesFound = Directory.Exists(sceneRoot);
 			if (!o.ScenesFound) log("No existing OBS collections found. In OBS add Sources > GD Sounds once; setup creates no new collection.");
 			else foreach (var file in Directory.GetFiles(sceneRoot, "*.json"))
 			{
-				byte[] original = File.ReadAllBytes(file);
-				byte[] integrated = IntegrateCollection(original, out bool changed);
+				var original = File.ReadAllBytes(file);
+				var integrated = IntegrateCollection(original, out var changed);
 				if (changed) Add(file, integrated, "Add shared GD Sounds to existing scenes");
 				else log("Keep already integrated OBS collection: " + file);
 			}
@@ -370,29 +370,29 @@ static class Engine
 	{
 		var collection = JsonNode.Parse(original)?.AsObject() ?? throw new IOException("Invalid OBS scene collection JSON.");
 		var sources = collection["sources"] as JsonArray ?? throw new IOException("Missing OBS scene source array.");
-		bool modified = false;
+		var modified = false;
 		void Set(JsonObject obj, string key, JsonNode? value) { if (!JsonNode.DeepEquals(obj[key], value)) { obj[key] = value; modified = true; } }
 		foreach (var (type, defaultName) in new[] { ("gd_alternate_song", "GD Sounds") })
 		{
 			var existing = sources.OfType<JsonObject>().FirstOrDefault(s => s["id"]?.ToString() == type || s["versioned_id"]?.ToString() == type);
 			if (existing == null)
 			{
-				string name = defaultName;
+				var name = defaultName;
 				var names = sources.OfType<JsonObject>().Select(s => s["name"]?.ToString()).ToHashSet(StringComparer.Ordinal);
 				if (names.Contains(name))
 				{
-					string fallback = defaultName + " (OBS Jukebox)";
+					var fallback = defaultName + " (OBS Jukebox)";
 					name = fallback;
-					for (int suffix = 2; names.Contains(name); suffix++) name = fallback + " " + suffix;
+					for (var suffix = 2; names.Contains(name); suffix++) name = fallback + " " + suffix;
 				}
 				existing = new JsonObject { ["name"] = name, ["uuid"] = Guid.NewGuid().ToString(), ["id"] = type, ["versioned_id"] = type, ["settings"] = new JsonObject(), ["mixers"] = 255, ["sync"] = 0, ["flags"] = 0, ["volume"] = 1.0, ["balance"] = 0.5, ["enabled"] = true, ["muted"] = false, ["monitoring_type"] = 0, ["hotkeys"] = new JsonObject(), ["private_settings"] = new JsonObject() };
 				sources.Add(existing); modified = true;
 			}
-			string oldName = existing["name"]?.ToString() ?? defaultName;
+			var oldName = existing["name"]?.ToString() ?? defaultName;
 			if (string.IsNullOrWhiteSpace(existing["name"]?.ToString())) Set(existing, "name", JsonValue.Create(oldName));
 			if (type == "gd_alternate_song" && (oldName == "GD Alternate Song" || oldName == "Custom Song" || oldName == "OBS Custom Song") && !sources.OfType<JsonObject>().Any(s => s != existing && s["name"]?.ToString() == "GD Sounds")) Set(existing, "name", JsonValue.Create("GD Sounds"));
 			Set(existing, "monitoring_type", JsonValue.Create(0));
-			string sourceName = existing["name"]!.ToString(); string uuid = existing["uuid"]?.ToString() ?? Guid.NewGuid().ToString(); Set(existing, "uuid", JsonValue.Create(uuid));
+			var sourceName = existing["name"]!.ToString(); var uuid = existing["uuid"]?.ToString() ?? Guid.NewGuid().ToString(); Set(existing, "uuid", JsonValue.Create(uuid));
 			foreach (var scene in sources.OfType<JsonObject>().Where(s => s["id"]?.ToString() == "scene"))
 			{
 				var settings = scene["settings"] as JsonObject ?? throw new IOException("Missing scene settings.");
@@ -400,9 +400,9 @@ static class Engine
 				var item = items.OfType<JsonObject>().FirstOrDefault(i => i["source_uuid"]?.ToString() == uuid)
 					?? items.OfType<JsonObject>().FirstOrDefault(i => string.IsNullOrEmpty(i["source_uuid"]?.ToString()) && i["name"]?.ToString() == oldName);
 				if (item != null) { Set(item, "name", JsonValue.Create(sourceName)); Set(item, "source_uuid", JsonValue.Create(uuid)); continue; }
-				long maximum = items.OfType<JsonObject>().Select(i => SceneNumber(i["id"])).Append(SceneNumber(settings["id_counter"])).Max();
+				var maximum = items.OfType<JsonObject>().Select(i => SceneNumber(i["id"])).Append(SceneNumber(settings["id_counter"])).Max();
 				if (maximum == long.MaxValue) throw new IOException("OBS scene item IDs are exhausted. Recreate this collection in OBS before installing.");
-				long next = maximum + 1;
+				var next = maximum + 1;
 				items.Add(new JsonObject { ["name"] = sourceName, ["source_uuid"] = uuid, ["id"] = next, ["visible"] = true, ["locked"] = true, ["rot"] = 0.0, ["pos"] = new JsonObject { ["x"] = 0.0, ["y"] = 0.0 }, ["scale"] = new JsonObject { ["x"] = 1.0, ["y"] = 1.0 }, ["align"] = 5, ["bounds_type"] = 0, ["bounds_align"] = 0, ["bounds"] = new JsonObject { ["x"] = 0.0, ["y"] = 0.0 }, ["crop_left"] = 0, ["crop_top"] = 0, ["crop_right"] = 0, ["crop_bottom"] = 0, ["private_settings"] = new JsonObject() });
 				settings["id_counter"] = Math.Max(SceneNumber(settings["id_counter"]), next); modified = true;
 			}
@@ -416,10 +416,10 @@ static class Engine
 	internal static int PluginHelper(string[] args)
 	{
 		if (args.Length < 3 || args[1] is not ("write" or "remove")) throw new IOException("Invalid plugin helper request.");
-		string destination = MachinePlugin;
+		var destination = MachinePlugin;
 		void RefuseLinks()
 		{
-			for (string? path = destination; path != null; path = Path.GetDirectoryName(path))
+			for (var path = destination; path != null; path = Path.GetDirectoryName(path))
 				if ((File.Exists(path) || Directory.Exists(path)) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new IOException("Plugin installation path contains a link or junction: " + path);
 		}
 		RefuseLinks();
@@ -433,12 +433,12 @@ static class Engine
 			if (args.Length != 4) throw new IOException("Invalid plugin copy request.");
 			using var input = new FileStream(args[2], FileMode.Open, FileAccess.Read, FileShare.Read);
 			if (input.Length > 128 * 1024 * 1024) throw new IOException("Plugin is too large.");
-			using var buffer = new MemoryStream(); input.CopyTo(buffer); byte[] bytes = buffer.ToArray();
+			using var buffer = new MemoryStream(); input.CopyTo(buffer); var bytes = buffer.ToArray();
 			if (Hash(bytes) != args[3]) throw new IOException("Plugin copy verification failed.");
 			Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 
 			RefuseLinks();
-			string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
+			var temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
 			try { File.WriteAllBytes(temporary, bytes); File.Move(temporary, destination, true); }
 			finally { if (File.Exists(temporary)) File.Delete(temporary); }
 		}
@@ -453,7 +453,7 @@ static class Engine
 	}
 	static void PrivilegedPluginWrite(byte[] data)
 	{
-		string source = Path.Combine(Path.GetTempPath(), "obs-jukebox-" + Guid.NewGuid().ToString("N") + ".dll");
+		var source = Path.Combine(Path.GetTempPath(), "obs-jukebox-" + Guid.NewGuid().ToString("N") + ".dll");
 		try { File.WriteAllBytes(source, data); RunPluginHelper("write", source, Hash(data)); }
 		finally { if (File.Exists(source)) File.Delete(source); }
 	}
@@ -498,7 +498,7 @@ static class Engine
 				string Key(JsonNode? n)
 				{
 					if (n is not JsonObject o) return n?.ToJsonString() ?? "null";
-					string? id = o["id"]?.ToString();
+					var id = o["id"]?.ToString();
 					if (o["id"] is JsonValue value && value.TryGetValue<long>(out var number)) return "item:" + number;
 					if (id != null && ba.Count(x => x?["id"]?.ToString() == id) == 1 && aa.Count(x => x?["id"]?.ToString() == id) == 1 && ba.Any(x => x?["id"]?.ToString() == id && x?["uuid"] == null)) return "type:" + id;
 					return o["uuid"]?.ToString() is string u ? "uuid:" + u : "name:" + o["name"];
@@ -506,7 +506,7 @@ static class Engine
 				var result = new JsonArray();
 				foreach (var item in ca)
 				{
-					string key = Key(item); var a = aa.FirstOrDefault(x => Key(x) == key); var b = ba.FirstOrDefault(x => Key(x) == key);
+					var key = Key(item); var a = aa.FirstOrDefault(x => Key(x) == key); var b = ba.FirstOrDefault(x => Key(x) == key);
 					if (a != null && b == null)
 					{
 						if (item?["uuid"]?.ToString() is string uuid && retainedSources.Contains(uuid)) result.Add(item.DeepClone());
@@ -528,12 +528,12 @@ static class Engine
 	{
 		var handle = OpenProcess(0x1000, false, process.Id);
 		if (handle == IntPtr.Zero) return null;
-		try { var path = new StringBuilder(32768); int length = path.Capacity; return QueryFullProcessImageName(handle, 0, path, ref length) ? path.ToString() : null; }
+		try { var path = new StringBuilder(32768); var length = path.Capacity; return QueryFullProcessImageName(handle, 0, path, ref length) ? path.ToString() : null; }
 		finally { CloseHandle(handle); }
 	}
 	internal static List<(string Name, string Exe)> AppsForChanges(Options o, IEnumerable<string> destinations)
 	{
-		string gdRoot = Path.GetFullPath(o.GD).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+		var gdRoot = Path.GetFullPath(o.GD).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
 		bool gd = false, obs = false;
 		foreach (var path in destinations)
 		{
@@ -551,9 +551,7 @@ static class Engine
 			foreach (var p in Process.GetProcessesByName(name))
 			{
 				using var process = p;
-				string? actual = ProcessPath(p);
-				if (actual == null) throw new AppRunningException("Cannot inspect running " + name + ". Close it manually before installing.");
-
+				var actual = ProcessPath(p) ?? throw new AppRunningException("Cannot inspect running " + name + ". Close it manually before installing.");
 				if (!o.Update && !string.Equals(actual, exe, StringComparison.OrdinalIgnoreCase)) continue;
 				if (!o.CloseApps) throw new AppRunningException(name + " is running. Close it first or choose Ask apps to close. OBS can ask you to stop recording/replay; this setup never force-kills it.");
 				log("Requesting normal close: " + actual);
@@ -568,10 +566,10 @@ static class Engine
 	{
 
 		if (o.ModOnly || !Directory.Exists(o.StateRoot)) return 0;
-		int incomplete = 0;
+		var incomplete = 0;
 		foreach (var session in Directory.GetDirectories(o.StateRoot))
 		{
-			string manifest = Path.Combine(session, "manifest.json");
+			var manifest = Path.Combine(session, "manifest.json");
 			if (!File.Exists(manifest)) continue;
 			InstallRecord? record;
 			try { record = JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(manifest)); }
@@ -619,7 +617,7 @@ static class Engine
 	static void ExecuteAlone(Options o, Action<string> output, List<string>? closedApps)
 	{
 		var logLines = new List<string>(); string? logPath = null;
-		void Log(string s) { string line = DateTimeOffset.Now.ToString("O") + " " + s; logLines.Add(line); output(s); if (logPath != null) File.AppendAllText(logPath, line + Environment.NewLine); }
+		void Log(string s) { var line = DateTimeOffset.Now.ToString("O") + " " + s; logLines.Add(line); output(s); if (logPath != null) File.AppendAllText(logPath, line + Environment.NewLine); }
 		var stopped = closedApps ?? new List<string>();
 		if (o.Update && IsNewer(InstalledVersion(o.GD), Program.ReleaseVersion)) throw new NewerVersionInstalledException();
 		if (!o.DryRun && RecoverInterrupted(o, Log, stopped) > 0 && o.Update)
@@ -635,9 +633,9 @@ static class Engine
 		if (plan.Count == 0) { o.AlreadyCurrent = true; Log(SuccessMessage(o)); Log("No files changed; existing restore manifest preserved."); return; }
 		CloseMatchingApps(o, Log, stopped, plan.Select(f => f.Destination));
 		plan = Plan(o, Log);
-		string session = Path.Combine(o.StateRoot, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6]);
+		var session = Path.Combine(o.StateRoot, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6]);
 		Directory.CreateDirectory(session); logPath = Path.Combine(session, "install.log"); File.WriteAllLines(logPath, logLines);
-		var record = new InstallRecord { GD = o.GD, OBS = o.OBS }; string manifest = Path.Combine(session, "manifest.json");
+		var record = new InstallRecord { GD = o.GD, OBS = o.OBS }; var manifest = Path.Combine(session, "manifest.json");
 		void Save() => WriteManifest(manifest, record);
 		Save();
 		try
@@ -651,7 +649,7 @@ static class Engine
 					Directory.CreateDirectory(Path.GetDirectoryName(change.Backup)!); File.Copy(f.Destination, change.Backup); Log("Backed up: " + f.Destination + " -> " + change.Backup);
 				}
 				record.Files.Add(change); Save();
-				string temporary = f.Destination + ".separate-song-" + Guid.NewGuid().ToString("N") + ".tmp";
+				var temporary = f.Destination + ".separate-song-" + Guid.NewGuid().ToString("N") + ".tmp";
 				try
 				{
 					try { Directory.CreateDirectory(Path.GetDirectoryName(f.Destination)!); File.WriteAllBytes(temporary, f.Data); File.Move(temporary, f.Destination, true); }
@@ -751,7 +749,7 @@ static class Engine
 	static void Uninstall(Options o, Action<string> log, List<string> stopped)
 	{
 		if (o.Manifest == null && !CanUndo(o)) { log("There is no previous installation to undo on this computer."); return; }
-		string path = o.Manifest ?? (File.Exists(Path.Combine(o.StateRoot, "latest-manifest.txt")) ? File.ReadAllText(Path.Combine(o.StateRoot, "latest-manifest.txt")).Trim() : throw new IOException("There is no previous installation to undo on this computer."));
+		var path = o.Manifest ?? (File.Exists(Path.Combine(o.StateRoot, "latest-manifest.txt")) ? File.ReadAllText(Path.Combine(o.StateRoot, "latest-manifest.txt")).Trim() : throw new IOException("There is no previous installation to undo on this computer."));
 		var record = JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(path)) ?? throw new IOException("Invalid manifest.");
 		if (!IsKnownProduct(record.Product)) throw new IOException("Not an OBS Jukebox installation manifest.");
 		if (record.Status != "installed") throw new IOException("This transaction is not installed: " + record.Status);
@@ -784,7 +782,7 @@ sealed class SetupForm : Form
 	{
 		options = o; Text = "OBS Jukebox - Windows Setup"; Width = 730; Height = 650; MinimumSize = new(730, 650); AutoSize = true; AutoSizeMode = AutoSizeMode.GrowOnly; StartPosition = FormStartPosition.CenterScreen; Font = new Font("Segoe UI", 10);
 		var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(22), ColumnCount = 1, RowCount = 9, AutoSize = true, AutoScroll = true }; Controls.Add(layout);
-		for (int row = 0; row < 6; row++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+		for (var row = 0; row < 6; row++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 		layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 		using (var logoStream = Assembly.GetExecutingAssembly().GetManifestResourceStream("logo.png"))
 		{
@@ -855,13 +853,13 @@ sealed class SetupForm : Form
 	{
 		Control[] inputs = [gd.Parent!, obs.Parent!, scene, modOnly, close, restart, jukebox, install, undo];
 		foreach (var input in inputs) input.Enabled = false;
-		bool success = false;
+		var success = false;
 		working = true;
 		try
 		{
 			Collect(); options.Uninstall = restoring;
 			if (restoring && !Engine.CanUndo(options)) { SetStatus("There is no previous installation to undo."); return; }
-			string logs = Path.Combine(options.StateRoot, "SetupLogs"); Directory.CreateDirectory(logs); attemptLog = Path.Combine(logs, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6] + ".log");
+			var logs = Path.Combine(options.StateRoot, "SetupLogs"); Directory.CreateDirectory(logs); attemptLog = Path.Combine(logs, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6] + ".log");
 			SetStatus(restoring ? "Restoring the previous installation..." : options.ModOnly ? "Updating the game mod. OBS will stay running." : "Installing. Only apps with changed files need to close.");
 			var stopped = new List<string>();
 			await Task.Run(() => Engine.Execute(options, Detail, stopped));
@@ -888,8 +886,8 @@ static class UpdateMode
 	internal static int Entry(string[] args)
 	{
 
-		int at = Array.IndexOf(args, "--result");
-		string? result = at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
+		var at = Array.IndexOf(args, "--result");
+		var result = at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 		try
 		{
 			var o = Options.Parse(args);
