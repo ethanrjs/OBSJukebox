@@ -5,65 +5,112 @@
 #include <fstream>
 #include <vector>
 #ifdef _WIN32
-#include <windows.h>
-#include <bcrypt.h>
+    #include <windows.h>
+    #include <bcrypt.h>
 #else
-#include <Security/Security.h>
+    #include <Security/Security.h>
 #endif
 
 namespace update_crypto {
 #ifdef _WIN32
 namespace {
-bool ok(NTSTATUS status) { return status >= 0; }
+bool ok(NTSTATUS status) {
+    return status >= 0;
+}
+
 struct Algorithm {
     BCRYPT_ALG_HANDLE handle = nullptr;
-    ~Algorithm() { if (handle) BCryptCloseAlgorithmProvider(handle, 0); }
+
+    ~Algorithm() {
+        if (handle) BCryptCloseAlgorithmProvider(handle, 0);
+    }
 };
+
 struct Key {
     BCRYPT_KEY_HANDLE handle = nullptr;
-    ~Key() { if (handle) BCryptDestroyKey(handle); }
+
+    ~Key() {
+        if (handle) BCryptDestroyKey(handle);
+    }
 };
 }
 
-bool verifyP256(const std::array<uint8_t, 65>& publicKey, std::span<const uint8_t> message, std::span<const uint8_t> der) {
+bool verifyP256(
+    std::array<uint8_t, 65> const& publicKey, std::span<uint8_t const> message,
+    std::span<uint8_t const> der
+) {
     auto raw = update_rules::derToRaw(der);
     if (!raw || publicKey[0] != 0x04) return false;
     std::array<uint8_t, 32> digest{};
-    if (!ok(BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, const_cast<PUCHAR>(message.data()), static_cast<ULONG>(message.size()), digest.data(), 32))) return false;
+    if (!ok(BCryptHash(
+            BCRYPT_SHA256_ALG_HANDLE,
+            nullptr,
+            0,
+            const_cast<PUCHAR>(message.data()),
+            static_cast<ULONG>(message.size()),
+            digest.data(),
+            32
+        )))
+        return false;
     Algorithm algorithm;
-    if (!ok(BCryptOpenAlgorithmProvider(&algorithm.handle, BCRYPT_ECDSA_P256_ALGORITHM, nullptr, 0))) return false;
+    if (!ok(BCryptOpenAlgorithmProvider(&algorithm.handle, BCRYPT_ECDSA_P256_ALGORITHM, nullptr, 0)))
+        return false;
     std::array<uint8_t, sizeof(BCRYPT_ECCKEY_BLOB) + 64> blob{};
     auto header = reinterpret_cast<BCRYPT_ECCKEY_BLOB*>(blob.data());
     header->dwMagic = BCRYPT_ECDSA_PUBLIC_P256_MAGIC;
     header->cbKey = 32;
     std::copy(publicKey.begin() + 1, publicKey.end(), blob.begin() + sizeof(BCRYPT_ECCKEY_BLOB));
     Key key;
-    if (!ok(BCryptImportKeyPair(algorithm.handle, nullptr, BCRYPT_ECCPUBLIC_BLOB, &key.handle, blob.data(), static_cast<ULONG>(blob.size()), 0))) return false;
+    if (!ok(BCryptImportKeyPair(
+            algorithm.handle,
+            nullptr,
+            BCRYPT_ECCPUBLIC_BLOB,
+            &key.handle,
+            blob.data(),
+            static_cast<ULONG>(blob.size()),
+            0
+        )))
+        return false;
     return ok(BCryptVerifySignature(key.handle, nullptr, digest.data(), 32, raw->data(), 64, 0));
 }
 #else
 namespace {
 struct Cf {
     CFTypeRef ref = nullptr;
-    ~Cf() { if (ref) CFRelease(ref); }
+
+    ~Cf() {
+        if (ref) CFRelease(ref);
+    }
 };
 }
 
-bool verifyP256(const std::array<uint8_t, 65>& publicKey, std::span<const uint8_t> message, std::span<const uint8_t> der) {
+bool verifyP256(
+    std::array<uint8_t, 65> const& publicKey, std::span<uint8_t const> message,
+    std::span<uint8_t const> der
+) {
     if (!update_rules::derToRaw(der) || publicKey[0] != 0x04) return false;
     Cf keyData{CFDataCreate(nullptr, publicKey.data(), publicKey.size())};
-    const void* keys[] = {kSecAttrKeyType, kSecAttrKeyClass};
-    const void* values[] = {kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeyClassPublic};
-    Cf attributes{CFDictionaryCreate(nullptr, keys, values, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks)};
-    Cf key{SecKeyCreateWithData(static_cast<CFDataRef>(keyData.ref), static_cast<CFDictionaryRef>(attributes.ref), nullptr)};
+    void const* keys[] = {kSecAttrKeyType, kSecAttrKeyClass};
+    void const* values[] = {kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeyClassPublic};
+    Cf attributes{CFDictionaryCreate(
+        nullptr, keys, values, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
+    )};
+    Cf key{SecKeyCreateWithData(
+        static_cast<CFDataRef>(keyData.ref), static_cast<CFDictionaryRef>(attributes.ref), nullptr
+    )};
     if (!key.ref) return false;
     Cf data{CFDataCreate(nullptr, message.data(), message.size())};
     Cf signature{CFDataCreate(nullptr, der.data(), der.size())};
-    return SecKeyVerifySignature(static_cast<SecKeyRef>(const_cast<void*>(key.ref)), kSecKeyAlgorithmECDSASignatureMessageX962SHA256,
-                                 static_cast<CFDataRef>(data.ref), static_cast<CFDataRef>(signature.ref), nullptr);
+    return SecKeyVerifySignature(
+        static_cast<SecKeyRef>(const_cast<void*>(key.ref)),
+        kSecKeyAlgorithmECDSASignatureMessageX962SHA256,
+        static_cast<CFDataRef>(data.ref),
+        static_cast<CFDataRef>(signature.ref),
+        nullptr
+    );
 }
 #endif
-std::optional<std::array<uint8_t, 32>> sha256File(const std::filesystem::path& path) {
+std::optional<std::array<uint8_t, 32>> sha256File(std::filesystem::path const& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) return std::nullopt;
     link_key::Sha256 hash;

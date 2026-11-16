@@ -9,6 +9,9 @@
 
 namespace update_crypto {
 // ECDSA P-256 with SHA-256 over message. The DER must pass update_rules::derToRaw first.
-bool verifyP256(const std::array<uint8_t, 65>& publicKey, std::span<const uint8_t> message, std::span<const uint8_t> der);
-std::optional<std::array<uint8_t, 32>> sha256File(const std::filesystem::path& path);
+bool verifyP256(
+    std::array<uint8_t, 65> const& publicKey, std::span<uint8_t const> message,
+    std::span<uint8_t const> der
+);
+std::optional<std::array<uint8_t, 32>> sha256File(std::filesystem::path const& path);
 } // namespace update_crypto
