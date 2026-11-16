@@ -2,3 +2,9 @@
 *.command text eol=lf
 *.swift text eol=lf
 *.yml text eol=lf
+*.py text eol=lf
+
+# Windows-only files are checked out with CRLF, as .editorconfig asks.
+*.cs text eol=crlf
+*.csproj text eol=crlf
+*.ps1 text eol=crlf
