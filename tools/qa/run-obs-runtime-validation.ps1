@@ -1,9 +1,9 @@
-param(
+﻿param(
     [string]$ObsDirectory = "$env:ProgramFiles\obs-studio",
     [string]$PluginPath,
     [string]$OutputDirectory,
     [string]$Mp3Path,
-    [ValidateRange(1024,65535)][int]$Port = 49178
+    [ValidateRange(1024, 65535)][int]$Port = 49178
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -47,7 +47,7 @@ try {
     $env:OBS_JUKEBOX_TEST_PORT = "$Port"
     $env:OBS_QA_DIRECTORY = (Resolve-Path -LiteralPath $ObsDirectory).Path
     $env:PATH = "$obsBin;$savedPath"
-    $arguments = @((Resolve-Path -LiteralPath $PluginPath).Path,(Resolve-Path -LiteralPath $OutputDirectory).Path)
+    $arguments = @((Resolve-Path -LiteralPath $PluginPath).Path, (Resolve-Path -LiteralPath $OutputDirectory).Path)
     if ($Mp3Path) { $arguments += (Resolve-Path -LiteralPath $Mp3Path).Path }
     & "$root\build-windows\qa\obs-runtime-validation.exe" @arguments *> (Join-Path $OutputDirectory 'runtime-log.txt')
     $harnessExit = $LASTEXITCODE
@@ -56,14 +56,14 @@ if (!(Test-Path -LiteralPath (Join-Path $OutputDirectory 'runtime-results.json')
     throw "Runtime harness exited $harnessExit before producing results. Inspect $OutputDirectory\runtime-log.txt"
 }
 $results = Get-Content -LiteralPath (Join-Path $OutputDirectory 'runtime-results.json') -Raw | ConvertFrom-Json
-$results.cases | Format-Table name,frames,raw_rms,frequency_hz,pass -AutoSize
+$results.cases | Format-Table name, frames, raw_rms, frequency_hz, pass -AutoSize
 $evidence = [ordered]@{
     validatedAt = [DateTimeOffset]::Now.ToString('o')
     harnessExitCode = $harnessExit
-    artifacts = @(@($PluginPath,(Join-Path $obsBin 'obs.dll'),"$PSScriptRoot\obs-runtime-validation.cpp",(Join-Path $OutputDirectory 'runtime-results.json')) | ForEach-Object {
-        $hash = Get-FileHash -LiteralPath $_ -Algorithm SHA256
-        [ordered]@{ path=$hash.Path; sha256=$hash.Hash }
-    })
+    artifacts = @(@($PluginPath, (Join-Path $obsBin 'obs.dll'), "$PSScriptRoot\obs-runtime-validation.cpp", (Join-Path $OutputDirectory 'runtime-results.json')) | ForEach-Object {
+            $hash = Get-FileHash -LiteralPath $_ -Algorithm SHA256
+            [ordered]@{ path = $hash.Path; sha256 = $hash.Hash }
+        })
 }
 $evidence | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'runtime-manifest.json') -Encoding utf8
 if ($harnessExit -or $results.failures) { throw "Runtime validation failed. Inspect $OutputDirectory\runtime-log.txt" }
@@ -74,7 +74,7 @@ if ($Mp3Path) {
     $decoderFixtures += $Mp3Path
     $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
     if ($ffmpeg) {
-        foreach ($extension in @('ogg','flac')) {
+        foreach ($extension in @('ogg', 'flac')) {
             $fixture = Join-Path $OutputDirectory "decoder-tone.$extension"
             & $ffmpeg.Source -hide_banner -loglevel error -i $Mp3Path -y $fixture
             if ($LASTEXITCODE) { throw "Could not generate $extension decoder fixture." }
@@ -92,7 +92,7 @@ if ($LASTEXITCODE) { throw 'Decoder format fixture generation failed.' }
 $formatFixtures = @($formatWave)
 $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
 if ($ffmpeg) {
-    foreach ($extension in @('mp3','ogg','flac','aac','m4a','aiff')) {
+    foreach ($extension in @('mp3', 'ogg', 'flac', 'aac', 'm4a', 'aiff')) {
         $fixture = Join-Path $OutputDirectory "format-tone.$extension"
         & $ffmpeg.Source -hide_banner -loglevel error -i $formatWave -y $fixture
         if ($LASTEXITCODE) { throw "Could not generate $extension format fixture." }

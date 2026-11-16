@@ -1,4 +1,4 @@
-param([switch]$BuildOnly, [switch]$Bench, [Parameter(ValueFromRemainingArguments)][string[]]$Arguments)
+﻿param([switch]$BuildOnly, [switch]$Bench, [Parameter(ValueFromRemainingArguments)][string[]]$Arguments)
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path "$PSScriptRoot/../../..").Path
 # -Bench builds bench.cpp instead of the tests; other arguments go to the program.

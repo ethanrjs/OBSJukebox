@@ -19,7 +19,7 @@ song_app="$song_stage/OBS Jukebox Setup.app"
 song_resources="$song_app/Contents/Resources"
 mkdir -p "$song_app/Contents/MacOS" "$song_resources/payload" "$song_resources/Source" "$song_root/artifacts/macos"
 swiftc -O -parse-as-library -target "$MAC_ARCH-apple-macos13.0" installer/Installer.swift -o "$song_app/Contents/MacOS/OBSJukeboxSetup"
-cat > "$song_app/Contents/Info.plist" <<PLIST
+cat > "$song_app/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>OBSJukeboxSetup</string>
