@@ -270,8 +270,8 @@ static void pitchResetTest() {
     run(reused, first, .75f, 1024);
     reused.reset(1024);
     check(run(reused, second, .75f, 1024) == expected, "a reset stage matches a fresh stage");
+    // No reset call: process() must start fresh on its own when the FFT size changes.
     run(reused, first, 1.5f, 4096);
-    reused.reset(1024);
     check(run(reused, second, .75f, 1024) == expected, "an FFT change starts from fresh state");
 
     // Same instance and FFT with a new pitch must keep its history: a reset would match the fresh run.

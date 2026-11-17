@@ -32,11 +32,11 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(first, manifest_script.manifest(self.windows, self.mac, "v1.2.5", "v1.2.5"))
         self.assertEqual(
             first,
-            b'{"files":{"macos-arm64":{"sha256":"'
-            + __import__("hashlib").sha256(b"mac!").hexdigest().encode()
-            + b'","size":4},"windows":{"sha256":"'
-            + __import__("hashlib").sha256(b"windows").hexdigest().encode()
-            + b'","size":7}},"schema":1,"version":"1.2.5"}\n',
+            b'{"files":{"macos-arm64":{"sha256":'
+            b'"e76e8bb942910fb7a4e884777ed922862101615b7bfefc64b90691f11c60bd16","size":4},'
+            b'"windows":{"sha256":'
+            b'"340d600392818df2413382dc7d8325c360d83ea49a262d31760348484bbc10b5","size":7}},'
+            b'"schema":1,"version":"1.2.5"}\n',
         )
 
     def test_refuses_disagreeing_versions(self):

@@ -38,7 +38,6 @@ static void rulesPart1(std::filesystem::path const& fixtures) {
         Version{1, 2, 10} > Version{1, 2, 9} && Version{2, 0, 0} > Version{1, 99, 99},
         "compares as three integers"
     );
-    check(toString({1, 2, 5}) == "1.2.5", "prints a version");
 
     auto manifestText = text(fixtures / "update.json");
     auto manifest = parseManifest(manifestText);

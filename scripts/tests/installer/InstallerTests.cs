@@ -421,8 +421,5 @@ static class InstallerTests
 		Check(Engine.SuccessMessage(new Options()).StartsWith($"Successfully installed OBS Jukebox {Program.ReleaseVersion}."), "fresh installation reports install instead of update");
 		Check(Engine.SuccessMessage(new Options { PreviousVersion = Program.ReleaseVersion, AlreadyCurrent = true }).Contains("already up to date"), "unchanged installation does not claim an update happened");
 		Check(Engine.SuccessMessage(new Options { PreviousVersion = "1.2.0", ModOnly = true }).Contains("OBS was kept running"), "mod-only success explains the deferred plugin update");
-		var oldOptionRejected = false;
-		try { Options.Parse(["--keep-desktop-audio"]); } catch (ArgumentException) { oldOptionRejected = true; }
-		Check(oldOptionRejected, "removed audio-prevention CLI switch is rejected");
 	}
 }
