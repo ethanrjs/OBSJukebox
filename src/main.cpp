@@ -110,12 +110,8 @@ static std::optional<double> channelRate(FMOD::Channel* channel, FMOD::Sound* so
     return sampledMusicRate(base, frequency, std::span(pitches.data(), count));
 }
 
-// A channel's position in seconds and the wall time it is true at. FMOD advances the position
-// once per mixer block (~21 ms), so dating it with the DSP clock of the effects group, which the
-// effects tap reads, puts it on the tap's timeline. The main thread's own clock would be up to a
-// block late. The music group's clock would not do: FMOD stops a group's clock while it is
-// paused, and GD pauses the effects group alone when it goes to the background, so the two
-// clocks drift apart. PCM units are exact where milliseconds truncate.
+// Dated with the effects group's DSP clock, the tap's timeline. The music group's clock drifts
+// from it: a paused group's clock stops, and GD pauses effects alone when in the background.
 static std::optional<std::pair<double, uint64_t>> playbackPosition(
     FMOD::Channel* channel, FMOD::Sound* sound, FMOD::ChannelGroup* effects
 ) {
@@ -219,9 +215,8 @@ static std::vector<ObservedDsp>& dspScratch() {
     return scratch;
 }
 
-// Reads the pitch shifters FMOD will process on `control`, from the input end (highest index) to the
-// output end (index 0). `below` stops the walk before a tap, so only DSPs that process the audio
-// after the tap are read.
+// Reads the pitch shifters FMOD will process on `control`, from the input end (highest index) to
+// the output end (index 0). `below` stops the walk before a tap, so only later DSPs are read.
 static void observeDsps(FMOD::ChannelControl* control, int below, std::vector<ObservedDsp>& out) {
     int total = 0;
     if (!control || control->getNumDSPs(&total) != FMOD_OK) return;
@@ -323,9 +318,8 @@ static void stopVoices() {
     voices.clear();
 }
 
-// Samples one live GD music channel into its voice and publishes it. With a level layer (a
-// PlayLayer or the editor), the level's OBS choice can replace the song. With null (menus, shop),
-// OBS plays GD's own file.
+// Samples one live GD music channel into its voice and publishes it. A level layer (PlayLayer or
+// the editor) can replace the song with its OBS choice; with null, OBS plays GD's own file.
 static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJBaseGameLayer* play) {
     if (id < 0 || id >= SONG_LINK_MAX_CHANNELS) return false;
     auto channel = engine->getActiveMusicChannel(id);
@@ -679,9 +673,8 @@ class $modify(SeparateSongPlay, PlayLayer) {
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
-        // A switcher can reuse the current layer without a scene-enter or
-        // resume callback. Reclaim only the live current layer, never one
-        // retained by an outgoing scene.
+        // A switcher can reuse this layer without a scene-enter or resume callback, so reclaim only
+        // the live layer, never one retained by an outgoing scene.
         if (activePlayLayer != this && PlayLayer::get() == this && isRunning()) activateLink();
         if (m_fields->observedLevel != m_level) {
             m_fields->observedLevel = m_level;
@@ -826,9 +819,8 @@ class $modify(SeparateSongLevelSelect, LevelSelectLayer) {
 // drawScene hook, the scheduler stops while the director is paused; levels sample from postUpdate.
 class SeparateSongService : public CCObject {
 public:
-    // A level samples its own music from postUpdate. Any other PlayLayer that still exists is
-    // only mirrored once it has quit, so a played level's song never reaches OBS as GD music
-    // in place of its OBS choice.
+    // A level samples its own music from postUpdate; other PlayLayers are mirrored only after they
+    // quit, so a played level's song never reaches OBS in place of its OBS choice.
     static bool outsideLevel(PlayLayer* play) {
         return !play || static_cast<SeparateSongPlay*>(play)->m_fields->quit;
     }

@@ -28,4 +28,4 @@ bool startSetup(
 bool unzip(std::filesystem::path const& zip, std::filesystem::path const& into);
 std::filesystem::path gdBundle();
 #endif
-} // namespace update_platform
+}

@@ -29,8 +29,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      # The fixtures depend only on scripts/tests/audio/fixtures.py, so a cache hit also
-      # means ffmpeg is not needed at all.
+      # Fixtures depend only on fixtures.py, so a cache hit means ffmpeg is not needed at all.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: fixtures
         with:

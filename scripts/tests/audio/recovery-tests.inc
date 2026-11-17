@@ -31,7 +31,6 @@ static void sourceRecoveryTest(bool failedSeek) {
     receiver.reset();
 }
 
-// The frequency of captured blocks whose wall time falls in [from, to).
 static double capturedHz(uint64_t from,uint64_t to) {
     unsigned crossings=0,frames=0;float previous=0;bool first=true;
     for(const auto& block:capturedBlocks())if(block.wall>=from&&block.wall<to)
@@ -51,8 +50,7 @@ static void sourceResyncRecoveryTest() {
     check(sender.synchronize(),"output resync test synchronizes its sender");
     SongLinkPacket packet;packet.flags=3;packet.position=.5;
     std::strcpy(packet.path,"artifacts/audio-tests/tone.wav");
-    // A group stage is primed before the stall. Its 4096 FFT holds 64 ms of audio, so a chain that
-    // wrongly survives the resync would replay the old 220 Hz before the new 330 Hz.
+    // A stale 4096 FFT stage would replay the old 220 Hz for 64 ms before the new 330 Hz.
     SongLinkPacket global;global.channelID=-1;global.flags=1;global.stageCount=1;
     global.stages[0]={.5f,4096,0,91};
     {
@@ -136,12 +134,8 @@ static void decoderSeekRecoveryTest() {
         check(opened && rejected && recovered && rms>.01,"decoder resumes near start after repeated beyond-end seeks");
     }
 }
-// Decoder::open finds an MP3's seek points and length in one pass (indexMp3). Seeks must land on the
-// samples miniaudio's own seek points give, and the length must equal its length, with and without a
-// Xing header, and resampled from 44.1 kHz. The last case makes indexMp3 fail, as it does out of memory,
-// so the decoder reopens with miniaudio's seek points; the others must not fall back. At rate 1 the first
-// seek after opening renders the decoded samples unchanged; both sides open afresh for each seek, since a
-// resampler keeps state.
+// Each side reopens for every seek because a resampler keeps state. The last file fails indexMp3
+// on purpose, so only it may fall back to miniaudio's seek points.
 static void decoderSeekPointsTest(){
     const struct{const char* path;const char* label;bool indexFails;} files[]={
         {"artifacts/audio-tests/long.mp3","MP3 seek points and length match miniaudio's",false},

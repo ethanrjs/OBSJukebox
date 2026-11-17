@@ -75,7 +75,6 @@ struct Result {
     std::string message;
 };
 
-// The mod's saved values.
 struct Saved {
     std::optional<Version> blocked; // update-blocked-version
     std::optional<Version> attemptsVersion; // update-attempts-version
@@ -109,7 +108,6 @@ struct LaunchPlan {
     std::string message; // a failed result's message, for the log
 };
 
-// What a launch does with a result and a staged update.
 LaunchPlan planLaunch(LaunchInput const& in);
 
 enum class Offer {
@@ -130,4 +128,4 @@ struct OfferInput {
 
 // A LinkPanel result means the caller saves latest as notified.
 Offer planOffer(OfferInput const& in);
-} // namespace update_rules
+}

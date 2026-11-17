@@ -948,11 +948,8 @@ static class UpdateMode
 		}
 		finally
 		{
-			// Consume the reopen flag only once GD has really exited. If a poll closed GD during the
-			// checks before Write("waiting"), the dying process still shows up as running; taking the
-			// flag now and skipping the reopen would burn it. In that window the file survives this
-			// run, and the mod's next launch deletes it with its other stale-update state. When no
-			// flag was handed in there is nothing to consume, so the GD check doesn't run either.
+			// Consume the reopen flag only once GD has really exited: a dying process still shows up as
+			// running, and taking the flag then would burn it and skip the reopen.
 			if (o.ReopenFlag != null && File.Exists(o.ReopenFlag) && !host.Running("GeometryDash") && TakeReopenFlag(o)) StartGD(o, host);
 		}
 	}

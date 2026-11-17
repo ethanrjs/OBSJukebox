@@ -90,8 +90,8 @@ public:
         }
     }
 
-    // The mod's link key files in the game's Wine prefixes, one per Windows user found. Wine creates
-    // them with this user's default permissions, so each folder and file is made owner-only first.
+    // The mod's link key files in the game's Wine prefixes, one per Windows user found. Wine
+    // creates them with default permissions, so each folder and file is made owner-only first.
     std::vector<Path> keyFiles() const {
         namespace fs = std::filesystem;
         std::vector<Path> files;

@@ -53,9 +53,8 @@ jobs:
             if [ -n "$previous" ]; then changes=$(git diff "$previous" "$GITHUB_SHA" -- .github); echo "${changes:-(no changes)}"; else echo "(no earlier release tag)"; fi
             echo '~~~~~~~~~~~~~~~~'
           } >> "$GITHUB_STEP_SUMMARY"
-      # Written after the summary, so the summary's own file list stays the three artifacts. The glob
-      # expands before SHA256SUMS.txt exists either way. Linux is not in the signed manifest, so a
-      # published checksum is its only user-verifiable check.
+      # Written after the summary, so its file list stays the three artifacts. Linux is not in the
+      # signed manifest, so this checksum is its only user-verifiable check.
       - name: Write the release checksums
         run: (cd release && sha256sum -- * > SHA256SUMS.txt)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -113,11 +112,8 @@ jobs:
           name: update-signature
       - name: Verify the signature against the committed key
         run: python3 scripts/verify-update-signature.py scripts/update-signing-public.pem update.json.sig update.json
-      # During a rotation, a bridge release signed with the wrong key still passes the committed
-      # bundle, which holds both keys, while clients that trust only the old key reject it with just
-      # a log line. The bundle at the previous release tag is what those clients verify against, so
-      # this fails the release instead. Tags from before the updater have no bundle to check against;
-      # the committed-key step above already stands in for those.
+      # A rotation release signed with the wrong key passes the committed bundle but old-key clients
+      # reject it with only a log line, so check against the previous tag's bundle too.
       - name: Verify the signature against the previous release's key bundle
         run: |
           previous=$(git tag --list 'v*.*.*' --sort=-v:refname | grep -vxF "$GITHUB_REF_NAME" | head -n 1 || true)

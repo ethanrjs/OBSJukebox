@@ -90,9 +90,8 @@ static void resetOutput() {
     captured.clear();
 }
 
-// Waits for the game's next 10 ms song packet. A plain sleep_for(10 ms) takes 15.6 ms on Windows'
-// default timer ticks, so the sender would run at 15.6 ms instead of the game's cadence; the
-// waitable timer the plugin's output thread uses is not bound to those ticks.
+// Waits for the game's next 10 ms song packet. A plain sleep_for(10 ms) takes 15.6 ms on
+// Windows' default timer ticks, so this uses the waitable timer of the output thread.
 static void sleepTick() {
     static thread_local BlockTimer timer;
     static thread_local Clock::time_point next{};
@@ -102,14 +101,8 @@ static void sleepTick() {
     timer.sleepUntil(next);
 }
 
-// Runs a receiver and a source on simulated time, with no sockets, threads or sleeps. The receiver
-// polls every 10 ms, as its thread does. After start(), the source outputs the block starting at
-// t when the clock reaches t + bufferingNs, as its output thread does. Packets arrive the moment
-// they are sent.
-// What it leaves out: music renders at output time, about 20 ms later than the real decoder thread
-// does, and clock probes have no round trip. Clock::now() is still real time, so the retry and
-// recovery timers and the "connected" test don't follow the simulated clock. The offline receiver
-// reports the game link as unavailable. run() and its two workers only run in the real-thread tests.
+// A receiver and a source on simulated time: no sockets, threads or sleeps, and packets arrive at
+// once. Clock::now() stays real, so the retry, recovery and connect tests do not follow it.
 struct Simulation {
     // A game whose clock is `offset` ns from OBS's. Songs and effects come from separate ports. It
     // signs with the key in the test's key file unless a test gives it another.
@@ -226,9 +219,8 @@ struct Simulation {
         deliver(&e, 36 + e.frames * 8, port);
     }
 
-    // Says hello from the game every 10 ms and answers its clock probes, as SyncedSender does,
-    // until the receiver follows the game's session on a clock within 100 ms of OBS's. The game
-    // keeps answering probes afterwards, until another one synchronizes.
+    // Says hello every 10 ms and answers clock probes, as SyncedSender does, until the receiver
+    // follows this session within 100 ms of OBS's clock. It keeps answering afterwards.
     bool synchronize(Game const& game, unsigned epoch = 717) {
         answering = &game;
         SongLinkPacket hello;
@@ -823,9 +815,8 @@ static void networkPathTest() {
         "a network path is refused before OBS reads its file information"
     );
 }
-// Mods before this one send unsigned packets: v1.0 sent v3 song packets and GDSFX1 effects, and v1.1
-// to v1.2.3 sent v5 song packets and GDSFX2 effects. OBS plays none of them and asks for a newer mod,
-// whichever arrives.
+// Mods before this one send unsigned packets: v1.0 sent v3 songs and GDSFX1 effects, v1.1 to
+// v1.2.3 sent v5 songs and GDSFX2 effects. OBS plays none and asks for a newer mod.
 enum class OldMod {
     V3Songs,
     V1Effects,
@@ -1133,10 +1124,8 @@ struct SyncedSender {
     }
 };
 
-// GD's main thread can stall for most of a second (tearing down a level) while FMOD's mixer thread
-// keeps playing the song and sending effects. Music then plays on past 400 ms. With the effects
-// stream gone too (GD closed or crashed), or with the main thread still sending other packets
-// (this voice's stop was lost), the voice still goes stale.
+// A main-thread stall under a second keeps the song playing past the 400 ms staleness while
+// FMOD mixes; without effects, or with other packets still arriving, the voice still goes stale.
 enum class Silence {
     MainThreadStall,
     Crash,
@@ -1739,9 +1728,8 @@ static void changedClockTest() {
     );
 }
 
-// Ten minutes of 1024-frame blocks from an output device running 200 ppm slow, mixed with
-// +-5 ms of thread scheduling jitter. Effects timestamps must stay back to back within one
-// sample (a reset would leave a gap OBS hears) and within 3 ms of the real wall clock.
+// Ten minutes of 1024-frame blocks from an output device 200 ppm slow, with +-5 ms of scheduling
+// jitter. Timestamps stay back to back within one sample and within 3 ms of the real wall clock.
 static void tapClockDriftTest() {
     separate_song::TapClock clock;
     uint64_t wall = 1000000000, previousEnd = 0;
@@ -1877,9 +1865,8 @@ static void driftCorrectionTest() {
     );
 }
 
-// A speedhack can move GD's music far outside [0.25, 4]. OBS must follow at the same rate, not drop
-// the packets, and it must not seek to correct a rate it should already be playing. ramp.wav plays
-// .1+seconds*.1, so a sample gives back the song position OBS played.
+// A speedhack can move GD's music far outside [0.25, 4]. OBS must follow the rate without dropping
+// packets or seeking to correct it; ramp.wav plays .1+seconds*.1, so a sample gives the position.
 static void speedhackTest(
     double rate, double start, unsigned reports, uint64_t measureFrom, uint64_t measureNs,
     double tolerance, char const* what
@@ -1929,7 +1916,7 @@ static void speedhackTest(
     check(heard >= expected - 1 && worst <= tolerance && seeks <= voices, what);
 }
 
-// Rates below the old 0.25x floor are the issue's beat repeat; the ceiling is the decoder cache.
+// Rates below the old 0.25x floor are the beat-repeat case; the ceiling is the decoder cache.
 static void slowSpeedhackTest() {
     speedhackTest(
         .1,

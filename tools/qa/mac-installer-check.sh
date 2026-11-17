@@ -46,9 +46,8 @@ reject_mods() {
     [[ "$before" == "$after" && ! -e "$qa_logs" && ! -e "$qa_plugin" ]]
     print -r -- "$name: pass"
 }
-# The full version matrix lives in tools/qa/check-geode-version.py, which runs the same
-# check-geode-version.pl the installer uses. Here one too-old and one too-new major are
-# enough to prove the installer rejects an incompatible Geode before mutating anything.
+# The full version matrix lives in tools/qa/check-geode-version.py. Here one too-old and one too-new
+# major prove the installer rejects an incompatible Geode before mutating anything.
 for qa_version in 4.11.2 6.11.2; do
     /usr/bin/env QA_VERSION="$qa_version" /usr/bin/perl -0pe 's/"5\.11\.2"/"$ENV{QA_VERSION}"/g' "$qa_payload/payload/geode/Geode.dylib" > "$qa_gd/Contents/Frameworks/Geode.dylib"
     qa_before=$(shasum -a 256 "$qa_gd/Contents/Frameworks/Geode.dylib" "$qa_gd/Contents/Frameworks/libfmod.dylib")

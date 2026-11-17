@@ -19,7 +19,7 @@ inline void normalizeMusicFades(std::vector<MusicFade>& points) {
     points.resize(written);
 }
 
-// Applies after scheduled-stop points are appended as they may collide with fades.
+// Call after appending scheduled stops, which may collide with fades.
 template <class Point, size_t Extent>
 inline unsigned normalizePacketFades(std::span<Point, Extent> points, unsigned count) {
     count = std::min(count, static_cast<unsigned>(points.size()));

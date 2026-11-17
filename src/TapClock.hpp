@@ -3,17 +3,14 @@
 #include <cstdint>
 
 namespace separate_song {
-// Nanoseconds spanned by a frame count. Multiplying first would overflow 64 bits past about
-// 4.4 days of frames at 48 kHz, and FMOD's DSP clock counts frames from GD's start.
+// Multiplying first would overflow 64 bits past about 4.4 days at 48 kHz, and FMOD's DSP clock
+// counts frames from GD's start.
 inline uint64_t framesToNs(uint64_t frames, uint32_t rate) {
     return frames / rate * 1000000000 + frames % rate * 1000000000 / rate;
 }
 
-// Wall-clock timestamps for the effects tap's mixer blocks. Timestamps follow the frame count, so
-// blocks butt up against each other and the OBS plugin can play them back to back. Each block
-// steers the timeline at most one sample towards the wall clock, which follows the output
-// device's clock drifting from the system clock without jumps. It starts over only when it falls
-// more than 20 ms behind (a stall) or runs more than 100 ms ahead.
+// Timestamps follow the frame count so blocks butt up for OBS to play back to back. Each block
+// steers at most one sample towards the wall clock; restarts 20 ms behind or 100 ms ahead.
 struct TapClock {
     uint64_t start = 0, frames = 0;
 
@@ -34,4 +31,4 @@ struct TapClock {
         frames += count;
     }
 };
-} // namespace separate_song
+}

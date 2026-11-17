@@ -1,12 +1,5 @@
-// Measures FMOD's own pitch shifter (FMOD_DSP_TYPE_PITCHSHIFT) in Geometry Dash's fmod.dll, so the
-// plugin's port of the same algorithm can be checked against it. Manual QA, Windows only; it ships
-// nothing and runs the FMOD library from the local GD install.
-//
-//   fmod-pitchshift-reference <folder holding GD's fmod.dll> <output folder>
-//
-// FMOD mixes in non-realtime mode: each System::update renders one DSP block, and a custom DSP at
-// the head of the master group records the result. Prints a report and writes each case's input
-// and output as 32-bit float WAV files.
+// Measures FMOD's pitch shifter in GD's fmod.dll, so the plugin's port can be checked against it.
+// Usage: fmod-pitchshift-reference <folder holding GD's fmod.dll> <output folder>
 #include <windows.h>
 #include <fmod.hpp>
 #include <algorithm>
@@ -72,7 +65,7 @@ record(FMOD_DSP_STATE* state, float* in, float* out, unsigned frames, int channe
     return FMOD_OK;
 }
 
-// Stages are given input side first; each is added at the head, so the last one ends nearest the output.
+// Stages are added at the head in order, so the last one listed ends nearest the output.
 void addStages(FMOD::System* system, FMOD::ChannelControl* target, std::vector<Stage> const& stages) {
     for (auto const& stage : stages) {
         FMOD::DSP* dsp = nullptr;
@@ -209,9 +202,8 @@ size_t lastAudible(Stereo const& s, size_t from) {
     return last;
 }
 
-// Left channel from `from` for `frames`, 16-bit PCM unless `asFloat`. Outputs are small enough to
-// keep next to the tests. A noise input is kept exact: the vocoder's phase estimates are chaotic, so
-// even 16-bit rounding moves its output away from FMOD's over a long window.
+// Left channel from `from` for `frames`, 16-bit PCM unless `asFloat`. Noise input stays float:
+// the vocoder's phase estimates are chaotic, so 16-bit rounding moves its output away from FMOD's.
 void writeMono(
     std::filesystem::path const& path, Stereo const& s, size_t from, size_t frames, int rate,
     bool asFloat = false
@@ -268,7 +260,7 @@ void writeWav(std::filesystem::path const& path, Stereo const& s, int rate) {
     word(bytes, 4);
     out.write(reinterpret_cast<char const*>(s.data()), bytes);
 }
-} // namespace
+}
 
 int main(int argc, char** argv) {
     if (argc != 3) {
@@ -338,7 +330,7 @@ int main(int argc, char** argv) {
                 (long long)peak(group, firstImpulse - 2048, firstImpulse + 8192) - (long long)dryPeak
             );
         }
-        // Pitch 1: identical to the dry signal (bypassed) or processed?
+        // Does pitch 1 pass the dry signal through, or process it?
         size_t const noiseFrames = size_t(rate) * 2;
         auto hiss = padded(noise(noiseFrames), noiseFrames + 16384);
         auto dryNoise = run(rate, {"dry noise", hiss, {}, {}, {}, noiseFrames + 16384});
@@ -402,8 +394,8 @@ int main(int argc, char** argv) {
                     );
             }
         }
-        // A stage on a shared bus processes music and effects as one sum. OBS has to process the two
-        // separately, so record how far the linear sum of separate results is from FMOD's bus result.
+        // A bus stage processes music and effects as one sum; OBS must process them separately, so
+        // record how far the linear sum of separate results is from FMOD's bus result.
         {
             Stereo mixed = hiss;
             for (size_t i = 0; i < mixed.size(); ++i)
@@ -425,7 +417,7 @@ int main(int argc, char** argv) {
                 10 * std::log10(yy / xx)
             );
         }
-        // What a stage does once its input ends: channel stage (channel ends with its sound) and group stage.
+        // After its input ends, a channel stage stops with its sound; a group stage may not.
         size_t const shortFrames = size_t(rate) / 2, tail = size_t(rate);
         auto burst = sine(shortFrames, rate, 440);
         auto dryBurst = run(rate, {"dry burst", burst, {}, {}, {}, shortFrames + tail});
@@ -441,8 +433,8 @@ int main(int argc, char** argv) {
             );
             save(std::string(onGroup ? "burst-group" : "burst-channel"), out);
         }
-        // A sound, a true digital gap, then another sound: FMOD's shifter gates a silent block, so it
-        // holds the first sound's pending output across the gap and plays it when the second starts.
+        // A sound, a true digital gap, then another sound: FMOD's shifter gates a silent block and
+        // plays the first sound's pending output when the second starts.
         {
             size_t const part = size_t(rate) / 4, tail = size_t(rate) / 2;
             Stereo gaps((part * 3 + tail) * 2, 0.f);

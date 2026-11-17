@@ -4,9 +4,8 @@
 #include <string_view>
 
 namespace separate_song {
-// Whether text is well-formed UTF-8: no stray bytes, overlong forms, surrogates or values above
-// U+10FFFF. Paths cross from GD to OBS as UTF-8, and on Windows building a std::filesystem::path
-// from anything else throws.
+// Paths cross from GD to OBS as UTF-8, and on Windows building a std::filesystem::path from
+// anything else throws.
 inline bool validUtf8(std::string_view text) {
     std::size_t i = 0;
     while (i < text.size()) {
@@ -31,4 +30,4 @@ inline bool validUtf8(std::string_view text) {
     }
     return true;
 }
-} // namespace separate_song
+}

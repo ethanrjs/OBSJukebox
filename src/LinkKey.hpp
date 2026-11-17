@@ -1,8 +1,6 @@
 #pragma once
-// A random key the mod makes at launch and writes to a file in this user's own app data folder. The key
-// itself never travels: every packet carries an HMAC-SHA256 tag made with it, so the plugin follows only
-// this user's mod. Another user's programs cannot read the key; a program running as this user can, and
-// it can then forge packets, so the trust boundary is the user account, not loopback secrecy (README).
+// A random key the mod makes at launch and keeps in this user's app data. It never travels:
+// packets carry an HMAC-SHA256 tag, so the trust boundary is the user account, not loopback.
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -56,9 +54,8 @@ inline constexpr uint32_t roundConstants[64] = {
     #else
         #define LINK_KEY_SHA_TARGET
     #endif
-// Status packets are tagged on GD's main thread, effects packets on AudioTap's sender and clock
-// replies on Bridge's worker; the plugin checks every one. The x86 SHA extensions hash a block
-// several times faster than the portable rounds.
+// Packets are tagged on GD's main thread, AudioTap's sender and Bridge's worker, and the plugin
+// checks every one. The x86 SHA extensions hash a block far faster than the portable rounds.
 inline bool hasShaInstructions() {
     static bool const supported = [] {
     #ifdef _MSC_VER
@@ -127,8 +124,8 @@ LINK_KEY_SHA_TARGET inline void compressWithShaInstructions(uint32_t* state, uin
     #else
         #define LINK_KEY_SHA_TARGET __attribute__((target("+sha2")))
     #endif
-// Every Apple Silicon CPU has the ARMv8 SHA-256 instructions; other arm64 CPUs may not, so the OS is
-// asked either way.
+// Every Apple Silicon CPU has the ARMv8 SHA-256 instructions; other arm64 CPUs may not, so the
+// OS is asked either way.
 inline bool hasShaInstructions() {
     static bool const supported = [] {
     #ifdef __APPLE__
@@ -143,8 +140,8 @@ inline bool hasShaInstructions() {
     return supported;
 }
 
-// One block with the ARMv8 SHA-256 instructions: the state stays in order as ABCD and EFGH, each step
-// runs four rounds, and the first twelve steps extend the message schedule by four words.
+// One block with the ARMv8 SHA-256 instructions: the state stays in order as ABCD and EFGH,
+// each step runs four rounds, and the first twelve steps extend the message schedule by four words.
 LINK_KEY_SHA_TARGET inline void compressWithShaInstructions(uint32_t* state, uint8_t const* block) {
     uint32x4_t abcd = vld1q_u32(state), efgh = vld1q_u32(state + 4);
     uint32x4_t const abcdBefore = abcd, efghBefore = efgh;
@@ -219,7 +216,7 @@ class Sha256 {
 
 public:
     using Digest = std::array<uint8_t, 32>;
-    // Tests set this to compare the portable rounds with the SHA instructions; leave it false elsewhere.
+    // Tests set this to compare the portable rounds with the SHA instructions; leave it false.
     bool portableOnly = false;
 
     void update(void const* data, size_t size) {
@@ -288,7 +285,7 @@ public:
         return outer.finish();
     }
 };
-} // namespace link_key
+}
 
 using LinkKey = std::array<uint8_t, 32>;
 inline constexpr char const* LINK_KEY_NAME = "link-key";
@@ -304,8 +301,8 @@ inline LinkKey const& processLinkKey() {
     return key;
 }
 
-// The tag is the first 16 bytes of the HMAC of the first `size` bytes of the packet, leaving out the
-// tag field itself.
+// The tag is the first 16 bytes of the HMAC of the first `size` bytes of the packet, leaving
+// out the tag field itself.
 template <class Packet>
 void linkTag(LinkKey const& key, Packet const& packet, size_t size, uint8_t (&tag)[16]) {
     constexpr size_t at = offsetof(Packet, tag), after = at + sizeof(Packet::tag);
@@ -333,8 +330,8 @@ bool signedWith(LinkKey const& key, Packet const& packet, size_t size = sizeof(P
     return difference == 0;
 }
 
-// The file the mod writes, or an empty path if this user's app data folder can't be found. The Linux
-// plugin looks for it inside the game's Wine prefix instead (LinuxPaths::keyFiles).
+// The file the mod writes, or an empty path if this user's app data folder can't be found.
+// The Linux plugin looks for it inside the game's Wine prefix instead (LinuxPaths::keyFiles).
 inline std::filesystem::path linkKeyFile() {
 #ifdef OBS_JUKEBOX_QA
     if (auto configured = std::getenv("OBS_JUKEBOX_TEST_KEY_FILE")) return configured;
@@ -355,8 +352,8 @@ inline std::filesystem::path linkKeyFile() {
 #endif
 }
 
-// Writes the key as 64 hex digits. Only this user can read the file: Windows gives the app data folder
-// to this user alone, and on macOS and Linux the file is made owner-only.
+// Writes the key as 64 hex digits. Only this user can read the file: Windows gives the app data
+// folder to this user alone, and on macOS and Linux the file is made owner-only.
 inline bool writeLinkKey(LinkKey const& key, std::filesystem::path const& file = linkKeyFile()) {
     if (file.empty()) return false;
     std::error_code error;
@@ -370,9 +367,8 @@ inline bool writeLinkKey(LinkKey const& key, std::filesystem::path const& file =
         if (!out) return false;
     }
 #ifndef _WIN32
-    // Only this user must be able to read the key back, so when the mode cannot be applied, refuse
-    // to pair instead of pairing through a file with default permissions. The file is removed too,
-    // so nothing can read a key that this process will not use.
+    // Only this user may read the key back, so if the mode cannot be applied the file is removed
+    // and pairing is refused rather than going through a file with default permissions.
     std::filesystem::permissions(
         file, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write, error
     );

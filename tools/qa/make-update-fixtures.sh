@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Generates the updater test fixtures in the given folder. The key is a throwaway test key that only
-# QA builds and a test release trust; it is never committed and never signs a release. The folder is
-# git-ignored, so each machine and each CI run makes its own.
+# QA builds trust; it is never committed and never signs a release. The folder is git-ignored.
 set -euo pipefail
 out="${1:?usage: make-update-fixtures.sh folder}"
 mkdir -p "$out"

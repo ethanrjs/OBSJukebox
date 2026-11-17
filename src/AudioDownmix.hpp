@@ -25,4 +25,4 @@ inline std::array<float, 2> downmixStereo(float const* frame, int channels) {
     }
     return {left, right};
 }
-} // namespace separate_song
+}

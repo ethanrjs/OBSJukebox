@@ -40,9 +40,8 @@ ur::Platform platform() {
 #endif
 }
 
-// Heap-held, like the bridge and the Jukebox file cache: an app exit can run static destructors
-// while an update or progress thread is still touching these paths, so no global here owns a
-// destructor above them.
+// Heap-held, like the bridge and the file cache: an app exit runs static destructors while an
+// update thread may still touch these paths.
 struct Paths {
     std::filesystem::path staging, result, reopenFlag;
 };

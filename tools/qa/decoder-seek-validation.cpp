@@ -56,9 +56,8 @@ int main(int argc, char** argv) {
         }
         double duration = double(frames) / 48000;
         double target = std::min(30.0, std::floor(duration / 3));
-        // Check recovered audio against a fresh decoder at the same target, after one block
-        // for the resampler to settle. Silence is legitimate; this checks finite output and
-        // audio presence, not sample-exact seeking relative to a sequential compressed decode.
+        // Check recovered audio against a fresh decoder at the same target, after one block for the
+        // resampler to settle. Silence is legitimate; this is not a sample-exact seek check.
         Decoder reference;
         bool referenceOK = reference.open(path);
         std::array<float, 960> beginning{}, expected{};
@@ -110,9 +109,8 @@ int main(int argc, char** argv) {
         decoder.render(audio.data(), 480, 1);
         pass = pass && matches(beginning) && decoder.error.empty();
 
-        // A practice-mode respawn seeks backwards mid-song. The decoder thread runs at most two
-        // 10 ms blocks ahead of output, so a seek that takes longer than one block risks a gap.
-        // Measure an in-range backward seek plus its first render, including deferred decode work.
+        // A practice-mode respawn seeks backwards mid-song, and the decoder runs at most two 10 ms
+        // blocks ahead, so a seek longer than one block risks a gap. Measure the seek and render.
         pass = decoder.seek(target * 2) && pass;
         decoder.render(audio.data(), 480, 1);
         auto started = std::chrono::steady_clock::now();

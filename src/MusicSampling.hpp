@@ -36,10 +36,8 @@ inline float musicFadeAt(std::span<MusicFade const> points, uint64_t clock) {
     return finiteMusicGain(points.back().gain);
 }
 
-// The speed GD plays a channel at, from the factors FMOD reports. A factor the caller could not read
-// stays at one. A read channel frequency or pitch at or below zero means the music is not moving, which
-// is not a speed OBS can follow: the schedule says so and OBS holds its position. FMOD itself plays far
-// beyond 16x, but the decoder's cache does not.
+// The speed GD plays a channel at. An unread factor stays one; a zero frequency or pitch yields
+// nothing, as OBS cannot follow a stopped clock. The 16x cap is the decoder cache's limit.
 inline std::optional<double> sampledMusicRate(
     std::optional<float> base, std::optional<float> frequency,
     std::span<std::optional<float> const> pitches

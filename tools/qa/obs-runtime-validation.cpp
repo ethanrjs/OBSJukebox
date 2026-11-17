@@ -74,9 +74,8 @@ uint64_t cpuTicks() {
 #endif
 }
 
-// The group reference needs many frequencies, since a pure tone's shifted level depends on its
-// starting phase. Filter the noise so fractional decoder interpolation barely changes its level;
-// the quiet 440 Hz pilot still measures the output frequency.
+// The group reference needs many frequencies: a shifted tone's level depends on its starting
+// phase. Filtered noise keeps its level through interpolation; a 440 Hz pilot shows the pitch.
 struct PilotNoise {
     std::minstd_rand random{19};
     double filtered = 0;
@@ -246,7 +245,7 @@ int main(int argc, char** argv) {
     auto wav = output / std::filesystem::path(u8"runtime-曲-é.wav");
     if (!live) wave(wav);
     auto utf8 = wav.u8string();
-    // Synthetic packets are signed with this process's key; live capture uses the key the real mod wrote.
+    // Synthetic packets use this process's key; live capture uses the key the real mod wrote.
     if (!live) {
         auto keyFile = (output / "link-key").string();
 #ifdef _WIN32
@@ -456,15 +455,11 @@ int main(int argc, char** argv) {
          << std::filesystem::path(argv[1]).filename().string() << "\",\"cases\":[\n";
     bool first = true;
     int failures = 0;
-    // effects: 1 sends a 0.15 level each tick, 2 the tap's 44.1 kHz bursts of that level, 3 the
-    // constant tone at 48 kHz, 30 ms ahead so a coarse timer cannot make a staged block late.
-    // A case sends packets for `settle` + `measure` seconds and measures only the last `measure`:
-    // the settle is the time the previous state needs to leave the speakers and this one to reach
-    // them (the decoder renders two 10 ms blocks ahead, and a changed epoch seeks once), and the
-    // measured window only has to be long enough for its check. 120 ms is 53 cycles at 440 Hz, far
-    // inside the 8% frequency tolerance, and 26 at 220 Hz; the silence, level and mute checks need
-    // a fraction of that.
+    // A case sends for `settle` + `measure` and measures only the last `measure`: the settle covers
+    // the decoder's two 10 ms blocks and a seek; 120 ms is 53 cycles at 440 Hz, within tolerance.
     double const settle = .08, measure = .12;
+    // effects: 1 sends a 0.15 level each tick, 2 the tap's 44.1 kHz bursts, 3 the 48 kHz tone,
+    // 30 ms ahead so a coarse timer cannot make a staged block late.
     auto phase = [&](char const* name,
                      double settleSeconds,
                      double measureSeconds,
@@ -720,9 +715,8 @@ int main(int argc, char** argv) {
     obs_source_dec_active(source);
     phase("inactive_music_and_effects_silence", settle, measure, 0, 0, 3, 1, 0, true, true);
     obs_source_inc_active(source);
-    // The last packet keeps its voice live for 400 ms after its timestamp, which is the stretch that
-    // covers a gap in the game's packets, and the voice then fades out, so 600 ms leaves 200 ms of
-    // margin before the measured window starts.
+    // The last packet keeps its voice live for 400 ms after its timestamp, then it fades, so 600 ms
+    // leaves 200 ms of margin before the measured window starts.
     phase("link_timeout_silence", .6, measure, 0, 0, 3, 1, 0, false);
     auto delayed = output / "delayed-download.wav";
     std::filesystem::remove(delayed);
@@ -731,9 +725,8 @@ int main(int argc, char** argv) {
     std::memcpy(packet.path, delayedUtf8.data(), std::min(delayedUtf8.size(), sizeof(packet.path) - 1));
     phase("missing_song_silence", settle, measure, 0, 0, 3);
     wave(delayed);
-    // The file appears at the same path and epoch, so only the plugin's reopen can pick it up, and
-    // that runs at most once a second after the failed attempt: a retry can fire up to 1 s into this
-    // case, and 1.2 s of settle leaves 200 ms past it.
+    // The file appears at the same path and epoch, so only the plugin's reopen picks it up, which
+    // runs at most once a second: 1.2 s of settle leaves 200 ms past a retry up to 1 s in.
     phase(
         "missing_song_same_path_and_epoch_recovery", 1.2, .2, -1, 0, 3, 1, 0, true, 0, false, false, false
     );
@@ -747,11 +740,11 @@ int main(int argc, char** argv) {
     std::memcpy(
         packet.path, replacedUtf8.data(), std::min(replacedUtf8.size(), sizeof(packet.path) - 1)
     );
-    // This case's own failed open schedules the reopen one second in, and the window has to straddle
-    // it: it starts 230 ms before the retry and ends 370 ms after.
+    // This case's failed open schedules the reopen one second in, so the window has to straddle it:
+    // it starts 230 ms before the retry and ends 370 ms after.
     phase("invalid_song_retry_effects_continuity", .8, .6, -1, 0, 3, 1, 0, true, 2);
     wave(replaced);
-    // The same reopen as above: it can fire up to 1 s into this case, and 1.2 s leaves 200 ms past it.
+    // As above: the reopen can fire up to 1 s in, and 1.2 s leaves 200 ms past it.
     phase(
         "invalid_song_same_path_and_epoch_recovery", 1.2, .2, -1, 0, 3, 1, 0, true, 0, false, false, false
     );
@@ -764,7 +757,7 @@ int main(int argc, char** argv) {
     std::memcpy(packet.path, growingUtf8.data(), std::min(growingUtf8.size(), sizeof(packet.path) - 1));
     phase("partial_valid_song_exhausted", settle, measure, 0, 2, 3);
     wave(growing);
-    // The same reopen as above: it can fire up to 1 s into this case, and 1.2 s leaves 200 ms past it.
+    // As above: the reopen can fire up to 1 s in, and 1.2 s leaves 200 ms past it.
     phase(
         "growing_song_same_path_and_epoch_recovery", 1.2, .2, 880, 1, 3, 1, 0, true, 0, false, false, false
     );
@@ -812,10 +805,8 @@ int main(int argc, char** argv) {
         // A stage holds the audio for its FFT size, 64 ms at 4096, before it outputs anything, so
         // these cases settle longer than the rest.
         phase("channel_stage_three_quarters", .18, .17, 330, 2, 3);
-        // The same stage at a new pitch keeps its instance, so OBS keeps the stage and its audio. Its
-        // level then depends on the phase it carried over, which no fresh stage reproduces: it has
-        // measured .026 against .19 for a whole window, so this level only proves the stage is not
-        // silent and the pitch is what this case is for. The chain tests cover what the stage keeps.
+        // A stage keeps its instance at a new pitch, so its level depends on the carried phase:
+        // it measured .026 against .19, so this level only proves the stage is not silent.
         packet.stages[0].pitch = 1.5f;
         expectedRms = 0;
         phase(
@@ -855,9 +846,8 @@ int main(int argc, char** argv) {
         spectral = false;
         std::memcpy(packet.path, previous, sizeof(previous));
     }
-    // A different session can take ownership only after 2 s without a packet from the previous one,
-    // so this case has to stay quiet for longer than that: its length is the wait, not a measurement,
-    // and the 200 ms past the timeout keeps a slow handoff from failing on a busy runner.
+    // A new session takes ownership only after 2 s without a packet, so this case's length is that
+    // wait, not a measurement; 200 ms past it keeps a slow handoff from failing on a busy runner.
     phase("session_handoff_quiet_window", settle, 2.12, 0, 0, 0, 1, 0, false);
     packet.sessionID = 0x51414e4154495645ULL;
     // The first packet adopts the new session and one clock probe and reply make its clock usable,

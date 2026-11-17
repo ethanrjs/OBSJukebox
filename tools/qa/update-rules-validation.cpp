@@ -267,10 +267,8 @@ static void rulesPart2() {
         !launch({v126, false, std::nullopt, std::nullopt, blocked}).saved.blocked,
         "a newer version clears the block"
     );
-    // The two-launch repair sequence: a 1.2.5 install ends with its rollback incomplete and the mod
-    // file left at 1.2.5. Launch one blocks that version; launch two, which finds no staging left,
-    // clears the block, so when 1.2.6 ships the game gets the normal offer, including a restart,
-    // instead of only the download link.
+    // A repair that ends with an incomplete rollback blocks its target version; the next launch,
+    // which finds no staging left, clears the block so the following release gets the full offer.
     auto afterRepair =
         launch({v124, false, v125, Result{v125, Status::Failed, true, "rollback incomplete"}, {}}).saved;
     check(afterRepair.blocked == v125, "the repair result blocks the target version");

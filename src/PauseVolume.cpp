@@ -5,9 +5,8 @@
 using namespace geode::prelude;
 using namespace separate_song;
 
-// In OBS mode the slider thumbs call this layer directly instead of PauseLayer's slider callbacks.
-// Mega Hack 9 also hooks those callbacks, and its hook doesn't pass the call on to ours, so the
-// game volume changed and OBS didn't.
+// In OBS mode the slider thumbs call this layer directly. Mega Hack 9 hooks PauseLayer's slider
+// callbacks and does not pass the call on, so the game volume changed and OBS did not.
 struct SliderCallback {
     CCObject* target = nullptr;
     SEL_MenuHandler selector = nullptr;
@@ -100,9 +99,8 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
         fields->effects->setValue(fields->obs ? obs_volume::effects() : audio->getEffectsVolume());
         fields->music->updateBar();
         fields->effects->updateBar();
-        // The Game callbacks are saved on each switch to OBS, so a callback another mod set while in
-        // Game mode is the one restored. One set while in OBS mode is overwritten on the way back:
-        // it may forward to our OBS handler, and Game mode must never change the OBS volume.
+        // Game callbacks are saved on each switch to OBS, so another mod's callback is restored.
+        // One set while in OBS is dropped: it may forward to our handler and change the OBS volume.
         if (fields->obs) {
             fields->gameMusic =
                 retarget(fields->music, {this, menu_selector(ObsJukeboxPauseVolume::onObsMusic)});

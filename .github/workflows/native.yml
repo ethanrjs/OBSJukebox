@@ -74,9 +74,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      # No NuGet cache here: this project restores only framework references, so the cache
-      # restore cost more than the restore it replaced (measured: 22 s without, 27 s with).
-      # The tests build the installer's Program.cs and use only temporary directories.
+      # No NuGet cache here: restoring only framework references is cheaper than the cache restore
+      # (measured: 22 s without, 27 s with). The tests use only temporary directories.
       - name: Installer regression tests
         run: dotnet run --project scripts/tests/installer/InstallerTests.csproj -c Release
   macos:

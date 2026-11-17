@@ -45,4 +45,4 @@ inline StageList pitchStages(std::span<ObservedDsp const> dsps) {
     }
     return list;
 }
-} // namespace separate_song
+}
