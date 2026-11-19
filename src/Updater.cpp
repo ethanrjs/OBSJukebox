@@ -199,19 +199,6 @@ std::optional<std::filesystem::path> stage(Offer const& o, std::function<void(fl
         if (error || remains) return std::nullopt;
         auto url =
             fmt::format("{}/download/v{}/{}", baseUrl(), ur::toString(o.manifest.version), name);
-        auto head = web::WebRequest()
-                        .userAgent(userAgent())
-                        .timeout(std::chrono::seconds(15))
-                        .transferBody(false)
-                        .getSync(url);
-
-        if (auto length = head.ok() ? head.header("Content-Length") : std::nullopt) {
-            uint64_t size = 0;
-            std::string_view text = *length;
-            if (std::from_chars(text.data(), text.data() + text.size(), size).ec != std::errc{} ||
-                size != entry.size)
-                return std::nullopt;
-        }
         auto response = web::WebRequest()
                             .userAgent(userAgent())
                             .timeout(std::chrono::seconds(600))
