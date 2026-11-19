@@ -92,7 +92,7 @@ bool inLevel() {
 }
 
 void showToast(std::string const& text) {
-    Notification::create(text, NotificationIcon::Info, 3.f)->show();
+    Notification::create(text, NotificationIcon::Info)->show();
 }
 
 void notify(std::string text) {
@@ -305,9 +305,25 @@ void startUpdate(bool restart, bool viaNotice) {
             });
         });
         auto launch = setup ? prepareLaunch(o.manifest.version, gdFolder) : std::nullopt;
+        bool trapped = launch && launch->job == update_platform::Job::Trapped;
+        bool reopen = false, started = false;
+        if (launch && !trapped) {
+            reopen = restart && file::writeString(paths().reopenFlag, "").isOk();
+            if (restart && !reopen)
+                log::warn("Could not write the reopen flag; GD won't reopen after the update");
+            // Off the main thread: antivirus scans a new setup inside CreateProcess, which can
+            // block for most of a second.
+            started = update_platform::startSetup(
+                launch->program, launch->args, launch->job == update_platform::Job::Breakaway
+            );
+        }
+        if (!started) {
+            std::error_code error;
+            std::filesystem::remove(paths().reopenFlag, error);
+        }
         Loader::get()->queueInMainThread(
-            [launch, restart, viaNotice, startedOn, version = o.manifest.version] {
-                if (launch && launch->job == update_platform::Job::Trapped) {
+            [trapped, started, reopen, restart, viaNotice, startedOn, version = o.manifest.version] {
+                if (trapped) {
                     log::warn(
                         "GD's job object would end the update setup with GD; showing the download "
                         "page instead"
@@ -318,15 +334,7 @@ void startUpdate(bool restart, bool viaNotice) {
                     return;
                 }
 
-                bool reopen = restart && file::writeString(paths().reopenFlag, "").isOk();
-                if (restart && !reopen)
-                    log::warn("Could not write the reopen flag; GD won't reopen after the update");
-                if (!launch ||
-                    !update_platform::startSetup(
-                        launch->program, launch->args, launch->job == update_platform::Job::Breakaway
-                    )) {
-                    std::error_code error;
-                    std::filesystem::remove(paths().reopenFlag, error);
+                if (!started) {
                     log::warn("The update setup didn't start (download or launch failed)");
                     if (panel == Panel::Progress) panel = Panel::None;
                     refreshPanel();
