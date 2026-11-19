@@ -16,7 +16,6 @@ static SliderThumb* thumbOf(Slider* slider) {
     return slider->m_touchLogic ? slider->m_touchLogic->m_thumb : nullptr;
 }
 
-// Points the slider's thumb at `callback` and returns the callback it had.
 static SliderCallback retarget(Slider* slider, SliderCallback callback) {
     auto thumb = thumbOf(slider);
     SliderCallback previous{thumb->m_pListener, thumb->m_pfnSelector};

@@ -373,7 +373,6 @@ int main(int argc, char** argv) {
                 );
             }
         }
-        // Gain.
         size_t const toneFrames = size_t(rate) * 2;
         auto tone = padded(sine(toneFrames, rate, 440), toneFrames + 16384);
         auto dryTone = run(rate, {"dry tone", tone, {}, {}, {}, toneFrames + 16384});

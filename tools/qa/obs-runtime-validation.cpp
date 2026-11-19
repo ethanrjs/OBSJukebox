@@ -744,7 +744,7 @@ int main(int argc, char** argv) {
     // it starts 230 ms before the retry and ends 370 ms after.
     phase("invalid_song_retry_effects_continuity", .8, .6, -1, 0, 3, 1, 0, true, 2);
     wave(replaced);
-    // As above: the reopen can fire up to 1 s in, and 1.2 s leaves 200 ms past it.
+    // The reopen can fire up to 1 s in, and 1.2 s of settle leaves 200 ms past it.
     phase(
         "invalid_song_same_path_and_epoch_recovery", 1.2, .2, -1, 0, 3, 1, 0, true, 0, false, false, false
     );
@@ -757,7 +757,7 @@ int main(int argc, char** argv) {
     std::memcpy(packet.path, growingUtf8.data(), std::min(growingUtf8.size(), sizeof(packet.path) - 1));
     phase("partial_valid_song_exhausted", settle, measure, 0, 2, 3);
     wave(growing);
-    // As above: the reopen can fire up to 1 s in, and 1.2 s leaves 200 ms past it.
+    // The reopen can fire up to 1 s in, and 1.2 s of settle leaves 200 ms past it.
     phase(
         "growing_song_same_path_and_epoch_recovery", 1.2, .2, 880, 1, 3, 1, 0, true, 0, false, false, false
     );

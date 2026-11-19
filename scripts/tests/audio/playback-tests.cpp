@@ -123,7 +123,7 @@ struct Simulation {
     std::unique_ptr<SongSource> source;
     std::vector<Captured> output;
     Game local; // sends when a test names no game; on OBS's clock, synced by its first packet
-    Game const* answering = nullptr; // the game that answers clock probes
+    Game const* answering = nullptr;
 
     Simulation() {
         receiver.reset(new Receiver(Receiver::Offline{}));
@@ -172,8 +172,7 @@ struct Simulation {
         answerProbes();
     }
 
-    // A song packet of any version, signed with `key` if there is one. The v1.0 mod sent version 3,
-    // and v1.1 to v1.2.3 sent version 5, which has no tag.
+    // A song packet of any version. `key` signs it, but versions 3 to 6 end before the tag.
     void sendRaw(
         SongLinkPacket p, uint64_t capture, int version, uint16_t port, LinkKey const* key = nullptr
     ) {
@@ -718,7 +717,6 @@ static void clockSlewTest() {
     clock.translate(later);
     auto correction = later - (t + 100050000);
     check(correction > 0 && correction <= 10000, "clock corrections slew at no more than 100 ppm");
-    // A correction in the opposite direction must also remain continuous and monotonic.
     ClockSyncPacket p;
     p.t1 = t + 250000000;
     p.t2 = p.t1 + 250000;
@@ -815,8 +813,8 @@ static void networkPathTest() {
         "a network path is refused before OBS reads its file information"
     );
 }
-// Mods before this one send unsigned packets: v1.0 sent v3 songs and GDSFX1 effects, v1.1 to
-// v1.2.3 sent v5 songs and GDSFX2 effects. OBS plays none and asks for a newer mod.
+// Mod v1.0 sent unsigned v3 songs and GDSFX1 effects; v1.1 to v1.2.3 sent unsigned v5 songs and
+// GDSFX2 effects.
 enum class OldMod {
     V3Songs,
     V1Effects,
@@ -1387,7 +1385,7 @@ static void malformedV7Test() {
     check(
         receiver->get().packet.epoch == 720, "v7 accepts a fade at zero and points that share a time"
     );
-    // A stage in the list must be one FMOD would process, and every unused entry must be zero.
+    // A stage in the list must be one FMOD would process.
     p = SongLinkPacket();
     p.flags = 1;
     p.epoch = 721;
@@ -1463,7 +1461,6 @@ static void malformedV7Test() {
         bad.effectsStages[0] = {.5f, 4096, 0, 43};
         rejected(bad, "v7 rejects effects stages on a voice packet");
     }
-    // The global packet carries music and effects stages; flag 8 is a voice-only rule.
     p = SongLinkPacket();
     p.flags = 1;
     p.epoch = 730;
@@ -2053,13 +2050,13 @@ static void blockQueueTest() {
     for (uint64_t i = 2; i < 6; ++i)
         ordered &= queue.take(2000 + i * ns, 0, out) && out[0] == float(i);
     check(ordered, "a wrapped ring plays its blocks in order");
-    // The output asks for a block before it moves `wanted` on; a block it missed must not queue.
+    // The output asks for a block before it moves `wanted` on.
     check(!queue.take(2000 + 6 * ns, 0, out), "the output misses a block nobody rendered");
     check(
         !queue.push(2000 + 6 * ns, block, 0, 2000 + 6 * ns),
         "a block the output just missed is refused before it moves on"
     );
-    // A worker clears the queue when it catches up; the missed block must stay refused after that.
+    // A worker clears the queue when it catches up.
     check(!queue.take(2000 + 7 * ns, 0, out), "the output misses the next block too");
     queue.clear();
     check(

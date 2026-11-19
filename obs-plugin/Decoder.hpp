@@ -71,11 +71,10 @@ public:
     inline static std::atomic<bool> testFailOnNextSeek{false};
     inline static std::atomic<bool> testStarveAllReads{false};
     inline static std::atomic<unsigned> testOpenCount{0};
-    // QA: the next open treats indexMp3 as failed, as running out of memory would, and counts how
-    // often an open fell back to miniaudio's own seek points.
+    // QA: the next open treats indexMp3 as failed, as running out of memory would.
     inline static std::atomic<bool> testIndexFailsOnNextOpen{false};
     inline static std::atomic<unsigned> testIndexFallbacks{0};
-    std::atomic<unsigned> testSeekCount{0}; // QA: seek count, to catch a wandering rate
+    std::atomic<unsigned> testSeekCount{0};
 #endif
     double position = 0;
     std::string error;
@@ -133,8 +132,6 @@ public:
             return ma_decoder_init_file(path.c_str(), &config, &decoder);
         };
 #endif
-        // An MP3 gets its seek points from indexMp3's single pass over the file; if that fails,
-        // from miniaudio's own.
         auto result = init();
 #ifdef OBS_JUKEBOX_QA
         bool const indexFails = testIndexFailsOnNextOpen.exchange(false);

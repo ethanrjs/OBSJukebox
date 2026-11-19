@@ -215,7 +215,7 @@ done
 song_grants=()
 if ((song_flatpak)); then
     song_changed[3]=1
-    # Earlier installers granted the whole prefix and game folder.
+    # Older installers granted the whole prefix and game folder.
     perl "$song_root/install-state.pl" revoke "${song_targets[3]}" "$song_prefix:ro" "$song_game:ro"
     # Only what the plugin reads: songs, GD's saves folder (where Jukebox and GD keep songs), the
     # link key, and the drive links it resolves paths through.
