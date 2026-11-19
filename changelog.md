@@ -6,7 +6,7 @@
 - Major performance upgrades
 - Bumped Geode to 5.11.2
 - Now requires Node IDs from Geode's mod list. The setup doesn't install it, and the mod won't load without it
-- The Windows setup no longer has "Update the mod only"; it always installs the mod and the OBS plugin together
+- The Windows setup no longer has "Update game mod only"; it always installs the mod and the OBS plugin together
 
 ## v1.2.3
 -  Level editor support
