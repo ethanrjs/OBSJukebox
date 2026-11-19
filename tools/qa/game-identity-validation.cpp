@@ -83,12 +83,12 @@ int main() {
         "empty extra-song list preserves the initial ID"
     );
     std::string declaredSongs;
-    for (int id = 1; id <= 100000; ++id)
+    for (int id = 1; id <= 200; ++id)
         declaredSongs += std::to_string(id) + ",";
-    auto capped = levelSongIDs(-1, declaredSongs);
+    auto all = levelSongIDs(-1, declaredSongs);
     check(
-        capped.size() == 128 && capped.front() == -1 && capped.back() == 127,
-        "a level declaring 100000 songs is cut to its first 128 IDs"
+        all.size() == 201 && all.front() == -1 && all.back() == 200,
+        "every song a level declares is a candidate, as in Jukebox"
     );
     std::vector<MusicCandidate> songs{{123, "/songs/a.mp3"}, {456, "/nongs/song-b.mp3"}};
     check(songForPath("/songs/a.mp3", songs) == 123, "initial sound selects initial song");
