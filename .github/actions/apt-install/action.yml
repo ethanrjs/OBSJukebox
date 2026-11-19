@@ -9,18 +9,23 @@ inputs:
 runs:
   using: composite
   steps:
-    # The image's own package lists pick the versions, so the cache only fits the image version it was filled on.
+    # GitHub runs several image versions at once. Another version's cache still holds most of the
+    # packages, and apt downloads only the ones whose versions differ.
     - name: Name the package cache
       id: cache-key
       shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
-      run: echo "key=apt-$ImageOS-$ImageVersion-$(printf '%s' "$PACKAGES" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      run: |
+        prefix="apt-$ImageOS-$(printf '%s' "$PACKAGES" | sha256sum | cut -c1-16)-"
+        echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+        echo "key=$prefix$ImageVersion" >> "$GITHUB_OUTPUT"
     - name: Restore the package cache
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/apt-archives/*.deb
         key: ${{ steps.cache-key.outputs.key }}
+        restore-keys: ${{ steps.cache-key.outputs.prefix }}
     - name: Install the packages
       shell: bash
       env:
@@ -30,6 +35,6 @@ runs:
         mkdir -p "$archives"
         read -ra packages <<< "$PACKAGES"
         install() { sudo apt-get install -y -o Dir::Cache::archives="$archives" "$@" "${packages[@]}"; }
-        # Try the cache alone first, so a warm cache never contacts a mirror. `apt-get update` runs
-        # last because it takes minutes to give up when the mirrors are down.
-        install --no-download || install || { sudo apt-get update && install; }
+        # Try the cache alone first, so a warm cache never contacts a mirror. The image's package
+        # lists name superseded versions, and fetching those spends minutes failing over mirrors.
+        install --no-download || { sudo apt-get update && install; }

@@ -155,7 +155,7 @@ jobs:
       # CMake comes with the runner image.
       - name: Install build dependencies
         uses: ./.github/actions/apt-install
-        timeout-minutes: 4
+        timeout-minutes: 8
         with:
           packages: libobs-dev pkg-config
       - run: bash scripts/build-linux.sh
