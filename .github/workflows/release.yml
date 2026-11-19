@@ -17,6 +17,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      # The draft job needs this file; failing here saves an approval that would go to waste.
+      - name: Check the release notes exist
+        run: test -f "release-notes/$GITHUB_REF_NAME.txt" || { echo "Missing release-notes/$GITHUB_REF_NAME.txt"; exit 1; }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: Windows-installer
