@@ -162,7 +162,7 @@ int main() {
     auto listener = socket(AF_INET, SOCK_DGRAM, 0);
     assert(listener != BAD_SOCKET);
 #ifndef _WIN32
-    // This descriptor could corrupt memory with FD_SET in the old implementation.
+    // FD_SET corrupts memory with a descriptor this high, so the wait must not use select.
     rlimit limit{};
     assert(getrlimit(RLIMIT_NOFILE, &limit) == 0);
     if (limit.rlim_cur < 2049) {

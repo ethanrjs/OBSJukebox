@@ -222,7 +222,7 @@ struct Tap {
         }
         catch (...) {
             // The DSP is already in the graph: no lock excludes a render that read userdata, so
-            // attach fails and the caller retires the tap through retireTap.
+            // the caller retires the tap through retireTap.
             return false;
         }
         return true;
@@ -266,8 +266,7 @@ void install() {
     auto* tap = new Tap();
     tap->enabled = captureEnabled;
     if (!tap->attach(engine, engine->m_globalChannel, 0)) {
-        // A failed attach is retired like any replaced tap: its sender stops, and the DSP is
-        // released under FMOD's lock, or the object is kept when the lock is refused.
+        // A failed attach is retired like any replaced tap.
         retireTap(tap);
         nextAttach = now + uint64_t(retrySeconds) * 1000000000;
         retrySeconds = std::min(retrySeconds * 2, 30u);

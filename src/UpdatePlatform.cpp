@@ -162,7 +162,7 @@ bool startSetup(std::filesystem::path const& program, std::vector<std::string> c
 bool unzip(std::filesystem::path const& zip, std::filesystem::path const& into) {
     pid_t child;
     // This file keeps Geode types out, and POSIX paths are byte strings: string() performs no
-    // conversion there, so the only cost is an allocation, which is why pathToString isn't used.
+    // conversion there.
     if (!spawn("/usr/bin/ditto", {"-x", "-k", zip.string(), into.string()}, &child, false))
         return false;
     int status = 0;

@@ -50,7 +50,7 @@ MODULE_EXPORT const char* obs_module_author(void) {
     return "babbur";
 }
 
-// The release version from mod.json, set by the build. The fallback covers a bare editor compile.
+// Set by the build from mod.json; the fallback covers a bare editor compile.
 #ifndef OBS_JUKEBOX_VERSION
     #define OBS_JUKEBOX_VERSION "dev"
 #endif
@@ -356,8 +356,7 @@ class Receiver {
         state.connected = false;
     }
 
-    // Forgets everything learned from the previous sender: its clock, waiting packets, effects
-    // ports and timeline.
+    // Forgets everything learned from the previous sender.
     void resetSession(uint64_t id) {
         session = id;
         clock.reset();

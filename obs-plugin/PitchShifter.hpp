@@ -214,7 +214,7 @@ class PitchShifter {
         return {0, tables->size / 2, tables->size / 4, tables->size / 4 * 3};
     }
 
-    // The passes between the second and the last, eight lanes wide where AVX runs.
+    // The passes between the second and the last.
     void middlePasses(std::vector<float> const& sines) {
         auto const& t = *tables;
         bool const wide = !portableOnly && pitch_simd::available();

@@ -114,7 +114,7 @@ static std::vector<float> readFile(const std::string &path) {
     return samples;
 }
 static std::vector<float> read(const char *name) { return readFile(dir + name); }
-// The input FMOD processed, as stereo frames: both channels carry the same mono recording.
+// The input FMOD processed: both channels carry the same mono recording.
 static std::vector<float> stereo(const std::vector<float> &mono) {
     std::vector<float> audio(mono.size() * 2);
     for (size_t i = 0; i < mono.size(); ++i)
@@ -668,8 +668,8 @@ static void playTone(Simulation &sim, SongLinkPacket p, uint64_t base, uint64_t 
         sim.advance(10000000);
     }
 }
-// A 0.01x song still needs real-time heartbeats: sparse game-time updates used to rebuild the
-// voice once a second, cutting the pitch stage's buffered output at a 480-frame boundary.
+// A 0.01x song still needs real-time heartbeats: without them, sparse game-time updates rebuild
+// the voice once a second, cutting the pitch stage's buffered output at a 480-frame boundary.
 static void slowPitchHeartbeatTest() {
     writeTone("artifacts/audio-tests/tone.wav");
     Simulation sim;

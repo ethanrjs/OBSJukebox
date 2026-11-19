@@ -14,8 +14,8 @@
 #include <new>
 #include <vector>
 
-// One pass instead of miniaudio's two or three, producing the same seek table and length it would.
-// It reads the MP3 backend's internals, so a miniaudio update must re-check it.
+// One pass instead of miniaudio's two or three. It reads the MP3 backend's internals, so a
+// miniaudio update must re-check it.
 static_assert(
     MA_VERSION_MAJOR == 0 && MA_VERSION_MINOR == 11 && MA_VERSION_REVISION == 23,
     "indexMp3 mirrors miniaudio 0.11.23's ma_dr_mp3_calculate_seek_points; re-check it"

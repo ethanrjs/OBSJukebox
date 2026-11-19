@@ -49,6 +49,5 @@ public:
 };
 
 Bridge& bridge();
-// Whether a datagram is a clock probe the game should answer.
 bool answersProbe(ClockSyncPacket const& probe, long size, sockaddr_in const& peer);
 }

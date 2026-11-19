@@ -1,5 +1,5 @@
 #pragma once
-// The operating-system calls the updater needs, kept out of Updater.cpp.
+// The OS calls the updater needs, kept out of Updater.cpp.
 #include <filesystem>
 #include <string>
 #include <vector>

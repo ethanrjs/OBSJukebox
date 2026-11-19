@@ -120,7 +120,7 @@ static std::optional<std::pair<double, uint64_t>> playbackPosition(
     auto unit = soundRate > 0 ? FMOD_TIMEUNIT_PCM : FMOD_TIMEUNIT_MS;
     unsigned position = 0;
     unsigned long long clock = 0, after = 0;
-    for (int attempt = 0; attempt < 2; ++attempt) { // retry once if a mix lands between the reads
+    for (int attempt = 0; attempt < 2; ++attempt) { // a mix can land between the reads
         if (effects) effects->getDSPClock(&clock, nullptr);
         if (channel->getPosition(&position, unit) != FMOD_OK) return std::nullopt;
         if (effects) effects->getDSPClock(&after, nullptr);
@@ -295,7 +295,7 @@ static void publish(std::string const& status, bool playing) {
 }
 
 // A replacement song plays the OBS file, not the game's, so it follows the game's shifters only
-// when the setting says so. Everything else follows them unconditionally.
+// when the setting says so.
 static void applyObservedStages(Snapshot& out, MusicVoice const& voice, bool replaced) {
     if (replaced && !pitchShiftReplacement) {
         out.groupExcluded = true;
@@ -693,8 +693,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
     void resetLevel() {
         m_fields->suspendedContinuation.reset();
         activateLink();
-        // A paused restart can reuse channel/sound pointers. Rebuild voice
-        // state for the new attempt, including its envelope and epoch.
+        // A paused restart can reuse channel/sound pointers.
         stopVoices();
         PlayLayer::resetLevel();
         sampleMusic(this);
@@ -742,7 +741,6 @@ class $modify(SeparateSongPlay, PlayLayer) {
 
 static void prepareOBS(GJGameLevel* level) {
     auto result = jukebox_link::prepare(level, true);
-    // The reason says what to do; the second part says what OBS plays meanwhile.
     if (!result.ready && !result.error.empty())
         Notification::create(result.error + "\nOBS plays the game's song.", NotificationIcon::Info)
             ->show();
