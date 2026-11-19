@@ -344,8 +344,9 @@ void startUpdate(bool restart, bool viaNotice) {
                     for (int i = 0; i < 240 && !ready; ++i) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(250));
                         auto r = readResult();
-                        ready = (r && r->version == version && r->status == ur::Status::Waiting) ||
-                            update_platform::setupWaiting();
+                        // Only the result file counts: the macOS setup takes its lock before it
+                        // looks for OBS, so a held lock doesn't mean it will wait for GD.
+                        ready = r && r->version == version && r->status == ur::Status::Waiting;
                     }
                     auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
                                       std::chrono::steady_clock::now() - start
