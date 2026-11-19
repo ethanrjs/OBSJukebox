@@ -57,6 +57,10 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.make(mod={"version": "v1.2.5", "gd": {"win": "2.2081", "mac": "2.2091"}})
 
+    def test_refuses_a_gd_version_the_mod_cannot_read(self):
+        with self.assertRaises(SystemExit):
+            self.make(mod={"version": "v1.2.5", "gd": {"win": "*", "mac": "*"}})
+
     def test_refuses_unexpected_names(self):
         wrong = self.folder / "setup.exe"
         wrong.write_bytes(b"x")

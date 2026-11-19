@@ -23,6 +23,8 @@ def manifest(windows: pathlib.Path, mac: pathlib.Path, mod: dict, tag: str) -> b
     gd = {mod["gd"]["win"], mod["gd"]["mac"]}
     if len(gd) != 1:
         raise SystemExit(f"Windows and macOS target different GD versions: {sorted(gd)}")
+    if not re.fullmatch(r"\d{1,3}\.\d{1,6}", next(iter(gd))):
+        raise SystemExit(f"The mod only reads a GD version like 2.2081, not {next(iter(gd))}")
     files, versions = {}, set()
     for key, path in (("windows", windows), ("macos-arm64", mac)):
         match = NAMES[key].fullmatch(path.name)
