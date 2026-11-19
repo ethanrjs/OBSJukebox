@@ -92,7 +92,7 @@ bool inLevel() {
 }
 
 void showToast(std::string const& text) {
-    Notification::create(text, NotificationIcon::Info, 3.f)->show();
+    Notification::create(text, NotificationIcon::Info)->show();
 }
 
 void notify(std::string text) {
