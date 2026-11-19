@@ -16,14 +16,25 @@ This mod works only together with the OBS Jukebox plugin for OBS Studio, which a
 - In the pause menu, the **Game / OBS** button switches the volume sliders between the game and OBS.
 - GD Sounds shows what it is playing, or what it is waiting for, in its properties in OBS.
 
+## Speedhack and pitch shifting
+
+OBS follows speedhacks up to 16x. When another mod pitch shifts the game's audio with FMOD's pitch shifter, OBS applies the same shifters in the same order. A different OBS song follows them too; turn off **Pitch shift the OBS song** to keep it at its normal pitch.
+
 ## Updates
 
-Unless **Updates** is set to **Don't check**, the mod asks github.com once per launch whether a new OBS Jukebox is out. A new release is offered in a small panel on the main menu. The mod and the OBS plugin update together when Geometry Dash and OBS are closed; the updater never closes OBS.
+On Windows and macOS, the mod asks github.com once per launch whether a new OBS Jukebox is out, unless **Updates** is set to **Don't check**. The setting picks what happens next:
+
+- **Ask me**: a small panel on the main menu offers the update.
+- **Install when GD and OBS close**: the update installs the next time both are closed.
+- **Install right away**: GD closes, the update installs, and GD reopens. If OBS is open or GD isn't on the main menu, it waits until you close GD and OBS.
+
+The mod and the OBS plugin update together, and the updater never closes OBS. On Linux, a panel links to the releases page instead.
 
 ## Requirements
 
 - Windows, or a Mac with Apple Silicon (macOS 13 or later). Linux works only through Proton, with the experimental installer on the releases page.
 - Jukebox 3.8.0. With any other Jukebox version, OBS plays the same song as the game until OBS Jukebox supports that version.
+- Node IDs, from Geode's mod list. The setup does not install it.
 - 64-bit OBS Studio. The plugin is built against OBS 32. Run OBS as your normal user, not as administrator.
 
 ## Credits
