@@ -693,7 +693,8 @@ class $modify(SeparateSongPlay, PlayLayer) {
     void resetLevel() {
         m_fields->suspendedContinuation.reset();
         activateLink();
-        // A paused restart can reuse channel/sound pointers.
+        // A paused restart can reuse channel/sound pointers, so every voice starts over with a new
+        // epoch.
         stopVoices();
         PlayLayer::resetLevel();
         sampleMusic(this);

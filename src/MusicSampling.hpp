@@ -36,8 +36,8 @@ inline float musicFadeAt(std::span<MusicFade const> points, uint64_t clock) {
     return finiteMusicGain(points.back().gain);
 }
 
-// An unread factor stays one; a zero frequency or pitch yields nothing, as OBS cannot follow a
-// stopped clock. The 16x cap is the decoder cache's limit.
+// The speed GD plays a channel at. An unread factor stays one; a zero frequency or pitch yields
+// nothing, as OBS cannot follow a stopped clock. The 16x cap is the decoder cache's limit.
 inline std::optional<double> sampledMusicRate(
     std::optional<float> base, std::optional<float> frequency,
     std::span<std::optional<float> const> pitches

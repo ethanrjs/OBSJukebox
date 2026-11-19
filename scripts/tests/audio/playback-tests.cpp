@@ -172,7 +172,7 @@ struct Simulation {
         answerProbes();
     }
 
-    // A song packet of any version, signed with `key` if there is one.
+    // A song packet of any version. `key` signs it, but versions 3 to 6 end before the tag.
     void sendRaw(
         SongLinkPacket p, uint64_t capture, int version, uint16_t port, LinkKey const* key = nullptr
     ) {
@@ -813,8 +813,8 @@ static void networkPathTest() {
         "a network path is refused before OBS reads its file information"
     );
 }
-// Mods before this one send unsigned packets: v1.0 sent v3 songs and GDSFX1 effects, v1.1 to
-// v1.2.3 sent v5 songs and GDSFX2 effects.
+// Mod v1.0 sent unsigned v3 songs and GDSFX1 effects; v1.1 to v1.2.3 sent unsigned v5 songs and
+// GDSFX2 effects.
 enum class OldMod {
     V3Songs,
     V1Effects,

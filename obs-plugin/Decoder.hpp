@@ -74,7 +74,7 @@ public:
     // QA: the next open treats indexMp3 as failed, as running out of memory would.
     inline static std::atomic<bool> testIndexFailsOnNextOpen{false};
     inline static std::atomic<unsigned> testIndexFallbacks{0};
-    std::atomic<unsigned> testSeekCount{0}; // QA: catches a wandering seek rate
+    std::atomic<unsigned> testSeekCount{0};
 #endif
     double position = 0;
     std::string error;

@@ -356,7 +356,7 @@ class Receiver {
         state.connected = false;
     }
 
-    // Forgets everything learned from the previous sender.
+    // Forgets the previous sender's clock, waiting packets, effects ports and timeline.
     void resetSession(uint64_t id) {
         session = id;
         clock.reset();

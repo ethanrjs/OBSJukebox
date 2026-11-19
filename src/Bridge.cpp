@@ -132,8 +132,7 @@ void Bridge::publish(Snapshot const& s) {
     // An excluded voice has no stages of its own, as the receiver requires.
     p.stageCount = s.channelID >= 0 && s.groupExcluded ? 0 : std::min<uint8_t>(s.stageCount, 8);
     std::copy_n(s.stages.begin(), p.stageCount, p.stages);
-    // Effects stages belong to the global packet; a voice packet carries none, as the receiver
-    // requires.
+    // The receiver rejects effects stages on voice packets and flag 8 on global packets.
     if (p.channelID < 0) {
         p.effectsStageCount = std::min<uint8_t>(s.effectsStageCount, 8);
         std::copy_n(s.effectsStages.begin(), p.effectsStageCount, p.effectsStages);
