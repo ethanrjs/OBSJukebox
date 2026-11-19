@@ -8,8 +8,8 @@
   "name": "OBS Jukebox",
   "version": "v1.2.3",
   "developers": [
-    "babbur",
-    "Navinor"
+    "Navinor",
+    "babbur"
   ],
   "description": "Play a different song on your OBS stream than in game, with the OBS Jukebox plugin.",
   "links": {
