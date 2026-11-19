@@ -1,8 +1,10 @@
-## Unreleased
+## v1.2.4
+- One-click updates on Windows and macOS: OBS Jukebox checks for a new version once per launch and can install it for you. Change this under Settings > Updates
 - OBS follows speedhacks up to 16x, including very slow ones; it used to stop at 0.25x and 4x
-- OBS applies other mods' pitch shifters to music and sound effects in the same order as the game, building on @ethanrjs's pitch shifter support
-- New setting: Pitch shift a different OBS song (on by default)
-- Update the mod and the OBS plugin together; the new versions only work with each other
+- OBS applies other mods' pitch shifters to music and sound effects in the same order as the game, building on @ethanrjs's pitch shifter support. Turn off Pitch shift the OBS song in settings to keep a different OBS song at its normal pitch
+- OBS's source properties show the plugin version
+- Major performance upgrades
+- Bumped Geode to 5.11.2
 
 ## v1.2.3
 -  Level editor support

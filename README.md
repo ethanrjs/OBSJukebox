@@ -9,7 +9,7 @@ Separate GD/Song output for OBS. Also keeps sound effects. No driver/audio cable
 
 1. Go to **Releases** on this repository's GitHub page.
 2. Download the setup for your platform (the .exe on Windows, the .zip on macOS).
-3. Run it. On Windows, tick **Download and install Jukebox 3.8.0** if you don't have Jukebox yet, and **Add GD Sounds to my existing OBS scenes** if you want setup to add the source. Both are off by default.
+3. Run it. On Windows, tick **Install Jukebox 3.8.0** if you don't have Jukebox yet, and **Add GD Sounds to my existing OBS scenes** if you want setup to add the source. Both are off by default.
 4. It will ask you to close OBS and GD if they are running.
 <img width="717" height="636" alt="image" src="https://github.com/user-attachments/assets/caaf8b6f-a84d-44ff-be6e-cb0466733efd" />
 
@@ -29,9 +29,13 @@ Toggle between Game/OBS volume control in pause menu.
 
 Update the mod and the OBS plugin together. This version of each only works with the other, and OBS's source properties say which one to update.
 
-## Speedhack and pitch shifting (To be released in 1.2.4)
+## Updates
 
-When another mod pitch shifts the game's audio with FMOD's pitch shifter, OBS applies the same shifters in the same order: on each music channel, on the music group and on sound effects. A replacement OBS song follows them too. To keep it at its normal pitch, turn off **Pitch shift a different OBS song** in the mod's settings.
+From 1.2.4 on, OBS Jukebox checks for a new version once per launch on Windows and macOS, and installs the mod and the OBS plugin together. Updates install while GD and OBS are closed, and never close OBS. Choose how it asks under **Settings > Updates**. On Linux, download new versions from the releases page.
+
+## Speedhack and pitch shifting
+
+When another mod pitch shifts the game's audio with FMOD's pitch shifter, OBS applies the same shifters in the same order: on each music channel, on the music group and on sound effects. A replacement OBS song follows them too. To keep it at its normal pitch, turn off **Pitch shift the OBS song** in the mod's settings.
 
 This mod utilizes [Stephan M. Bernsee's smbPitchShift algorithm](https://blogs.zynaptiq.com/bernsee/download/), the [same algorithm used by FMOD](https://www.fmod.com/docs/2.04/api/effects-reference.html#pitch-shifter), the audio middleware used in Geometry Dash, to ensure maximum parity.
 
