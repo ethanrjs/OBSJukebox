@@ -12,7 +12,7 @@ struct SetupView: View {
     @State private var gd = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app").path
     @State private var obs = "/Applications/OBS.app"
     @State private var output = ""
-    @State private var status = "Finish any OBS recording, then click Install."
+    @State private var status = "Stop any OBS recording, then click Install."
     @State private var failed = false
     @State private var busy = false
     @State private var closeApps = true
@@ -108,7 +108,7 @@ struct SetupView: View {
             return selected.contains(url.resolvingSymlinksInPath().standardizedFileURL)
         }
         if running.isEmpty { return }
-        status = "Close any OBS confirmation to continue installation."
+        status = "Confirm closing OBS to continue."
         for app in running { _ = app.terminate() }
         let deadline = Date().addingTimeInterval(30)
         while running.contains(where: { !$0.isTerminated }) && Date() < deadline {

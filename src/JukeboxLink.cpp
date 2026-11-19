@@ -397,7 +397,10 @@ std::string download(Choice c, bool retry) {
         request = {false, "Song file missing.\nPick another file in Jukebox."};
     // Jukebox makes every song it downloads GD's active song, so fetching the OBS song would switch
     // the game's audio. The message tells the user to pick the Game song again.
-    else request = {false, "OBS song not downloaded.\nDownload it in Jukebox."};
+    else
+        request = {
+            false, "OBS song not downloaded.\nDownload it in Jukebox, then re-pick your Game song."
+        };
     return requests[k].error;
 }
 

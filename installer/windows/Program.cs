@@ -331,7 +331,7 @@ static class Engine
 		var jukebox = FindJukebox(o.GD);
 		if (jukebox is { Version: "3.8.0" }) log("Keep installed Jukebox 3.8.0: " + jukebox.Value.Path);
 		else if (jukebox != null) throw new IOException("Jukebox " + jukebox.Value.Version + " is installed. Install Jukebox 3.8.0 from Geode before continuing.");
-		else if (!o.InstallJukebox) throw new IOException("Jukebox 3.8.0 is required. Install it from Geode, or select Download and install Jukebox, then retry.");
+		else if (!o.InstallJukebox) throw new IOException("Jukebox 3.8.0 is required. Install it from Geode, or select Install Jukebox 3.8.0.");
 		else if (o.DryRun) log("Would download official Jukebox 3.8.0: " + JukeboxUrl + " SHA256=" + JukeboxHash);
 		else
 		{
