@@ -171,8 +171,6 @@ static class InstallerTests
 			var manifest = Path.Combine(session, "manifest.json");
 			File.WriteAllText(manifest, System.Text.Json.JsonSerializer.Serialize(stranded));
 
-			Engine.RecoverInterrupted(new Options { StateRoot = interrupted, GD = interrupted, OBS = interrupted, ModOnly = true }, _ => { }, []);
-			Check(File.ReadAllText(modFile) == "half-installed mod", "a mod-only update leaves an interrupted install for full setup");
 			Engine.RecoverInterrupted(new Options { StateRoot = interrupted, GD = interrupted, OBS = interrupted }, _ => { }, []);
 			Check(File.ReadAllText(modFile) == "previous mod" && File.ReadAllText(manifest).Contains("rolled-back"), "a transaction left installing by a killed setup is restored on the next run");
 
@@ -407,12 +405,15 @@ static class InstallerTests
 		Check(Engine.ObsSetupMessage(new Options { CreateScene = true, ScenesFound = true }).StartsWith("OBS: GD Sounds is in your existing scenes.") &&
 			  Engine.ObsSetupMessage(new Options { CreateScene = true }).StartsWith("OBS: add Sources > GD Sounds once in OBS.") &&
 			  Engine.ObsSetupMessage(new Options()).StartsWith("OBS: add Sources > GD Sounds once in OBS."), "the OBS step in the success log matches what setup did to the scenes");
-		var liveOptions = Options.Parse(["--mod-only"]);
-		Check(liveOptions.ModOnly, "mod-only update is available from the command line");
+		var modOnlyRejected = false;
+		try { Options.Parse(["--mod-only"]); }
+		catch (ArgumentException) { modOnlyRejected = true; }
+		Check(modOnlyRejected, "setup always installs the mod and plugin together");
+		var liveOptions = Options.Parse([]);
 		liveOptions.GD = Path.Combine(Path.GetTempPath(), "GD");
 		liveOptions.OBS = Path.Combine(Path.GetTempPath(), "OBS");
 		var modDestination = Path.Combine(liveOptions.GD, "geode", "mods", "local.separate_song.geode");
-		Check(Engine.AppsForChanges(liveOptions, [modDestination]).Select(a => a.Name).SequenceEqual(["GeometryDash"]), "mod-only changes never request OBS to close");
+		Check(Engine.AppsForChanges(liveOptions, [modDestination]).Select(a => a.Name).SequenceEqual(["GeometryDash"]), "mod changes alone never request OBS to close");
 		Check(Engine.AppsForChanges(liveOptions, []).Count == 0, "unchanged installation closes no apps");
 		Check(Engine.AppsForChanges(liveOptions, [Path.Combine(liveOptions.OBS, "obs-plugins", "64bit", "separate-song.dll")]).Select(a => a.Name).SequenceEqual(["obs64"]), "plugin-only changes close OBS without closing GD");
 		Check(Engine.AppsForChanges(liveOptions, [modDestination, Path.Combine(liveOptions.SceneRoot, "scene.json")]).Count == 2, "scene edits still require OBS to close");
@@ -421,6 +422,5 @@ static class InstallerTests
 		Check(Engine.SuccessMessage(new Options()) == $"Installed OBS Jukebox {Program.ReleaseVersion}. In OBS, add Sources > GD Sounds once.", "fresh installation reports install and the OBS step");
 		Check(!Engine.SuccessMessage(new Options { CreateScene = true, ScenesFound = true }).Contains("add Sources"), "no OBS step when setup added GD Sounds to the scenes");
 		Check(Engine.SuccessMessage(new Options { PreviousVersion = Program.ReleaseVersion, AlreadyCurrent = true }).Contains("already up to date"), "unchanged installation does not claim an update happened");
-		Check(Engine.SuccessMessage(new Options { PreviousVersion = "1.2.0", ModOnly = true }).Contains("Run setup again later to update OBS"), "mod-only success explains the deferred plugin update");
 	}
 }
