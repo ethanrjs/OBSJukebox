@@ -68,6 +68,15 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.make(windows=wrong)
 
+    def test_refuses_a_version_the_mod_cannot_read(self):
+        windows = self.folder / "OBS-Jukebox-١.2.5-Windows-Setup.exe"
+        mac = self.folder / "OBS-Jukebox-١.2.5-macOS-arm64.zip"
+        windows.write_bytes(b"x")
+        mac.write_bytes(b"x")
+        mod = {"version": "v١.2.5", "gd": {"win": "2.2081", "mac": "2.2081"}}
+        with self.assertRaises(SystemExit):
+            self.make(windows=windows, mac=mac, mod=mod, tag="v١.2.5")
+
 
 class KeyTests(unittest.TestCase):
     def test_rotation_and_empty_trust(self):

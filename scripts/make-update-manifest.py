@@ -11,7 +11,7 @@ import json
 import pathlib
 import re
 
-VERSION = r"(\d{1,9}\.\d{1,9}\.\d{1,9})"
+VERSION = r"([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})"
 NAMES = {
     "windows": re.compile(rf"OBS-Jukebox-{VERSION}-Windows-Setup\.exe"),
     "macos-arm64": re.compile(rf"OBS-Jukebox-{VERSION}-macOS-arm64\.zip"),

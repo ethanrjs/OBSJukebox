@@ -31,7 +31,7 @@ class WrapperTests(unittest.TestCase):
                 plist = executable("plist", "echo OBS")
                 mktemp = executable("mktemp", 'exec /usr/bin/mktemp "$HOME/tmp.XXXXXX"')
                 opened = executable("open", 'echo open >> "$HOME/events"')
-                                                                                                
+
                 pgrep = executable("pgrep", '''[ "$2" = OBS ] || exit 1
 n=$(cat "$HOME/polls" 2>/dev/null || echo 0)
 n=$((n+1)); echo "$n" > "$HOME/polls"
