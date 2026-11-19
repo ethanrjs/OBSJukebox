@@ -311,8 +311,6 @@ void startUpdate(bool restart, bool viaNotice) {
             reopen = restart && file::writeString(paths().reopenFlag, "").isOk();
             if (restart && !reopen)
                 log::warn("Could not write the reopen flag; GD won't reopen after the update");
-            // Off the main thread: antivirus scans a new setup inside CreateProcess, which can
-            // block for most of a second.
             started = update_platform::startSetup(
                 launch->program, launch->args, launch->job == update_platform::Job::Breakaway
             );
