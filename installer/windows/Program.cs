@@ -554,7 +554,7 @@ static class Engine
 				using var process = p;
 				var actual = ProcessPath(p) ?? throw new AppRunningException("Cannot inspect running " + name + ". Close it manually before installing.");
 				if (!o.Update && !string.Equals(actual, exe, StringComparison.OrdinalIgnoreCase)) continue;
-				if (!o.CloseApps) throw new AppRunningException(name + " is running. Close it first or choose Ask apps to close. OBS can ask you to stop recording/replay; this setup never force-kills it.");
+				if (!o.CloseApps) throw new AppRunningException(name + " is running. Close it, or select Close GD and OBS if needed.");
 				log("Requesting normal close: " + actual);
 				if (!p.CloseMainWindow()) throw new IOException(name + " has no visible main window. If OBS is minimized to the system tray, open its tray menu and choose Exit, then retry. No process was force-killed.");
 				if (!p.WaitForExit(20000)) throw new IOException(name + " is still running. Resolve its confirmation or close it manually, then retry. No process was force-killed.");
