@@ -8,8 +8,16 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/native.yml
+  audio:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/audio.yml
+  linux:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/linux.yml
   manifest:
-    needs: build
+    needs: [build, audio, linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
