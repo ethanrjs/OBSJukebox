@@ -26,7 +26,7 @@ On Windows and macOS, the mod asks github.com once per launch whether a new OBS 
 
 - **Ask me**: a small panel on the main menu offers the update.
 - **Install when GD and OBS close**: the update installs the next time both are closed.
-- **Install right away**: GD closes, the update installs, and GD reopens. If OBS is open or you are in a level, it waits until you close GD and OBS.
+- **Install right away**: GD closes, the update installs, and GD reopens. If OBS is open or GD isn't on the main menu, it waits until you close GD and OBS.
 
 The mod and the OBS plugin update together, and the updater never closes OBS. On Linux, a panel links to the releases page instead.
 
