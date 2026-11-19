@@ -20,7 +20,7 @@ using namespace geode::prelude;
 namespace ur = update_rules;
 
 namespace {
-constexpr auto RELEASES = "https://github.com/ethanrjs/OBSJukebox/releases";
+constexpr auto RELEASES = "https://github.com/navinor/OBSJukebox/releases";
 constexpr uint64_t MAX_SETUP = 200ull * 1024 * 1024;
 
 std::string baseUrl() {
@@ -424,6 +424,11 @@ void showLinkPanel(ur::Version version) {
 }
 
 void decide(Offer o, bool obsRunning, ur::Mode mode) {
+    // Geode only loads a mod on the GD version it targets, so a release for another GD can't run here.
+    if (o.manifest.gd != Mod::get()->getMetadata().getGameVersion()) {
+        log::info("The latest release needs GD {}", o.manifest.gd);
+        return;
+    }
     auto saved = loadSaved();
     auto hasEntry = ur::entryFor(o.manifest, platform()).has_value();
     auto choice = ur::planOffer(

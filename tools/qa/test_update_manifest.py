@@ -27,32 +27,41 @@ class ManifestTests(unittest.TestCase):
         self.windows.write_bytes(b"windows")
         self.mac.write_bytes(b"mac!")
 
+    def make(self, windows=None, mac=None, mod=None, tag="v1.2.5"):
+        mod = mod or {"version": "v1.2.5", "gd": {"win": "2.2081", "mac": "2.2081"}}
+        return manifest_script.manifest(windows or self.windows, mac or self.mac, mod, tag)
+
     def test_canonical_bytes(self):
-        first = manifest_script.manifest(self.windows, self.mac, "v1.2.5", "v1.2.5")
-        self.assertEqual(first, manifest_script.manifest(self.windows, self.mac, "v1.2.5", "v1.2.5"))
+        first = self.make()
+        self.assertEqual(first, self.make())
         self.assertEqual(
             first,
             b'{"files":{"macos-arm64":{"sha256":'
             b'"e76e8bb942910fb7a4e884777ed922862101615b7bfefc64b90691f11c60bd16","size":4},'
             b'"windows":{"sha256":'
             b'"340d600392818df2413382dc7d8325c360d83ea49a262d31760348484bbc10b5","size":7}},'
-            b'"schema":1,"version":"1.2.5"}\n',
+            b'"gd":"2.2081","schema":1,"version":"1.2.5"}\n',
         )
 
     def test_refuses_disagreeing_versions(self):
+        gd = {"win": "2.2081", "mac": "2.2081"}
         for mod_version, tag in (("v1.2.4", "v1.2.5"), ("v1.2.5", "v1.2.6")):
             with self.assertRaises(SystemExit):
-                manifest_script.manifest(self.windows, self.mac, mod_version, tag)
+                self.make(mod={"version": mod_version, "gd": gd}, tag=tag)
         other = self.folder / "OBS-Jukebox-1.2.6-macOS-arm64.zip"
         other.write_bytes(b"x")
         with self.assertRaises(SystemExit):
-            manifest_script.manifest(self.windows, other, "v1.2.5", "v1.2.5")
+            self.make(mac=other)
+
+    def test_refuses_platforms_on_different_gd_versions(self):
+        with self.assertRaises(SystemExit):
+            self.make(mod={"version": "v1.2.5", "gd": {"win": "2.2081", "mac": "2.2091"}})
 
     def test_refuses_unexpected_names(self):
         wrong = self.folder / "setup.exe"
         wrong.write_bytes(b"x")
         with self.assertRaises(SystemExit):
-            manifest_script.manifest(wrong, self.mac, "v1.2.5", "v1.2.5")
+            self.make(windows=wrong)
 
 
 class KeyTests(unittest.TestCase):

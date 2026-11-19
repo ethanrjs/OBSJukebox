@@ -31,6 +31,7 @@ struct FileEntry {
 
 struct Manifest {
     Version version;
+    std::string gd;
     std::optional<FileEntry> windows, macArm64;
 };
 

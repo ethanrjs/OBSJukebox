@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Writes update.json for a release: its version and the size and SHA-256 of each setup.
+"""Writes update.json for a release: its version, the GD version it needs, and the size and
+SHA-256 of each setup.
 
 The output is canonical (sorted keys, no spaces, one trailing newline), so the same files always
 give the same bytes, and the mod accepts only that exact form.
@@ -17,7 +18,11 @@ NAMES = {
 }
 
 
-def manifest(windows: pathlib.Path, mac: pathlib.Path, mod_version: str, tag: str) -> bytes:
+def manifest(windows: pathlib.Path, mac: pathlib.Path, mod: dict, tag: str) -> bytes:
+    mod_version = mod["version"]
+    gd = {mod["gd"]["win"], mod["gd"]["mac"]}
+    if len(gd) != 1:
+        raise SystemExit(f"Windows and macOS target different GD versions: {sorted(gd)}")
     files, versions = {}, set()
     for key, path in (("windows", windows), ("macos-arm64", mac)):
         match = NAMES[key].fullmatch(path.name)
@@ -29,7 +34,7 @@ def manifest(windows: pathlib.Path, mac: pathlib.Path, mod_version: str, tag: st
     everything = versions | {mod_version.removeprefix("v"), tag.removeprefix("v")}
     if len(everything) != 1:
         raise SystemExit(f"Versions disagree: files {sorted(versions)}, mod.json {mod_version}, tag {tag}")
-    body = {"files": files, "schema": 1, "version": everything.pop()}
+    body = {"files": files, "gd": gd.pop(), "schema": 1, "version": everything.pop()}
     return (json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
@@ -41,8 +46,8 @@ def main():
     parser.add_argument("windows", type=pathlib.Path)
     parser.add_argument("mac", type=pathlib.Path)
     args = parser.parse_args()
-    mod_version = json.loads(args.mod_json.read_text(encoding="utf-8"))["version"]
-    args.out.write_bytes(manifest(args.windows, args.mac, mod_version, args.tag))
+    mod = json.loads(args.mod_json.read_text(encoding="utf-8"))
+    args.out.write_bytes(manifest(args.windows, args.mac, mod, args.tag))
 
 
 if __name__ == "__main__":

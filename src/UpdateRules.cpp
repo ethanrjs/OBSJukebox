@@ -38,7 +38,7 @@ std::optional<Manifest> parseManifest(std::string_view bytes) {
 
     static std::regex const shape(
         R"re(\{"files":\{(?:"macos-arm64":\{"sha256":"([0-9a-f]{64})","size":(0|[1-9][0-9]{0,11})\}(,?))?)re"
-        R"re((?:"windows":\{"sha256":"([0-9a-f]{64})","size":(0|[1-9][0-9]{0,11})\})?\},"schema":1,)re"
+        R"re((?:"windows":\{"sha256":"([0-9a-f]{64})","size":(0|[1-9][0-9]{0,11})\})?\},"gd":"([0-9]{1,3}\.[0-9]{1,6})","schema":1,)re"
         R"re("version":"([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})"\}\n)re"
     );
     std::cmatch m;
@@ -47,7 +47,7 @@ std::optional<Manifest> parseManifest(std::string_view bytes) {
     if (m[3].length() != (m[1].matched && m[4].matched ? 1 : 0)) return std::nullopt;
 
     if (!m[1].matched && !m[4].matched) return std::nullopt;
-    Manifest out{*parseVersion(m[6].str()), {}, {}};
+    Manifest out{*parseVersion(m[7].str()), m[6].str(), {}, {}};
     auto entry = [](std::csub_match const& sha, std::csub_match const& size) {
         // stoull can throw, and the guideline says avoid throwing calls. The regex matches digits
         // only, so from_chars cannot fail here, exactly as it does in parseVersion.

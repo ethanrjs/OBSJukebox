@@ -42,7 +42,8 @@ static void rulesPart1(std::filesystem::path const& fixtures) {
     auto manifestText = text(fixtures / "update.json");
     auto manifest = parseManifest(manifestText);
     check(
-        manifest && manifest->version == Version{9, 8, 7} && manifest->windows && manifest->macArm64,
+        manifest && manifest->version == Version{9, 8, 7} && manifest->gd == "2.2081" &&
+            manifest->windows && manifest->macArm64,
         "parses the canonical manifest"
     );
     check(
@@ -64,6 +65,9 @@ static void rulesPart1(std::filesystem::path const& fixtures) {
     std::string extra = manifestText;
     extra.replace(extra.find("\"schema\""), 1, "\"x\":1,\"");
     check(!both(extra), "refuses an unknown field");
+    std::string noGd = manifestText;
+    noGd.erase(noGd.find("\"gd\""), std::string("\"gd\":\"2.2081\",").size());
+    check(!both(noGd), "refuses a manifest without a GD version");
     std::string spaced = manifestText;
     spaced.replace(spaced.find(":"), 1, ": ");
     check(!both(spaced), "refuses a non-canonical form");
@@ -71,18 +75,18 @@ static void rulesPart1(std::filesystem::path const& fixtures) {
     big.replace(big.find("9.8.7"), 5, "1234567890.8.7");
     check(!both(big), "refuses a ten-digit version component");
     std::string onlyWindows = "{\"files\":{\"windows\":{\"sha256\":\"" + std::string(64, 'b') +
-        "\",\"size\":1}},\"schema\":1,\"version\":\"1.0.0\"}\n";
+        "\",\"size\":1}},\"gd\":\"2.2081\",\"schema\":1,\"version\":\"1.0.0\"}\n";
     auto windowsOnly = parseManifest(onlyWindows);
     check(
         windowsOnly && windowsOnly->windows && !windowsOnly->macArm64 &&
             !entryFor(*windowsOnly, Platform::MacArm64),
         "a missing platform has no entry"
     );
-    std::string danglingComma = "{\"files\":{\"macos-arm64\":{\"sha256\":\"" +
-        std::string(64, 'a') + "\",\"size\":2},},\"schema\":1,\"version\":\"1.0.0\"}\n";
+    std::string danglingComma = "{\"files\":{\"macos-arm64\":{\"sha256\":\"" + std::string(64, 'a') +
+        "\",\"size\":2},},\"gd\":\"2.2081\",\"schema\":1,\"version\":\"1.0.0\"}\n";
     check(!parseManifest(danglingComma), "refuses a comma without a second entry");
     check(
-        !parseManifest("{\"files\":{},\"schema\":1,\"version\":\"1.0.0\"}\n"),
+        !parseManifest("{\"files\":{},\"gd\":\"2.2081\",\"schema\":1,\"version\":\"1.0.0\"}\n"),
         "refuses a manifest with no files"
     );
     check(
@@ -414,7 +418,7 @@ static void cryptoChecks(std::filesystem::path const& fixtures) {
     );
     auto digest = update_crypto::sha256File(fixtures / "update.json");
     check(
-        digest.has_value() && (*digest)[0] == 0x92 && (*digest)[31] == 0xff,
+        digest.has_value() && (*digest)[0] == 0x44 && (*digest)[31] == 0xda,
         "the hash matches sha256sum"
     );
     check(!update_crypto::sha256File(fixtures / "missing.file"), "a missing file has no hash");

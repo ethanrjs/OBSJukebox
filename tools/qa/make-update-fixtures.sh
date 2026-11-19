@@ -8,7 +8,7 @@ openssl ecparam -name prime256v1 -genkey -noout -out "$out/test-key.pem"
 openssl ec -in "$out/test-key.pem" -pubout -outform DER 2> /dev/null | tail -c 65 | xxd -p -c 65 > "$out/test-public.hex"
 a=$(printf 'a%.0s' {1..64})
 b=$(printf 'b%.0s' {1..64})
-printf '{"files":{"macos-arm64":{"sha256":"%s","size":2},"windows":{"sha256":"%s","size":1}},"schema":1,"version":"9.8.7"}\n' "$a" "$b" > "$out/update.json"
+printf '{"files":{"macos-arm64":{"sha256":"%s","size":2},"windows":{"sha256":"%s","size":1}},"gd":"2.2081","schema":1,"version":"9.8.7"}\n' "$a" "$b" > "$out/update.json"
 need_plain=1 need_r=1 need_s=1
 while ((need_plain || need_r || need_s)); do
     openssl dgst -sha256 -sign "$out/test-key.pem" -out "$out/candidate.sig" "$out/update.json"
