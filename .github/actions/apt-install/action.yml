@@ -9,8 +9,6 @@ inputs:
 runs:
   using: composite
   steps:
-    # GitHub runs several image versions at once. Another version's cache still holds most of the
-    # packages, and apt downloads only the ones whose versions differ.
     - name: Name the package cache
       id: cache-key
       shell: bash
