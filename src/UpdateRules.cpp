@@ -140,11 +140,11 @@ std::optional<Status> parseStatus(std::string_view text) {
 
 std::string noticeText(Notice notice, Version version) {
     switch (notice) {
-        case Notice::Installed: return "OBS Jukebox updated to " + toString(version) + ".";
-        case Notice::Declined: return "OBS Jukebox update cancelled.";
-        case Notice::Failed: return "Update failed. It'll be offered again.";
-        case Notice::ThirdFailure: return "Update failed again. Use the download page.";
-        case Notice::Repair: return "Update failed. Reinstall from the download page.";
+        case Notice::Installed: return "OBS Jukebox: Updated to " + toString(version);
+        case Notice::Declined: return "OBS Jukebox: Update cancelled";
+        case Notice::Failed: return "OBS Jukebox: Update failed";
+        case Notice::ThirdFailure: return "OBS Jukebox: Update failed. Use the download page.";
+        case Notice::Repair: return "OBS Jukebox: Update failed. Reinstall from the download page.";
         case Notice::None: break;
     }
     return {};

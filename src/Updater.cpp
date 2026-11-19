@@ -343,12 +343,12 @@ void startUpdate(bool restart, bool viaNotice) {
                     log::warn("The update setup didn't start (download or launch failed)");
                     if (panel == Panel::Progress) panel = Panel::None;
                     refreshPanel();
-                    notify("The OBS Jukebox update couldn't start.");
+                    notify("OBS Jukebox: Update couldn't start");
                     return;
                 }
 
                 if (panel == Panel::Progress) {
-                    progressText = "Starting the setup...";
+                    progressText = "Starting update...";
                     refreshPanel();
                 }
                 std::thread([version, restart, viaNotice, startedOn, reopen] {
@@ -373,11 +373,11 @@ void startUpdate(bool restart, bool viaNotice) {
                             std::filesystem::remove(paths().reopenFlag, error);
                             panel = Panel::None;
                             refreshPanel();
-                            notify("The OBS Jukebox update couldn't start.");
+                            notify("OBS Jukebox: Update couldn't start");
                             return;
                         }
                         if (!restart) {
-                            notify("Update installs after you close GD and OBS.");
+                            notify("OBS Jukebox: Update installs when GD and OBS close");
                             return;
                         }
                         if (!viaNotice) {
@@ -386,7 +386,7 @@ void startUpdate(bool restart, bool viaNotice) {
                             exitForUpdate(reopen, startedOn);
                             return;
                         }
-                        notify("Updating OBS Jukebox. GD restarts shortly.");
+                        notify("OBS Jukebox: Updating. GD will restart.");
                         std::thread([reopen, startedOn] {
                             std::this_thread::sleep_for(std::chrono::seconds(3));
                             Loader::get()->queueInMainThread([reopen, startedOn] {
@@ -408,8 +408,8 @@ void exitForUpdate(bool reopen, unsigned startedOn) {
         log::info("Not closing GD for the update (left the menu: {}, reopen flag: {})", left, reopen);
         refreshPanel();
         notify(
-            reopen ? "Close GD and OBS to update. GD reopens after." :
-                     "Close GD and OBS to finish the update."
+            reopen ? "OBS Jukebox: Close GD and OBS to update" :
+                     "OBS Jukebox: Close GD and OBS to finish updating"
         );
         return;
     }
@@ -567,7 +567,7 @@ void drawPanel(MenuLayer* menu) {
     root->addChild(background);
     auto title = CCLabelBMFont::create(
         progress ? progressText.c_str() :
-                   fmt::format("OBS Jukebox {} is out.", ur::toString(panelVersion)).c_str(),
+                   fmt::format("OBS Jukebox {} is out", ur::toString(panelVersion)).c_str(),
         "bigFont.fnt"
     );
     title->limitLabelWidth(210.f, .4f, .1f);
@@ -634,11 +634,11 @@ void onMainMenu(MenuLayer* menu) {
                   ur::Notice::Repair})
                 pendingNotices.push_back(ur::noticeText(notice, panelVersion));
             for (auto text :
-                 {"The OBS Jukebox update couldn't start.",
-                  "Update installs after you close GD and OBS.",
-                  "Updating OBS Jukebox. GD restarts shortly.",
-                  "Close GD and OBS to update. GD reopens after.",
-                  "Close GD and OBS to finish the update."})
+                 {"OBS Jukebox: Update couldn't start",
+                  "OBS Jukebox: Update installs when GD and OBS close",
+                  "OBS Jukebox: Updating. GD will restart.",
+                  "OBS Jukebox: Close GD and OBS to update",
+                  "OBS Jukebox: Close GD and OBS to finish updating"})
                 pendingNotices.push_back(text);
         }
         panel = what == "link" ? Panel::Link :

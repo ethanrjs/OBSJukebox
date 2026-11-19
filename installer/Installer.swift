@@ -38,7 +38,7 @@ struct SetupView: View {
             Text("Separate GD/Song output for OBS")
             pathRow("Geometry Dash application", path: $gd)
             pathRow("OBS Studio application", path: $obs)
-            Text("Jukebox 3.8.0 is included and will be installed.")
+            Text("Includes Jukebox 3.8.0.")
                 .padding(.vertical, 6)
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("Close GD and OBS for installation", isOn: $closeApps)
@@ -116,7 +116,7 @@ struct SetupView: View {
         }
         if running.contains(where: { !$0.isTerminated }) {
             throw NSError(domain: "OBSJukeboxSetup", code: 1, userInfo: [NSLocalizedDescriptionKey:
-                "GD or OBS is still running. Finish any recording, close the application, then click Install again."])
+                "Close GD and OBS, then click Install again."])
         }
     }
 
@@ -131,7 +131,7 @@ struct SetupView: View {
             guard undo || (FileManager.default.fileExists(atPath: gdPath + "/Contents/MacOS/Geometry Dash") &&
                   Bundle(path: obsPath)?.executableURL != nil) else {
                 throw NSError(domain: "OBSJukeboxSetup", code: 2, userInfo: [NSLocalizedDescriptionKey:
-                    "Choose the Geometry Dash and OBS Studio applications before installing."])
+                    "Choose GD and OBS first."])
             }
             if closeApps { try await quitApplications([gdPath, obsPath]) }
             let result: (String, Bool) = await withCheckedContinuation { continuation in
@@ -155,7 +155,7 @@ struct SetupView: View {
             }
             output = result.0
             failed = !result.1
-            status = result.1 ? (undo ? "Undo finished. Review preserved files in the log below." : "Installed. In OBS, add Sources > GD Sounds once.") : "Installation did not finish. See the details below and setup logs."
+            status = result.1 ? (undo ? "Undo finished." : "Installed. In OBS, add Sources > GD Sounds once.") : "Install failed. See the log below."
             if result.1 && shouldReopen && !undo {
                 NSWorkspace.shared.open(URL(fileURLWithPath: gdPath))
                 NSWorkspace.shared.open(URL(fileURLWithPath: obsPath))

@@ -49,7 +49,7 @@ std::optional<std::array<uint8_t, 65>> parsePublicKeyHex(std::string_view hex);
 std::wstring quoteWindowsArgument(std::wstring_view argument);
 
 inline constexpr char const* MODE_ASK = "Ask me";
-inline constexpr char const* MODE_AFTER_CLOSE = "Install after I close GD and OBS";
+inline constexpr char const* MODE_AFTER_CLOSE = "Install when GD and OBS close";
 inline constexpr char const* MODE_NOW = "Install right away";
 inline constexpr char const* MODE_OFF = "Don't check";
 enum class Mode {

@@ -374,9 +374,9 @@ static void rulesPart2() {
         "the blocked version itself isn't offered"
     );
 
-    check(noticeText(Notice::Installed, v125) == "OBS Jukebox updated to 1.2.5.", "installed text");
+    check(noticeText(Notice::Installed, v125) == "OBS Jukebox: Updated to 1.2.5", "installed text");
     check(
-        noticeText(Notice::Failed, v125) == "Update failed. It'll be offered again.",
+        noticeText(Notice::Failed, v125) == "OBS Jukebox: Update failed",
         "failed text leaves the reason to the log"
     );
 }

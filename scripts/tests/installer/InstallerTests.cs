@@ -417,9 +417,10 @@ static class InstallerTests
 		Check(Engine.AppsForChanges(liveOptions, [Path.Combine(liveOptions.OBS, "obs-plugins", "64bit", "separate-song.dll")]).Select(a => a.Name).SequenceEqual(["obs64"]), "plugin-only changes close OBS without closing GD");
 		Check(Engine.AppsForChanges(liveOptions, [modDestination, Path.Combine(liveOptions.SceneRoot, "scene.json")]).Count == 2, "scene edits still require OBS to close");
 		Check(Engine.AppsForChanges(liveOptions, [liveOptions.GD + "-other/plugin.dll"]).Single().Name == "obs64", "path prefix collision is not treated as a GD-only change");
-		Check(Engine.SuccessMessage(new Options { PreviousVersion = "1.2.0" }).StartsWith($"Successfully updated to {Program.ReleaseVersion}."), "existing installation reports successful version update");
-		Check(Engine.SuccessMessage(new Options()).StartsWith($"Successfully installed OBS Jukebox {Program.ReleaseVersion}."), "fresh installation reports install instead of update");
+		Check(Engine.SuccessMessage(new Options { PreviousVersion = "1.2.0" }) == $"Updated to {Program.ReleaseVersion}.", "existing installation reports successful version update");
+		Check(Engine.SuccessMessage(new Options()) == $"Installed OBS Jukebox {Program.ReleaseVersion}. In OBS, add Sources > GD Sounds once.", "fresh installation reports install and the OBS step");
+		Check(!Engine.SuccessMessage(new Options { CreateScene = true, ScenesFound = true }).Contains("add Sources"), "no OBS step when setup added GD Sounds to the scenes");
 		Check(Engine.SuccessMessage(new Options { PreviousVersion = Program.ReleaseVersion, AlreadyCurrent = true }).Contains("already up to date"), "unchanged installation does not claim an update happened");
-		Check(Engine.SuccessMessage(new Options { PreviousVersion = "1.2.0", ModOnly = true }).Contains("OBS was kept running"), "mod-only success explains the deferred plugin update");
+		Check(Engine.SuccessMessage(new Options { PreviousVersion = "1.2.0", ModOnly = true }).Contains("Run setup again later to update OBS"), "mod-only success explains the deferred plugin update");
 	}
 }

@@ -192,7 +192,7 @@ if ((song_lock != 0)); then
     fail 'The OBS Jukebox support folder is not writable.'
 fi
 if /usr/bin/pgrep -x 'Geometry Dash' > /dev/null || /usr/bin/pgrep -x "$song_obs_executable" > /dev/null; then
-    stop 2 'Finish any OBS recording, close Geometry Dash and OBS, then click Install again.'
+    stop 2 'Close GD and OBS, then click Install again.'
 fi
 song_frameworks="$song_app/Contents/Frameworks"
 [[ -d "$song_frameworks" && -w "$song_frameworks" ]] || fail 'Your account cannot write to this Steam installation. Choose a Steam library owned by your account.'

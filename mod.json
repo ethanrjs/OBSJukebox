@@ -27,8 +27,8 @@
     },
     "pitch-shift-replacement": {
       "type": "bool",
-      "name": "Pitch shift a different OBS song",
-      "description": "When another mod pitch shifts the game's music, OBS shifts the song it plays instead too.",
+      "name": "Pitch shift the OBS song",
+      "description": "Follow other mods' pitch shift in OBS.",
       "default": true
     },
     "offset": {
@@ -39,9 +39,9 @@
     "update-mode": {
       "type": "string",
       "name": "Updates",
-      "description": "Checks GitHub for a new OBS Jukebox once per launch. Updates install when Geometry Dash and OBS are closed, and never close OBS.",
+      "description": "Checks for updates on launch. Never closes OBS.",
       "default": "Ask me",
-      "one-of": ["Ask me", "Install after I close GD and OBS", "Install right away", "Don't check"]
+      "one-of": ["Ask me", "Install when GD and OBS close", "Install right away", "Don't check"]
     }
   },
   "tags": [

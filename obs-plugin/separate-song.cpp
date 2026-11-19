@@ -780,7 +780,7 @@ struct SongSource {
     obs_source_t* source;
     std::atomic<bool> stop{false}, active{false};
     std::mutex mutex;
-    static constexpr char const* noSongDetail = "Select the OBS checkbox beside a Jukebox song.";
+    static constexpr char const* noSongDetail = "Tick OBS beside a Jukebox song.";
     std::string detail = noSongDetail;
     std::thread worker, decoderWorker, effectsWorker;
     std::shared_ptr<Receiver> linkReceiver;
@@ -1172,16 +1172,14 @@ struct SongSource {
         bool newMod = !connected && linkReceiver->newModSending(now);
         bool unverified = !connected && linkReceiver->unverifiedSending(now);
         std::lock_guard lock(mutex);
-        detail = oldMod ? "Update the OBS Jukebox mod in Geometry Dash to match this plugin." :
-            newMod      ? "Update the OBS Jukebox plugin to match the mod in Geometry Dash." :
-            unverified ? "Can't verify Geometry Dash: its packets don't match the OBS Jukebox link "
-                         "key. Restart Geometry Dash." :
-            !linkReceiver->available() ?
-                         "Game link unavailable: local UDP port is already in use." :
-            !decoderError.empty() ? decoderError :
-            !connected            ? "Waiting for Geometry Dash" :
-            !latest.song[0]       ? noSongDetail :
-                                    std::string(latest.song) + " | " + latest.status +
+        detail = oldMod                ? "Update the mod in GD to match this plugin." :
+            newMod                     ? "Update this plugin to match the mod in GD." :
+            unverified                 ? "Can't verify GD. Restart GD." :
+            !linkReceiver->available() ? "Game link unavailable: port in use." :
+            !decoderError.empty()      ? decoderError :
+            !connected                 ? "Waiting for GD" :
+            !latest.song[0]            ? noSongDetail :
+                                         std::string(latest.song) + " | " + latest.status +
                 (latest.attempt > 0 ? " | Attempt " + std::to_string(latest.attempt) : "");
     }
 
@@ -1489,7 +1487,7 @@ static void* create(obs_data_t*, obs_source_t* source) {
 
 static obs_properties_t* properties(void* data) {
     auto props = obs_properties_create();
-    obs_properties_add_text(props, "version", "OBSJukebox " OBS_JUKEBOX_VERSION, OBS_TEXT_INFO);
+    obs_properties_add_text(props, "version", "OBS Jukebox " OBS_JUKEBOX_VERSION, OBS_TEXT_INFO);
     std::string detail = "Playback follows GD automatically.";
     if (data) {
         auto s = static_cast<SongSource*>(data);
@@ -1500,8 +1498,8 @@ static obs_properties_t* properties(void* data) {
     obs_properties_add_text(
         props,
         "help",
-        "Includes all sounds through GD, including selected custom song. Mute audio on "
-        "other GD/desktop captures to prevent duplicated audio.",
+        "Plays GD's sounds and your OBS song. Mute GD in your other audio sources so you don't "
+        "hear it twice.",
         OBS_TEXT_INFO
     );
     return props;

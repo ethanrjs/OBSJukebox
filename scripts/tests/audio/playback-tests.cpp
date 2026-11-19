@@ -874,7 +874,7 @@ static void oldModTest(OldMod sends) {
     };
     check(
         !receiver->get().connected && silent &&
-            detail.find("Update the OBS Jukebox mod") != std::string::npos,
+            detail.find("Update the mod in GD") != std::string::npos,
         (std::string(names[int(sends)]) + " play nothing and ask for a newer mod").c_str()
     );
 }
@@ -904,7 +904,7 @@ static void forgedSenderTest() {
         detail = sim.source->detail;
     }
     check(
-        !receiver->get().connected && silent && detail.find("link key") != std::string::npos,
+        !receiver->get().connected && silent && detail.find("Can't verify GD") != std::string::npos,
         "a sender without the link key plays nothing and OBS says the key doesn't match"
     );
     check(sim.synchronize(sim.local), "the game is followed once it signs with the link key");
@@ -972,7 +972,7 @@ static void newKeyTest() {
 }
 
 // Geode updates the mod by itself, while the plugin is installed by hand. Packets from a newer
-// protocol play nothing and ask for a newer plugin, instead of "Waiting for Geometry Dash".
+// protocol play nothing and ask for a newer plugin, instead of "Waiting for GD".
 static void newModTest() {
     Simulation sim;
     SongLinkPacket p;
@@ -995,8 +995,7 @@ static void newModTest() {
         detail = sim.source->detail;
     }
     check(
-        !receiver->get().connected && silent &&
-            detail.find("Update the OBS Jukebox plugin") != std::string::npos,
+        !receiver->get().connected && silent && detail.find("Update this plugin") != std::string::npos,
         "packets from a newer mod play nothing and ask for a newer plugin"
     );
     // A later protocol might rename the song magic instead of bumping its version.
@@ -1013,8 +1012,7 @@ static void newModTest() {
         detail = renamed.source->detail;
     }
     check(
-        !receiver->get().connected &&
-            detail.find("Update the OBS Jukebox plugin") != std::string::npos,
+        !receiver->get().connected && detail.find("Update this plugin") != std::string::npos,
         "a renamed song packet from a newer mod asks for a newer plugin"
     );
 }

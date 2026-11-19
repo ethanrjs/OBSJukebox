@@ -386,7 +386,7 @@ std::string download(Choice c, bool retry) {
     request = {true, "", Clock::now()};
     log::info("OBS song cache miss: {} ({})", c.name, c.uid);
     if (c.original && c.id > 0) MusicDownloadManager::sharedState()->downloadSong(c.id);
-    else if (c.original) request = {false, "Original song file is unavailable."};
+    else if (c.original) request = {false, "Original song file missing."};
     else if ([&] {
                  auto locals = manifest(c.id)["locals"];
                  if (!locals.isArray()) return false;
@@ -394,14 +394,10 @@ std::string download(Choice c, bool retry) {
                      if (local["unique_id"].asString().unwrapOr("") == c.uid) return true;
                  return false;
              }())
-        request = {false, "Local song file is unavailable.\nChoose an existing file in Jukebox."};
+        request = {false, "Song file missing.\nPick another file in Jukebox."};
     // Jukebox makes every song it downloads GD's active song, so fetching the OBS song would switch
     // the game's audio. The message tells the user to pick the Game song again.
-    else
-        request = {
-            false,
-            "OBS song audio is missing.\nDownload it in Jukebox, then pick your Game song again."
-        };
+    else request = {false, "OBS song not downloaded.\nDownload it in Jukebox."};
     return requests[k].error;
 }
 
@@ -672,7 +668,7 @@ void showVersionNotice() {
     auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
     auto found = dependency ? dependency->getVersion().toVString() : std::string("none");
     Notification::create(
-        fmt::format("OBS Jukebox doesn't support Jukebox {} yet.\nOBS plays the game's song.", found),
+        fmt::format("Jukebox {} isn't supported yet.\nOBS plays the game's song.", found),
         NotificationIcon::Warning,
         6.f
     )
