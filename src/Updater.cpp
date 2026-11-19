@@ -389,6 +389,13 @@ void startUpdate(bool restart, bool viaNotice) {
 
 void exitForUpdate(bool reopen, unsigned startedOn) {
     panel = Panel::None;
+    // A setup that gave up deletes the flag as it exits; closing GD then would leave it closed.
+    std::error_code error;
+    if (reopen && !std::filesystem::exists(paths().reopenFlag, error)) {
+        log::info("The update setup exited before GD closed; keeping GD open");
+        refreshPanel();
+        return;
+    }
 
     bool left = !onMainMenu() || menuGeneration != startedOn;
     if (left || !reopen || update_platform::obsRunning()) {
