@@ -421,5 +421,6 @@ static class InstallerTests
 		Check(Engine.SuccessMessage(new Options { PreviousVersion = "1.2.0" }) == $"Updated to {Program.ReleaseVersion}.", "existing installation reports successful version update");
 		Check(Engine.SuccessMessage(new Options()) == $"Installed OBS Jukebox {Program.ReleaseVersion}. In OBS, add Sources > GD Sounds once.", "fresh installation reports install and the OBS step");
 		Check(!Engine.SuccessMessage(new Options { CreateScene = true, ScenesFound = true }).Contains("add Sources"), "no OBS step when setup added GD Sounds to the scenes");
-		Check(Engine.SuccessMessage(new Options { PreviousVersion = Program.ReleaseVersion, AlreadyCurrent = true }).Contains("already up to date"), "unchanged installation does not claim an update happened");	}
+		Check(Engine.SuccessMessage(new Options { PreviousVersion = Program.ReleaseVersion, AlreadyCurrent = true }).Contains("already up to date"), "unchanged installation does not claim an update happened");
+	}
 }
