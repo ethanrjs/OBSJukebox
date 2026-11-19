@@ -1,8 +1,10 @@
 name: Native builds
 on:
   workflow_dispatch:
+  workflow_call:
   pull_request:
   push:
+    branches: ['**']
 permissions:
   contents: read
 jobs:
@@ -40,6 +42,9 @@ jobs:
         run: ./scripts/build-windows.ps1 -ObsDirectory "$PWD/tools/pinned/obs"
       - name: Package installer
         run: ./scripts/package-windows.ps1
+      - name: Generate updater test fixtures
+        shell: bash
+        run: bash tools/qa/make-update-fixtures.sh tools/qa/update-fixtures
       - name: Protocol and decoder compilation
         shell: pwsh
         run: |
@@ -69,9 +74,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      # No NuGet cache here: this project restores only framework references, so the cache
-      # restore cost more than the restore it replaced (measured: 22 s without, 27 s with).
-      # The tests build the installer's Program.cs and use only temporary directories.
+      # No NuGet cache here: restoring only framework references is cheaper than the cache restore
+      # (measured: 22 s without, 27 s with). The tests use only temporary directories.
       - name: Installer regression tests
         run: dotnet run --project scripts/tests/installer/InstallerTests.csproj -c Release
   macos:
@@ -112,6 +116,9 @@ jobs:
         run: |
           python3 tools/qa/check-geode-version.py
           python3 tools/qa/unix-install-state.py --perl /usr/bin/perl
+          bash tools/qa/make-update-fixtures.sh tools/qa/update-fixtures
+          c++ -std=c++20 -Wall -Wextra tools/qa/update-rules-validation.cpp src/UpdateRules.cpp src/UpdateCrypto.cpp -framework Security -framework CoreFoundation -o "$RUNNER_TEMP/update-rules-validation"
+          "$RUNNER_TEMP/update-rules-validation" tools/qa/update-fixtures
       - name: Transport and protocol tests
         run: |
           python3 tools/qa/test_link_protocol.py

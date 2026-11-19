@@ -89,7 +89,7 @@ with tempfile.TemporaryDirectory(prefix="jukebox-gui-") as folder:
         app.game.set("/home/ethan/.local/share/Steam/steamapps/common/Geometry Dash")
         app.prefix.set("")
         app.obs.set("Native OBS Studio")
-        app.status.set("Finish any OBS recording and close GD and OBS, then click Install.")
+        app.status.set("Close GD and OBS, then click Install.")
         root.geometry("730x650+0+0")
         root.update()
         ImageGrab.grab(bbox=(root.winfo_rootx(), root.winfo_rooty(), root.winfo_rootx() + 730, root.winfo_rooty() + 650)).save(sys.argv[1])

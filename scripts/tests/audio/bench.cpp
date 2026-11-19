@@ -1,14 +1,5 @@
-// Measures what the plugin's audio costs and how close its pitch stage stays to GD's FMOD. It
-// reports numbers and fails nothing: playback-tests.cpp holds the pass/fail checks. Build and run it
-// on an otherwise idle machine with `scripts/tests/audio/run.ps1 -Bench <mode>` or
-// `scripts/tests/audio/run.sh --bench <mode>`.
-//
-//   bench pitch      CPU per second of audio for one stage, shipping and 41b8647 runs interleaved
-//   bench render     each step of the plugin's pipeline on simulated time, one thread, per block
-//   bench threads    the real output thread and workers under load, per thread, for misses and lateness
-//   bench link       signing and checking packets, on the mod's side and the plugin's
-//   bench fidelity   the shipping stage against the 41b8647 reference and FMOD's recordings
-//   bench open       opening, seeking and the first block of the song files given, in wall time
+// Measures the plugin's audio cost and pitch fidelity against GD's FMOD. It reports numbers and
+// fails nothing; run it with run.ps1 -Bench <mode> or run.sh --bench <mode>, both in this folder.
 #define main playbackTests
 #include "playback-tests.cpp"
 #undef main
@@ -129,9 +120,8 @@ struct Samples {
     }
 };
 
-// One stage over ten seconds of stereo noise in OBS's 480-frame calls, shipping and reference runs
-// interleaved, taking turns to go first, so drift in clock speed hits both. Reports CPU ms per second
-// of audio (median of the rounds) and per-call microseconds.
+// One stage over ten seconds of stereo noise in OBS's 480-frame calls. Shipping and reference
+// interleave and take turns going first, so clock drift hits both equally.
 template <class Shifter>
 static double timeStage(heldout::Signal const& signal, float pitch, uint32_t fft, Samples& calls) {
     auto audio = signal;
@@ -346,10 +336,8 @@ struct Game {
     }
 };
 
-// Each step of the pipeline on simulated time, on this thread, so its CPU time is the plugin's alone.
-// The receiver step is handling the game's packets (checking tags, queueing; the game signs them
-// beforehand, untimed); music is the decoder worker's block, effects the effects worker's, and mix the
-// output thread's.
+// Each pipeline step on simulated time, on this thread, so its CPU time is the plugin's alone. The
+// receiver step times packet handling only; the game signs its packets beforehand, untimed.
 static void render(unsigned seconds, std::string const& only) {
     writeStereoWav("artifacts/audio-tests/bench-48k.wav", 48000);
     writeStereoWav("artifacts/audio-tests/bench-44k.wav", 44100);
@@ -432,11 +420,8 @@ static void render(unsigned seconds, std::string const& only) {
     }
 }
 
-// The real output thread and both workers, with a real receiver and a game on loopback, for misses,
-// wake-ups and how late each block reaches OBS. CPU is per thread over the measured stretch; the
-// game's sender threads are not the plugin's and are left out. The output thread's figure includes
-// the test stub's copy of each block and the QA recount of late effects, so it compares builds rather
-// than predicting OBS. Allocation counts elsewhere cover C++ `new` on the calling thread only.
+// The real output thread and both workers on loopback, for misses, wake-ups and block lateness.
+// The output thread's figure includes the stub's copy and QA recount, so it compares builds.
 static void threads(Workload const& w, unsigned seconds) {
     receiver = std::make_shared<Receiver>();
     resetOutput();
@@ -677,10 +662,8 @@ static void fidelity() {
     );
 }
 
-// What a song change costs the music worker, which renders 20 ms ahead: opening the file, the seek to
-// the position GD reports, and the first block, then a seek far away and one back near the start.
-// Wall milliseconds per step; the first open of each file is reported apart, since the OS may not
-// have cached the file yet.
+// What a song change costs the music worker, which renders 20 ms ahead: open, seek, first block,
+// a far seek and one back. The first open is reported apart, before the file is cached.
 static void open(unsigned rounds, std::vector<std::string> const& paths) {
     std::cout << "song open, wall ms p50/p95/p99/max over " << rounds
               << " rounds (first open apart)\n";
@@ -735,7 +718,7 @@ static void open(unsigned rounds, std::vector<std::string> const& paths) {
         );
     }
 }
-} // namespace bench
+}
 
 int main(int argc, char** argv) {
     std::string const mode = argc > 1 ? argv[1] : "";

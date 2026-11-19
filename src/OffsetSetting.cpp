@@ -54,9 +54,7 @@ class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
         SettingValueNodeV3::updateState(invoker);
         if (!m_input || !m_slider) return;
         auto enabled = getSetting()->shouldEnable() && !selectedLevel.empty();
-        m_levelLabel->setString(
-            selectedLevel.empty() ? "Select a level to edit its offset" : selectedLevel.c_str()
-        );
+        m_levelLabel->setString(selectedLevel.empty() ? "Select a level" : selectedLevel.c_str());
         m_levelLabel->limitLabelWidth(getContentWidth() - 20.f, .25f, .1f);
         m_input->setEnabled(enabled);
         m_left->setEnabled(enabled);

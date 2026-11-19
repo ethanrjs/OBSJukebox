@@ -51,9 +51,8 @@ struct Tap {
         shutdown();
     }
 
-    // True when the DSP is still in FMOD's graph: it happens only when FMOD would not lock the DSP
-    // chain for the teardown, and then nothing here may free the Tap, because a render callback that
-    // is already past getuserdata would touch a freed object.
+    // True when the DSP is still in FMOD's graph, which only happens when FMOD will not lock the
+    // chain for teardown: a render callback may still hold this object, so it must not be freed.
     bool dspAlive() const {
         return dsp != nullptr;
     }
@@ -62,7 +61,6 @@ struct Tap {
         enabled = false;
         // Remove the callback before freeing any queue or userdata storage.
         if (dsp) {
-            // Exclude an in-flight render callback before retiring its userdata.
             bool locked = system && system->lockDSP() == FMOD_OK;
             if (locked) {
                 auto engine = FMODAudioEngine::get();
@@ -89,8 +87,7 @@ struct Tap {
             // only its sender stops below. dspAlive() keeps the manager from freeing this object.
         }
         stopping = true;
-        // Wake a worker only when one exists to consume the wake. A failed thread start leaves none,
-        // so the second shutdown that follows retireTap's delete must not add another permit: the
+        // Wake a worker only when one exists: a second shutdown must not add a permit, since the
         // counting semaphore enforces its maximum as a precondition.
         if (worker.joinable()) {
             ready.release();
@@ -195,9 +192,8 @@ struct Tap {
             dsp = nullptr;
             return false;
         }
-        // A DSP joined to the graph must always find its sender. A failed thread start returns an
-        // attach failure and lets the caller's retirement do the locked teardown, instead of
-        // throwing out of the scheduler.
+        // A DSP joined to the graph must find its sender: a failed thread start returns an attach
+        // failure and lets the caller retire the tap instead of throwing out of the scheduler.
         try {
             worker = std::thread([this] {
                 sockaddr_in target{};
@@ -225,10 +221,8 @@ struct Tap {
             });
         }
         catch (...) {
-            // The DSP is already in the graph, so this must not release it here: no lock excludes a
-            // render that already read userdata. attach() fails and the caller retires the Tap
-            // through retireTap, whose locked teardown detaches and releases it, or keeps it when
-            // FMOD will not lock.
+            // The DSP is already in the graph: no lock excludes a render that read userdata, so
+            // attach fails and the caller retires the tap through retireTap.
             return false;
         }
         return true;
@@ -240,9 +234,8 @@ Tap* effects = nullptr;
 Tap* reference = nullptr;
 bool attachFailureLogged = false;
 
-// Normal shutdown frees the Tap after FMOD released its DSP. When FMOD would not lock the DSP chain,
-// the DSP stays in the graph and its render callback still holds the object, so the Tap is leaked on
-// purpose as a pass-through instead of being freed under the mixer.
+// Frees the Tap after FMOD released its DSP. When FMOD would not lock the chain, the render
+// callback still holds the object, so the Tap is leaked on purpose as a pass-through.
 void retireTap(Tap*& owned) {
     if (!owned) return;
     auto* tap = owned;
@@ -259,7 +252,7 @@ bool captureEnabled = true;
 bool terminated = false;
 uint64_t nextAttach = 0;
 unsigned retrySeconds = 1;
-} // namespace
+}
 
 void install() {
     if (terminated) return;
@@ -330,4 +323,4 @@ std::optional<int> dspIndex() {
         return std::nullopt;
     return index;
 }
-} // namespace separate_song::audio_tap
+}

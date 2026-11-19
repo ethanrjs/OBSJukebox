@@ -37,10 +37,8 @@ public:
         auto rtt = (t4 - p.t1) - (p.t3 - p.t2);
         auto candidate = ((int64_t(p.t1) - int64_t(p.t2)) / 2) + ((int64_t(t4) - int64_t(p.t3)) / 2);
         bool jump = ready && std::abs(double(candidate) - double(offsetAt(p.t3))) > 50000000;
-        // A probe's error is at most half its round trip, so keep the fastest one. Slower probes
-        // win as the best one ages (1 ms of slack per second), which follows clock drift without
-        // letting a single delayed reply move the offset. Only a jump (suspend, clock change)
-        // invalidates buffered audio.
+        // A probe's error is at most half its round trip, so keep the fastest. The best one ages
+        // 1 ms/s to follow drift; only a jump (suspend, clock change) drops buffered audio.
         if (!ready || jump || rtt <= bestRTT + (t4 - bestAt) / 1000) {
             changed = jump;
             offset = !ready || jump ? candidate : offsetAt(p.t3);

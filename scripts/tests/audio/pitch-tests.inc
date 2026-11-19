@@ -1,8 +1,5 @@
-// Pitch shifter behaviour, tested against recordings of GD's own FMOD pitch shifter and against
-// hand-built references. Requires separate-song.cpp and PitchShifter.hpp from playback-tests.cpp.
-//
-// Counts heap use on the calling thread. The stages must allocate when they are first built or
-// used (a decoder voice builds its chain lazily) but never again from process() or reset().
+// Pitch shifter behaviour, tested against GD's FMOD recordings and hand-built references.
+// Stages may allocate when first built or used, never from process() or reset().
 #ifdef _WIN32
 #include <malloc.h>
 #endif
@@ -142,7 +139,7 @@ static void compare(const char *label, const std::vector<float> &audio, size_t a
         std::cerr << label << ": correlation " << correlation << ", level " << level << " dB\n";
     check(correlation >= minCorrelation && std::abs(level) <= maxLevelDb, label);
 }
-} // namespace pitch_fixtures
+}
 
 // Runs a stage over the whole recording in FMOD's 256-frame blocks, as the recording tool did.
 static std::vector<float> pitchReference(const std::vector<float> &mono, float pitch, uint32_t fft,
@@ -273,8 +270,8 @@ static void pitchResetTest() {
     run(reused, first, .75f, 1024);
     reused.reset(1024);
     check(run(reused, second, .75f, 1024) == expected, "a reset stage matches a fresh stage");
+    // No reset call: process() must start fresh on its own when the FFT size changes.
     run(reused, first, 1.5f, 4096);
-    reused.reset(1024);
     check(run(reused, second, .75f, 1024) == expected, "an FFT change starts from fresh state");
 
     // Same instance and FFT with a new pitch must keep its history: a reset would match the fresh run.
@@ -578,13 +575,10 @@ template <class Chain> static Signal chain(Signal audio) {
     }
     return audio;
 }
-} // namespace heldout
+}
 
-// The shipping stage must give the frozen reference's samples, so an optimization can't trade away
-// any of the error margin against FMOD. Each signal, size and pitch runs with one of the call
-// patterns and gates, taking turns; `bench fidelity` runs every pairing. Half a second of each
-// signal is enough for every FFT size to run well past its latency and for every span in the signals
-// to appear; the comparison is exact, so a shorter run detects the same divergences.
+// The shipping stage must give the frozen reference's samples exactly, so an optimization cannot
+// trade away error margin against FMOD. 24000 frames cover every FFT latency and signal span.
 static void pitchReferenceTest() {
     heldout::Difference difference;
     size_t run = 0;
@@ -849,9 +843,8 @@ static void pitchRenderNoGlobalTest() {
     if (std::abs(hz - 440) > 18) std::cerr << "no global: " << hz << " Hz\n";
     check(std::abs(hz - 440) <= 18, "without a global packet the music passes through unchanged");
 }
-// Two eligible voices and one excluded voice sharing a block. The group stage must run once on the
-// eligible sum, and the excluded voice must be added after it. Each part is compared exactly
-// against the same voices played alone, with the dry sum fed through one offline chain.
+// The group stage runs once on the eligible voices' sum, and the excluded voice is added after
+// it; each part is compared exactly against the same voices played alone.
 static void pitchRenderGroupBusTest() {
     auto run = [&](bool firstOn, bool secondOn, bool excludedOn, bool staged,
                    std::vector<std::vector<float>> &blocks, std::vector<uint64_t> &times) {
@@ -1106,9 +1099,8 @@ static void pitchFirstGlobalRunTest() {
     }
     check(match, "the first global run starts from a fresh chain at its packet's frame");
 }
-// A second process session starts with no stage history. Session 1 primes the group chain, then
-// goes silent long enough for the receiver to accept session 2; session 2's first global packet
-// arrives mid-block and must start exactly like a fresh chain.
+// A second session starts with no stage history: session 1 primes the group chain, and session
+// 2's first global packet arrives mid-block and must start like a fresh chain.
 static void pitchSessionRenderTest() {
     constexpr uint64_t offset = 173 * 1000000000ULL / 48000;
     auto run = [&](bool primed, std::vector<std::vector<float>> &blocks,

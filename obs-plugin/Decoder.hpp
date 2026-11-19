@@ -24,10 +24,8 @@
 #ifdef _WIN32
     #include <memory>
 #endif
-// Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares, so only
-// strings that name a local file get through. Two leading separators name a network share or a device
-// path, and a colon before the first separator is a URL scheme except for a Windows drive letter: the
-// plain "://" check alone would still let "file:C:/x.mp3" reach Media Foundation as a URL.
+// Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares, so
+// only local file strings pass. A colon before any separator is a URL scheme, bar a drive letter.
 inline bool localSongPath(std::string const& path) {
     auto separator = [](char c) {
         return c == '/' || c == '\\';
@@ -43,8 +41,8 @@ inline bool localSongPath(std::string const& path) {
     return true;
 }
 
-// Gives an MP3 decoder opened without seek points miniaudio's own `wanted`-point table, and the length
-// when the file doesn't state it (else 0), in one pass. False: reopen with miniaudio's seek points.
+// Gives an MP3 decoder opened without seek points miniaudio's own `wanted`-point table, and the
+// length when the file doesn't state it (else 0), in one pass. False: reopen with miniaudio's.
 bool indexMp3(ma_decoder& decoder, ma_uint32 wanted, ma_uint64& lengthFrames);
 inline constexpr double maxSongSeconds = 31536000.0;
 
@@ -73,11 +71,11 @@ public:
     inline static std::atomic<bool> testFailOnNextSeek{false};
     inline static std::atomic<bool> testStarveAllReads{false};
     inline static std::atomic<unsigned> testOpenCount{0};
-    // QA: the next open treats indexMp3 as failed (as when it runs out of memory); how often an open
-    // fell back to miniaudio's own seek points.
+    // QA: the next open treats indexMp3 as failed, as running out of memory would, and counts how
+    // often an open fell back to miniaudio's own seek points.
     inline static std::atomic<bool> testIndexFailsOnNextOpen{false};
     inline static std::atomic<unsigned> testIndexFallbacks{0};
-    std::atomic<unsigned> testSeekCount{0}; // QA: how often this source sought, to catch a wandering rate
+    std::atomic<unsigned> testSeekCount{0}; // QA: seek count, to catch a wandering rate
 #endif
     double position = 0;
     std::string error;
@@ -135,8 +133,8 @@ public:
             return ma_decoder_init_file(path.c_str(), &config, &decoder);
         };
 #endif
-        // An MP3 gets its seek points from indexMp3's single pass over the file; if that fails, from
-        // miniaudio's own.
+        // An MP3 gets its seek points from indexMp3's single pass over the file; if that fails,
+        // from miniaudio's own.
         auto result = init();
 #ifdef OBS_JUKEBOX_QA
         bool const indexFails = testIndexFailsOnNextOpen.exchange(false);
@@ -220,7 +218,7 @@ public:
         }
         ++testSeekCount;
 #endif
-        // position describes phase within the retained PCM window, not the backend's read-ahead cursor.
+        // position is phase within the retained PCM window, not the backend's read-ahead cursor.
         double cachedStart = position - phase / 48000.;
         double cachedPhase = (seconds - cachedStart) * 48000.;
         if (seekValid && std::isfinite(cachedPhase) && cachedPhase >= 0 &&
@@ -233,9 +231,8 @@ public:
         count = 0;
         phase = 0;
         seekValid = false;
-        // Reject known EOF positions before touching the backend. An indexed MP3
-        // seek beyond EOF can fail with its cursor at zero but its stream exhausted;
-        // miniaudio then optimizes away a subsequent seek(0), leaving silence.
+        // Known EOF positions are rejected before the backend. An indexed MP3 seek past EOF can
+        // leave the stream exhausted at zero, and miniaudio then skips the next seek(0).
         bool valid = std::isfinite(seconds) && seconds >= 0 && seconds <= maxSongSeconds &&
             (!lengthFrames || seconds * 48000 < double(lengthFrames));
         if (valid) {

@@ -50,17 +50,15 @@ MODULE_EXPORT const char* obs_module_author(void) {
     return "babbur";
 }
 
-// The release version from mod.json, set by the build. The fallback covers builds that don't set it,
-// such as a bare editor compile.
+// The release version from mod.json, set by the build. The fallback covers a bare editor compile.
 #ifndef OBS_JUKEBOX_VERSION
     #define OBS_JUKEBOX_VERSION "dev"
 #endif
 
 using Clock = std::chrono::steady_clock;
 
-// For the life of an audio thread, asks for the scheduling OBS gives its own audio thread. The
-// output thread and both workers must meet 10 ms deadlines while OBS encodes and renders, and in
-// background OBS. On Windows that is MMCSS's "Audio" task, as in libobs's media-io/audio-io.c.
+// Asks for the scheduling OBS gives its own audio thread: the output thread and both workers must
+// meet 10 ms deadlines. On Windows that is MMCSS's "Audio" task, as in libobs's audio-io.c.
 class AudioThreadScheduling {
 #ifdef _WIN32
     HANDLE task = nullptr;
@@ -88,11 +86,8 @@ public:
     AudioThreadScheduling& operator=(AudioThreadScheduling const&) = delete;
 };
 
-// Sleeps the output thread until its next block. A plain sleep wakes on the process's timer ticks,
-// and Windows 11 can leave a minimized OBS on the default 15.6 ms ones despite libobs's 1 ms
-// request; waking 20 ms late then outruns the effects worker's one block of lead. A high
-// resolution waitable timer isn't bound to those ticks. Elsewhere, and if Windows has no such
-// timer, it is a plain sleep.
+// A plain sleep wakes on the process's timer ticks, and Windows 11 can leave a minimized OBS on
+// 15.6 ms ones despite libobs's 1 ms request, waking late enough to outrun the effects lead.
 class BlockTimer {
 #ifdef _WIN32
     HANDLE timer = CreateWaitableTimerExW(
@@ -156,7 +151,7 @@ static bool validStages(PitchStage const* stages, uint8_t count) {
     return true;
 }
 
-// Checks a v7 song packet's size and fields, but not its tag. Returns nothing if any of them is invalid.
+// Checks a v7 song packet's size and fields, but not its tag.
 static std::optional<SongLinkPacket> parseSongPacket(unsigned char const* data, size_t size) {
     SongLinkPacket p{};
     if (size != sizeof(p)) return std::nullopt;
@@ -258,7 +253,6 @@ static bool fromNewerMod(unsigned char const* data, size_t size) {
         (!memcmp(data, "GDSFX", 5) && data[5] > '3' && data[5] <= '9');
 }
 
-// Whether an effect is within a second of now.
 static bool effectsCurrent(uint64_t timestamp, uint64_t now) {
     return timestamp <= now + 1000000000 && timestamp + 1000000000 >= now;
 }
@@ -443,7 +437,6 @@ class Receiver {
         );
     }
 
-    // Handles one datagram from the game, received at `now`.
     void handle(unsigned char const* data, size_t size, sockaddr_in const& from, uint64_t now) {
         if (size < 8) return;
         if (!memcmp(data, "GDCLK1\0", 8)) handleClockReply(data, size, from, now);
@@ -509,8 +502,8 @@ class Receiver {
     }
 
     void handleEffects(EffectsInput const& input, sockaddr_in const& from, uint64_t now) {
-        // Checked before taking the lock that OBS's audio thread also takes. The session check is cheap,
-        // so a packet for another session costs no HMAC over its 4 KB.
+        // Checked before taking the lock that OBS's audio thread also takes: a packet for another
+        // session costs no HMAC over its 4 KB.
         if (!session || input.session != session || !signedWith(sessionKey, input.wire, input.size))
             return;
         auto effect = input.packet;
@@ -561,8 +554,8 @@ class Receiver {
 
 public:
 #ifdef OBS_JUKEBOX_QA
-    // The audio tests run a receiver without its socket or thread and feed it packets on
-    // simulated time. The benchmark times its packet handling and its thread.
+    // The audio tests run a receiver without its socket or thread, feeding packets on simulated
+    // time; the benchmark times its packet handling and its thread.
     friend struct Simulation;
     friend struct BenchAccess;
 
@@ -584,7 +577,7 @@ public:
             return;
         }
         nonblocking(sock);
-        // Probes go to the mod's port, which dies whenever GD exits; don't surface that as an error.
+        // Probes go to the mod's port, which dies when GD exits; don't surface that as an error.
         ignoreConnReset(sock);
         int receiveBuffer = 1024 * 1024;
         setsockopt(
@@ -652,9 +645,8 @@ public:
         return lastUnverifiedPacket && since(lastUnverifiedPacket, now) <= sessionTimeoutNs;
     }
 
-    // GD's main thread sends song packets and FMOD's mixer thread sends effects. Effects that keep
-    // arriving after song packets stop mean the main thread is stalled (as while GD tears down a
-    // level), and the game is still playing its music.
+    // GD's main thread sends song packets and FMOD's mixer sends effects. Effects that keep
+    // arriving after song packets stop mean the main thread is stalled while the game plays music.
     bool mainThreadStalled(uint64_t now) {
         std::lock_guard lock(mutex);
         return lastSongReceived && lastEffectsReceived[0] &&
@@ -681,7 +673,7 @@ public:
         return window;
     }
 
-    // Fills `window` in place, so an audio thread that keeps it allocates nothing once it has grown.
+    // Fills `window` in place, so an audio thread that reuses it allocates nothing once grown.
     void playbackWindow(uint64_t start, uint64_t end, int channel, std::vector<SongLinkPacket>& window) {
         std::lock_guard lock(mutex);
         window.clear();
@@ -697,17 +689,16 @@ public:
             window.push_back(next->packet);
     }
 
-    // A packet runs until the next packet in sequence starts, and its last sample blends into that
-    // packet's first, so seams sound like any other pair of samples. The tap's timestamps can leave
-    // a sub-sample gap or overlap between packets as it follows the wall clock; this absorbs it.
+    // A packet runs until the next packet in sequence, its last sample blending into that packet's
+    // first, so seams sound like any other pair of samples and sub-sample gaps from the tap vanish.
     void mixEffects(float* output, size_t frames, uint64_t start, float gain) {
         std::lock_guard lock(mutex);
         for (auto packet = effects.begin(); packet != effects.end(); ++packet) {
             auto const& p = *packet;
             auto after = std::next(packet);
             double duration = double(p.frames) / p.sampleRate;
-            // Only join adjacent audio. Sequence numbers alone cannot distinguish a mixer stall
-            // from uninterrupted capture. Two source samples cover tap slew, clock slew and rounding.
+            // Only join adjacent audio: sequence numbers cannot tell a mixer stall from
+            // uninterrupted capture. Two source samples cover tap, clock slew and rounding.
             EffectsPacket const* next = after != effects.end() && after->sampleRate == p.sampleRate &&
                     after->sequence == p.sequence + 1 && after->timestamp > p.timestamp &&
                     std::abs((double(after->timestamp) - double(p.timestamp)) / 1e9 - duration) <=
@@ -761,15 +752,15 @@ static void forEachRun(std::vector<SongLinkPacket> const& window, uint64_t start
     }
 }
 #ifdef OBS_JUKEBOX_QA
-// A lock-free maximum for the output thread's QA counters; no allocation or logging there.
+// A lock-free maximum for the output thread's QA counters; no allocation or logging.
 static void qaMax(std::atomic<uint64_t>& value, uint64_t next) {
     auto current = value.load(std::memory_order_relaxed);
     while (next > current && !value.compare_exchange_weak(current, next, std::memory_order_relaxed)) {
     }
 }
 #endif
-// Applies one run's stages to a chain, starting fresh when the run belongs to a new process session.
-// Only the thread that owns the chain calls this, so a session boundary never carries FIFO state.
+// Applies one run's stages to a chain, starting fresh when the run belongs to a new process
+// session; only the thread that owns the chain calls this, so no FIFO state crosses a session.
 static void processStages(
     PitchChain& chain, uint64_t& session, uint64_t id, float* audio, size_t frames,
     PitchStage const* stages, uint8_t count
@@ -789,17 +780,15 @@ struct SongSource {
     obs_source_t* source;
     std::atomic<bool> stop{false}, active{false};
     std::mutex mutex;
-    static constexpr char const* noSongDetail = "Select the OBS checkbox beside a Jukebox song.";
+    static constexpr char const* noSongDetail = "Tick OBS beside a Jukebox song.";
     std::string detail = noSongDetail;
     std::thread worker, decoderWorker, effectsWorker;
     std::shared_ptr<Receiver> linkReceiver;
     static constexpr uint64_t blockNs = blockFrames * 1000000000ULL / blockRate,
                               bufferingNs = 40000000, staleNs = 400000000;
 
-    // The output thread owns no decoder, filesystem object or pitch stage. Two workers render
-    // timestamped blocks ahead of it, one for music and one for effects, each into its own bounded
-    // queue; a block that is not ready in time plays as silence and the other keeps playing.
-    // Four fixed slots, so neither side allocates or frees memory.
+    // The output thread owns no decoder, filesystem object or pitch stage: two workers render
+    // timestamped blocks ahead of it, one for music and one for effects, each into a bounded queue.
     struct BlockQueue {
         struct Block {
             uint64_t timestamp = 0;
@@ -811,9 +800,8 @@ struct SongSource {
         std::condition_variable ready;
         std::array<Block, 4> slots;
         size_t first = 0, count = 0;
-        // The last block the output asked for: played or missed, it is past. The output asks before
-        // it moves `wanted` on, so this catches a block that missed by a moment. Output timestamps
-        // only move forward, so clearing the queue keeps it.
+        // The last block the output asked for: played or missed, it is past. Timestamps only move
+        // forward, so clearing keeps it, and asking before `wanted` moves catches a near miss.
         uint64_t asked = 0;
 
         void clear() {
@@ -821,8 +809,8 @@ struct SongSource {
             count = 0;
         }
 
-        // Queues a block unless four already wait or the output has already passed it (`wanted` is
-        // the next block it mixes). False means the output will never play this block.
+        // Queues a block unless four already wait or the output has passed it (`wanted` is the
+        // next block it mixes). False means the output will never play this block.
         bool push(uint64_t timestamp, AudioBlock const& samples, uint64_t generation, uint64_t wanted) {
             std::lock_guard lock(mutex);
             dropBefore(wanted);
@@ -831,9 +819,8 @@ struct SongSource {
             return true;
         }
 
-        // Takes the block for `timestamp` rendered in `generation`, dropping any older one. Only
-        // fixed-size copies happen under the lock, and no worker holds it while rendering. A
-        // try-lock would turn harmless microsecond contention into silence.
+        // Takes the block for `timestamp` rendered in `generation`, dropping older ones. Only
+        // copies happen under the lock; a try-lock would turn contention into silence.
         bool take(uint64_t timestamp, uint64_t generation, AudioBlock& out) {
             std::lock_guard lock(mutex);
             asked = timestamp;
@@ -888,7 +875,7 @@ struct SongSource {
     std::atomic<unsigned> testMusicMisses{0}, testMusicMissesRaw{0}, testEffectsMisses{0},
         testEffectsMissesRaw{0};
     std::atomic<bool> testMeasure{false};
-    std::atomic<bool> testWorkersStarted{false}; // run() has assigned decoderWorker and effectsWorker
+    std::atomic<bool> testWorkersStarted{false}; // run() has started both workers
 #endif
     explicit SongSource(obs_source_t* s) : source(s), linkReceiver(receiver) {}
 
@@ -912,9 +899,8 @@ struct SongSource {
         PitchChain chain; // this channel's stages, decoder thread only
         uint64_t chainSession = 0; // 0 is never a wire session, so the first packet resets
 
-        // Continues the audio that was playing for declickFrames while fading it to silence,
-        // so the next state crossfades in instead of cutting. Call before the decoder seeks or
-        // reopens. Ignores loop points, which only matters if a loop ends inside those 5 ms.
+        // Continues the playing audio for declickFrames while fading it out, so the next state
+        // crossfades in. Call before the decoder seeks or reopens; a loop ending there is ignored.
         void captureTail() {
             if (!wasPlaying) return;
             std::array<float, declickFrames * 2> next{};
@@ -944,12 +930,12 @@ struct SongSource {
         }
     };
 
-    // Only the decoder thread touches these (the audio tests call renderMusic from their own thread).
+    // Only the decoder thread touches these; the audio tests call renderMusic from their own.
     std::array<std::unique_ptr<Voice>, SONG_LINK_MAX_CHANNELS> voices;
     AudioBlock voiceAudio{};
     PitchChain groupChain; // the music group's stages; decoder thread only
     uint64_t groupSession = 0;
-    PitchChain effectsChain{true}; // the SFX stages after the tap; effects worker only, preallocated
+    PitchChain effectsChain{true}; // the SFX stages after the tap; effects worker only
     uint64_t effectsSession = 0;
     // The global packets for the block each thread is on; kept so neither allocates per block.
     std::vector<SongLinkPacket> effectsWindow; // effects worker only
@@ -972,7 +958,7 @@ struct SongSource {
         resolved = paths.resolve(newPath);
 #endif
         std::error_code error;
-        // Never stat a URL or network share: Decoder::open refuses them, and a stat would reach the network.
+        // Never stat a URL or network share: a stat reaches the network, and open refuses them.
         bool local = !resolved.empty() && localSongPath(resolved);
         auto file = std::filesystem::path(std::u8string(resolved.begin(), resolved.end()));
 #ifdef OBS_JUKEBOX_QA
@@ -1008,8 +994,7 @@ struct SongSource {
         v.retryAt = Clock::now() + std::chrono::seconds(1);
     }
 
-    // Renders `frames` frames of one voice, as packet p describes them from `time`, into
-    // `voiceAudio`. A packet that is no longer live only fades out what was playing.
+    // A packet that is no longer live only fades out what was playing.
     void renderVoice(
         Voice& v, SongLinkPacket const& p, size_t frames, uint64_t time, bool live,
         std::string& decoderError
@@ -1066,10 +1051,8 @@ struct SongSource {
         if (expectedAudio && (!playing || starved)) {
             if (!v.starvedSince) v.starvedSince = time;
             if (time >= v.starvedSince + 100000000 && Clock::now() >= v.recoverAt) {
-                // Recreate a backend that accepted a seek but stopped
-                // delivering PCM. The next block seeks from its fresh
-                // timestamp, including rate and user offset; it never
-                // resumes from the position before the stall.
+                // Recreate a backend that accepted a seek but stopped delivering PCM. The next
+                // block seeks from its own timestamp and never resumes the pre-stall position.
                 v.recoverAt = Clock::now() + std::chrono::seconds(1);
                 decoder.open(v.resolvedPath);
                 v.lastEpoch = ~0u;
@@ -1132,9 +1115,8 @@ struct SongSource {
         AudioBlock eligible{}, excluded{};
         for (int channel : linkReceiver->getChannels()) {
             if (channel < 0) continue;
-            // A packet goes stale 400 ms after its timestamp; that stretch is still rendered, with
-            // live=false, so a playing voice fades out instead of cutting off. Nothing goes stale
-            // while GD's main thread is stalled but its mixer still plays.
+            // A packet goes stale 400 ms after its timestamp; that stretch still renders with
+            // live=false, so a voice fades out. A stalled GD main thread keeps packets live.
             auto window = linkReceiver->playbackWindow(timestamp, timestamp + blockNs, channel);
             // A channel with no voice and only stale packets has nothing to play or fade out.
             if (!voices[channel] && !stalled &&
@@ -1190,23 +1172,19 @@ struct SongSource {
         bool newMod = !connected && linkReceiver->newModSending(now);
         bool unverified = !connected && linkReceiver->unverifiedSending(now);
         std::lock_guard lock(mutex);
-        detail = oldMod ? "Update the OBS Jukebox mod in Geometry Dash to match this plugin." :
-            newMod      ? "Update the OBS Jukebox plugin to match the mod in Geometry Dash." :
-            unverified ? "Can't verify Geometry Dash: its packets don't match the OBS Jukebox link "
-                         "key. Restart Geometry Dash." :
-            !linkReceiver->available() ?
-                         "Game link unavailable: local UDP port is already in use." :
-            !decoderError.empty() ? decoderError :
-            !connected            ? "Waiting for Geometry Dash" :
-            !latest.song[0]       ? noSongDetail :
-                                    std::string(latest.song) + " | " + latest.status +
+        detail = oldMod                ? "Update the mod in GD to match this plugin." :
+            newMod                     ? "Update this plugin to match the mod in GD." :
+            unverified                 ? "Can't verify GD. Restart GD." :
+            !linkReceiver->available() ? "Game link unavailable: port in use." :
+            !decoderError.empty()      ? decoderError :
+            !connected                 ? "Waiting for GD" :
+            !latest.song[0]            ? noSongDetail :
+                                         std::string(latest.song) + " | " + latest.status +
                 (latest.attempt > 0 ? " | Attempt " + std::to_string(latest.attempt) : "");
     }
 
     // A worker's loop: renders consecutive blocks into `queue`, at most `lead` blocks ahead of the
-    // block the output thread mixes next. Whenever the blocks it renders stop following each other on
-    // the output (the source stops or starts, the output resynchronizes, a block is never played),
-    // what the stages hold belongs to audio OBS will not play, so `reset` starts them over.
+    // output. Whenever they stop following the output, `reset` discards what the stages hold.
     template <class Render, class Reset>
     void produceBlocks(BlockQueue& queue, uint64_t lead, Render render, Reset reset) {
         uint64_t timestamp = wantedTimestamp.load(), generation = outputGeneration.load();
@@ -1217,7 +1195,7 @@ struct SongSource {
             if (nowActive != wasActive || current != generation) {
                 reset();
                 if (nowActive)
-                    queue.clear(); // a block rendered before the source was deactivated must not play
+                    queue.clear(); // a block from before the source was deactivated must not play
                 wasActive = nowActive;
                 generation = current;
             }
@@ -1254,17 +1232,13 @@ struct SongSource {
                 resetMusicChains();
             }
         );
-        // On Windows each decoder started COM on this thread when it opened, so it has to close here too.
+        // On Windows a decoder starts COM on this thread, so it must close here too.
         for (auto& voice : voices)
             voice.reset();
     }
 
-    // Effects with stages render one block ahead of the output: enough for an output thread that
-    // wakes on 15.6 ms timer ticks and mixes two blocks at once. Effects arrive over the network just
-    // in time, so that lead costs margin. A staged block renders at least 20 ms after its timestamp,
-    // so each frame has to arrive within 10 ms of its own time, which means a packet within 10 ms of
-    // its timestamp, instead of 30. A block without stages never waits for this worker; the output
-    // thread mixes it itself (mixBlock), with the full margin.
+    // Effects with stages render one block ahead: enough for an output thread that wakes on 15.6 ms
+    // ticks and mixes two blocks at once. That lead leaves each frame 10 ms of margin, not 30.
     void renderEffectsBlocks() {
         AudioThreadScheduling const scheduling;
         produceBlocks(
@@ -1279,12 +1253,8 @@ struct SongSource {
         );
     }
 
-    // Adds the game's effects for each run of the global window. The effects volume, enabled flag
-    // and stages used here come from the global packet only; voice packets carry the same settings
-    // but are not read for effects, so with no global history nothing is mixed.
-    // SFX never waits for music decoding, opening, seeking or path resolution. Effects ignore
-    // staleness: they arrive from FMOD's mixer thread even while GD's main thread (which sends
-    // status packets) stalls, and stop on their own when GD does.
+    // Adds the game's effects for each run of the global window. Volume, enabled flag and stages
+    // come from the global packet only; staleness is ignored, since FMOD's mixer keeps sending.
     void mixGameEffects(
         std::vector<SongLinkPacket> const& window, uint64_t timestamp, AudioBlock& effects
     ) {
@@ -1304,9 +1274,8 @@ struct SongSource {
         return staged;
     }
 
-    // The game's effects for a block with SFX stages, through those stages. A block without stages
-    // stays silent here, since mixBlock mixes it itself; its runs still pass through the chain, so
-    // a stage that comes back starts fresh.
+    // The game's effects for a block with SFX stages. A block without stages stays silent here, but
+    // its runs still pass through the chain, so a stage that comes back starts fresh.
     void renderEffects(uint64_t timestamp, AudioBlock& effects) {
 #ifdef OBS_JUKEBOX_QA
         std::this_thread::sleep_for(std::chrono::milliseconds(testEffectsDelayMs.exchange(0)));
@@ -1334,8 +1303,7 @@ struct SongSource {
     }
 #ifdef OBS_JUKEBOX_QA
     // Counts the frames of a staged block that reached the worker too late: mixed again now, they
-    // differ from what the worker mixed. A block the worker rendered before its stages arrived
-    // played silent, so all of its audible frames count.
+    // differ from the worker's mix. A block rendered before its stages arrived played silent.
     void countLateEffects(std::vector<SongLinkPacket> const& window, uint64_t timestamp) {
         AudioBlock now{};
         mixGameEffects(window, timestamp, now);
@@ -1373,10 +1341,8 @@ struct SongSource {
         [[maybe_unused]] bool const hasMusic = musicBlocks.take(timestamp, generation, audio);
         [[maybe_unused]] bool const hasEffects = effectsBlocks.take(timestamp, generation, effects);
         if (!nowActive) return {};
-        // Effects without SFX stages are only a mix, cheap enough for this thread, and mixing them
-        // here keeps the full margin for late packets. Staged blocks come from the worker. The newest
-        // packets decide: a stage that appears after the worker rendered its block leaves that block
-        // silent, as a fresh FMOD shifter is, and one removed since then is gone at once.
+        // Effects without SFX stages are cheap to mix here, keeping the full margin for late
+        // packets. The newest packets decide: a stage added since leaves that block silent.
         linkReceiver->playbackWindow(timestamp, timestamp + blockNs, -1, outputWindow);
         auto const& window = outputWindow;
         bool const staged = hasEffectsStages(window, timestamp);
@@ -1500,9 +1466,8 @@ static char const* sourceName(void*) {
     return "GD Sounds";
 }
 
-// libobs calls create as plain C, so nothing here may throw: a failed thread or allocation escaping
-// would cross out of C code. A null result tells OBS the source is unavailable, and it drops the
-// failure into its own log.
+// libobs calls create as plain C, so nothing here may throw: a failed thread or allocation must
+// not cross out of C code. A null result tells OBS the source is unavailable.
 static void* create(obs_data_t*, obs_source_t* source) {
     try {
         auto s = std::make_unique<SongSource>(source);
@@ -1522,7 +1487,7 @@ static void* create(obs_data_t*, obs_source_t* source) {
 
 static obs_properties_t* properties(void* data) {
     auto props = obs_properties_create();
-    obs_properties_add_text(props, "version", "OBSJukebox " OBS_JUKEBOX_VERSION, OBS_TEXT_INFO);
+    obs_properties_add_text(props, "version", "OBS Jukebox " OBS_JUKEBOX_VERSION, OBS_TEXT_INFO);
     std::string detail = "Playback follows GD automatically.";
     if (data) {
         auto s = static_cast<SongSource*>(data);
@@ -1533,17 +1498,16 @@ static obs_properties_t* properties(void* data) {
     obs_properties_add_text(
         props,
         "help",
-        "Includes all sounds through GD, including selected custom song. Mute audio on "
-        "other GD/desktop captures to prevent duplicated audio.",
+        "Plays GD's sounds and your OBS song. Mute GD in your other audio sources so you don't "
+        "hear it twice.",
         OBS_TEXT_INFO
     );
     return props;
 }
 
 bool obs_module_load(void) {
-    // obs_module_load is a C boundary, and both calls below allocate (the shifter tables and the
-    // receiver's thread), so a failure turns into a failed module load that OBS reports instead of
-    // a terminating escape. The tables are built before any source thread can process audio.
+    // obs_module_load is a C boundary, and both calls allocate, so a failure becomes a failed
+    // module load OBS reports instead of a terminating escape.
     try {
         PitchShifter::prepareTables();
         receiver = std::make_shared<Receiver>();

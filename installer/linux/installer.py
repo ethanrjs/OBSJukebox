@@ -52,7 +52,7 @@ class SetupWindow:
         self.prefix = tk.StringVar()
         self.obs = tk.StringVar(value="Native OBS Studio")
         self.reopen = tk.BooleanVar(value=False)
-        self.status = tk.StringVar(value="Finish any OBS recording and close GD and OBS, then click Install.")
+        self.status = tk.StringVar(value="Close GD and OBS, then click Install.")
         root.title("OBS Jukebox - Linux Setup")
         root.geometry("730x650")
         root.minsize(730, 650)
@@ -87,17 +87,17 @@ class SetupWindow:
         selection = ttk.Combobox(obs_row, textvariable=self.obs, values=("Native OBS Studio", "Flatpak OBS Studio"), state="readonly")
         selection.grid(row=1, column=0, sticky="ew", pady=(3, 0))
         self.inputs.append(selection)
-        ttk.Label(outer, text="Jukebox 3.8.0 is required. Install it through Geode in GD.\nGeode >=5.11.2 and <6.0.0 must already be installed for Proton.", wraplength=680).grid(row=4, column=0, sticky="w", pady=(12, 8))
+        ttk.Label(outer, text="Needs Jukebox 3.8.0 (install it in GD) and Geode 5.11.2 under Proton.", wraplength=680).grid(row=4, column=0, sticky="w", pady=(12, 8))
         choices = ttk.Frame(outer)
         choices.grid(row=5, column=0, sticky="ew")
         reopen = ttk.Checkbutton(choices, text="Reopen GD and OBS afterward", variable=self.reopen)
         reopen.pack(anchor="w")
         self.inputs.append(reopen)
-        ttk.Label(choices, text="After installation, add GD Sounds to your OBS scenes.").pack(anchor="w", pady=(6, 0))
+        ttk.Label(choices, text="Add GD Sounds in OBS after installing.").pack(anchor="w", pady=(6, 0))
         advanced = ttk.Frame(outer)
         advanced.grid(row=6, column=0, sticky="ew", pady=(8, 0))
         advanced.columnconfigure(0, weight=1)
-        self.path_row(advanced, 0, "Proton prefix (optional; detected automatically)", self.prefix)
+        self.path_row(advanced, 0, "Proton prefix (optional)", self.prefix)
         outer.rowconfigure(7, weight=1)
         self.status_label = ttk.Label(outer, textvariable=self.status, style="Status.TLabel", wraplength=678, justify="left")
         self.status_label.grid(row=7, column=0, sticky="sw", pady=(20, 18))
@@ -178,7 +178,7 @@ class SetupWindow:
         else:
             self.set_busy(False)
             if success:
-                self.status.set(detail if self.undo_after else "Installed. In OBS, add GD Sounds once. Keep monitoring off and exclude GD audio from other recording sources.")
+                self.status.set(detail if self.undo_after else "Installed. In OBS, add GD Sounds once.")
                 if self.reopen_after:
                     try:
                         obs_command = ["flatpak", "run", "com.obsproject.Studio"] if self.flatpak_after else ["obs"]

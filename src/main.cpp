@@ -18,6 +18,7 @@
 #include "MusicSampling.hpp"
 #include "PitchStages.hpp"
 #include "GamePolicies.hpp"
+#include "Updater.hpp"
 #include "MonotonicClock.hpp"
 #include <array>
 #include <map>
@@ -37,21 +38,25 @@ static std::string offsetLevel;
 static bool loadingOffset = false;
 static bool enabled = true;
 static bool pitchShiftReplacement = true;
+
 struct MusicVoice {
     Snapshot snapshot;
     jukebox_link::MusicSource source;
     FMOD::Channel* channel = nullptr;
     FMOD::Sound* sound = nullptr;
     double duration = 0;
-    bool loop = false, scheduledStop = false, continuing = false, explicitlyStopped = false, dontReset = false;
+    bool loop = false, scheduledStop = false, continuing = false, explicitlyStopped = false,
+         dontReset = false;
     bool rateStopped = false;
     int engineChannelID = 0;
     float lastFade = 1.f;
     std::vector<MusicFade> fadePoints;
     StageList observedStages;
 };
+
 static std::map<int, MusicVoice> voices;
 static unsigned nextEpoch = 1;
+
 static void cancelVoice(int id, bool stopped = true) {
     if (auto it = voices.find(id); it != voices.end()) {
         it->second.continuing = false;
@@ -60,11 +65,15 @@ static void cancelVoice(int id, bool stopped = true) {
         it->second.snapshot.epoch = ++nextEpoch;
     }
 }
+
 static void clearVoiceFade(FMOD::Channel* channel) {
-    for (auto& [id, voice] : voices) if (voice.channel == channel) {
-        voice.fadePoints.clear(); voice.lastFade = 1.f;
-    }
+    for (auto& [id, voice] : voices)
+        if (voice.channel == channel) {
+            voice.fadePoints.clear();
+            voice.lastFade = 1.f;
+        }
 }
+
 static bool channelPaused(FMOD::Channel* channel) {
     bool paused = false;
     if (channel->getPaused(&paused) != FMOD_OK || paused) return true;
@@ -78,6 +87,7 @@ static bool channelPaused(FMOD::Channel* channel) {
     }
     return false;
 }
+
 static std::optional<double> channelRate(FMOD::Channel* channel, FMOD::Sound* sound) {
     std::optional<float> base, frequency;
     float value = 0.f;
@@ -99,14 +109,12 @@ static std::optional<double> channelRate(FMOD::Channel* channel, FMOD::Sound* so
     }
     return sampledMusicRate(base, frequency, std::span(pitches.data(), count));
 }
-// A channel's position in seconds and the wall time it is true at. FMOD advances the position
-// once per mixer block (~21 ms), so dating it with the DSP clock of the effects group, which the
-// effects tap reads, puts it on the tap's timeline. The main thread's own clock would be up to a
-// block late. The music group's clock would not do: FMOD stops a group's clock while it is
-// paused, and GD pauses the effects group alone when it goes to the background, so the two
-// clocks drift apart. PCM units are exact where milliseconds truncate.
-static std::optional<std::pair<double, uint64_t>> playbackPosition(FMOD::Channel* channel, FMOD::Sound* sound,
-                                                                    FMOD::ChannelGroup* effects) {
+
+// Dated with the effects group's DSP clock, the tap's timeline. The music group's clock drifts
+// from it: a paused group's clock stops, and GD pauses effects alone when in the background.
+static std::optional<std::pair<double, uint64_t>> playbackPosition(
+    FMOD::Channel* channel, FMOD::Sound* sound, FMOD::ChannelGroup* effects
+) {
     float soundRate = 0.f;
     sound->getDefaults(&soundRate, nullptr);
     auto unit = soundRate > 0 ? FMOD_TIMEUNIT_PCM : FMOD_TIMEUNIT_MS;
@@ -122,6 +130,7 @@ static std::optional<std::pair<double, uint64_t>> playbackPosition(FMOD::Channel
     auto wall = effects ? audio_tap::wallAtDspClock(after) : std::nullopt;
     return std::pair{seconds, wall.value_or(monotonicNowNs())};
 }
+
 static void sampleEnvelope(MusicVoice& voice, FMOD::Channel* channel, unsigned sampleRate) {
     auto& out = voice.snapshot;
     float volume = 1.f;
@@ -136,7 +145,8 @@ static void sampleEnvelope(MusicVoice& voice, FMOD::Channel* channel, unsigned s
         std::vector<float> gains(count);
         if (channel->getFadePoints(&count, clocks.data(), gains.data()) == FMOD_OK) {
             voice.fadePoints.clear();
-            for (unsigned i = 0; i < count; ++i) voice.fadePoints.push_back({clocks[i], gains[i]});
+            for (unsigned i = 0; i < count; ++i)
+                voice.fadePoints.push_back({clocks[i], gains[i]});
             normalizeMusicFades(voice.fadePoints);
         }
     }
@@ -147,15 +157,18 @@ static void sampleEnvelope(MusicVoice& voice, FMOD::Channel* channel, unsigned s
     unsigned long long start = 0, end = 0;
     channel->getDelay(&start, &end, nullptr);
     auto limit = end > clock ? out.fades.size() - 2 : out.fades.size(); // room for the stop below
-    for (const auto& point : voice.fadePoints) {
+    for (auto const& point : voice.fadePoints) {
         if (point.clock <= clock || (end && point.clock >= end)) continue;
         if (out.fadeCount == limit) break;
-        out.fades[out.fadeCount++] = {(point.clock - clock) * 1000000000ull / sampleRate,
-            finiteMusicGain(finiteMusicGain(volume) * finiteMusicGain(point.gain))};
+        out.fades[out.fadeCount++] = {
+            (point.clock - clock) * 1000000000ull / sampleRate,
+            finiteMusicGain(finiteMusicGain(volume) * finiteMusicGain(point.gain))
+        };
     }
     if (end > clock) {
         auto offset = (end - clock) * 1000000000ull / sampleRate;
-        float beforeEnd = finiteMusicGain(finiteMusicGain(volume) * musicFadeAt(voice.fadePoints, end));
+        float beforeEnd =
+            finiteMusicGain(finiteMusicGain(volume) * musicFadeAt(voice.fadePoints, end));
         if (offset > 1) out.fades[out.fadeCount++] = {offset - 1, beforeEnd};
         out.fades[out.fadeCount++] = {offset, 0.f};
     }
@@ -166,15 +179,23 @@ static std::string levelOffsetKey(GJGameLevel* level) {
     if (!level) return "";
     int id = level->m_levelID.value();
     if (id > 0 && !level->m_isEditable)
-        return fmt::format("{}:{}", level->m_levelType == GJLevelType::Main ? "official" : "online", id);
+        return fmt::format(
+            "{}:{}", level->m_levelType == GJLevelType::Main ? "official" : "online", id
+        );
     return "local-id:" + localLevelIdentity(level);
 }
+
 static void selectOffsetLevel(GJGameLevel* level) {
     auto key = levelOffsetKey(level);
     if (key == offsetLevel && level) return;
     offsetLevel = std::move(key);
-    offset_setting::selectLevel(level ? (std::string(level->m_levelName).empty() ? "Unnamed level" : std::string(level->m_levelName)) : "");
-    auto values = Mod::get()->getSavedValue<matjson::Value>("obs-level-offsets", matjson::Value::object());
+    offset_setting::selectLevel(
+        level ? (std::string(level->m_levelName).empty() ? "Unnamed level" :
+                                                           std::string(level->m_levelName)) :
+                ""
+    );
+    auto values =
+        Mod::get()->getSavedValue<matjson::Value>("obs-level-offsets", matjson::Value::object());
     double value = offsetLevel.empty() ? 0.0 : values[offsetLevel].asDouble().unwrapOr(0.0);
     loadingOffset = true;
     offset_setting::setValue(std::isfinite(value) ? value : 0.0);
@@ -187,14 +208,15 @@ static void settings(Snapshot& snapshot) {
     snapshot.effectsVolume = obs_volume::effects();
     snapshot.offset = playingSongs ? offset_setting::value() : 0.0;
 }
+
 // One main-thread scratch list, so the 10 ms sampling does not allocate a vector each time.
 static std::vector<ObservedDsp>& dspScratch() {
     static std::vector<ObservedDsp> scratch;
     return scratch;
 }
-// Reads the pitch shifters FMOD will process on `control`, from the input end (highest index) to the
-// output end (index 0). `below` stops the walk before a tap, so only DSPs that process the audio
-// after the tap are read.
+
+// Reads the pitch shifters FMOD will process on `control`, from the input end (highest index) to
+// the output end (index 0). `below` stops the walk before a tap, so only later DSPs are read.
 static void observeDsps(FMOD::ChannelControl* control, int below, std::vector<ObservedDsp>& out) {
     int total = 0;
     if (!control || control->getNumDSPs(&total) != FMOD_OK) return;
@@ -202,16 +224,19 @@ static void observeDsps(FMOD::ChannelControl* control, int below, std::vector<Ob
         FMOD::DSP* dsp = nullptr;
         FMOD_DSP_TYPE type = FMOD_DSP_TYPE_UNKNOWN;
         if (control->getDSP(i, &dsp) != FMOD_OK || !dsp || dsp->getType(&type) != FMOD_OK ||
-            type != FMOD_DSP_TYPE_PITCHSHIFT) continue;
+            type != FMOD_DSP_TYPE_PITCHSHIFT)
+            continue;
         bool bypass = false, active = false;
         float pitch = 1.f, fft = 0.f;
-        if (dsp->getBypass(&bypass) != FMOD_OK || bypass || dsp->getActive(&active) != FMOD_OK || !active ||
+        if (dsp->getBypass(&bypass) != FMOD_OK || bypass || dsp->getActive(&active) != FMOD_OK ||
+            !active ||
             dsp->getParameterFloat(FMOD_DSP_PITCHSHIFT_PITCH, &pitch, nullptr, 0) != FMOD_OK ||
             dsp->getParameterFloat(FMOD_DSP_PITCHSHIFT_FFTSIZE, &fft, nullptr, 0) != FMOD_OK)
             continue;
         out.push_back({int(type), pitch, fft, true, uint64_t(reinterpret_cast<uintptr_t>(dsp))});
     }
 }
+
 // Every group from `group` to the master, in signal order.
 static void observeGroupChain(FMOD::ChannelGroup* group, std::vector<ObservedDsp>& out) {
     for (int depth = 0; group && depth < 16; ++depth) {
@@ -221,17 +246,21 @@ static void observeGroupChain(FMOD::ChannelGroup* group, std::vector<ObservedDsp
         group = parent;
     }
 }
+
 static void warnStageOverflow() {
     static bool logged = false;
     if (logged) return;
     logged = true;
     log::warn("more than 8 pitch shifters; OBS applies the first 8");
 }
+
 // The music group's stages and, for the SFX bus, the stages after the effects tap. Sampled on the
 // main thread only; the global packet carries them, so OBS applies them once to its own mix.
 static void sampleGroupStages() {
-    state.stages = {}; state.stageCount = 0;
-    state.effectsStages = {}; state.effectsStageCount = 0;
+    state.stages = {};
+    state.stageCount = 0;
+    state.effectsStages = {};
+    state.effectsStageCount = 0;
     auto engine = FMODAudioEngine::get();
     if (!engine || !engine->m_system) return;
     auto& observed = dspScratch();
@@ -242,18 +271,20 @@ static void sampleGroupStages() {
     state.stageCount = music.count;
     if (music.overflow) warnStageOverflow();
     observed.clear();
-    const auto tap = audio_tap::dspIndex();
+    auto const tap = audio_tap::dspIndex();
     if (!tap || !engine->m_globalChannel) return;
     observeDsps(engine->m_globalChannel, *tap, observed);
     FMOD::ChannelGroup* parent = nullptr;
-    if (engine->m_globalChannel->getParentGroup(&parent) == FMOD_OK && parent != engine->m_globalChannel)
+    if (engine->m_globalChannel->getParentGroup(&parent) == FMOD_OK &&
+        parent != engine->m_globalChannel)
         observeGroupChain(parent, observed);
     auto effects = pitchStages(observed);
     state.effectsStages = effects.stages;
     state.effectsStageCount = effects.count;
     if (effects.overflow) warnStageOverflow();
 }
-static void publish(const std::string& status, bool playing) {
+
+static void publish(std::string const& status, bool playing) {
     settings(state);
     sampleGroupStages();
     state.channelID = -1;
@@ -262,9 +293,10 @@ static void publish(const std::string& status, bool playing) {
     state.playing = playing;
     bridge().publish(state);
 }
+
 // A replacement song plays the OBS file, not the game's, so it follows the game's shifters only
 // when the setting says so. Everything else follows them unconditionally.
-static void applyObservedStages(Snapshot& out, const MusicVoice& voice, bool replaced) {
+static void applyObservedStages(Snapshot& out, MusicVoice const& voice, bool replaced) {
     if (replaced && !pitchShiftReplacement) {
         out.groupExcluded = true;
         out.stageCount = 0;
@@ -275,8 +307,9 @@ static void applyObservedStages(Snapshot& out, const MusicVoice& voice, bool rep
     out.stages = voice.observedStages.stages;
     out.stageCount = voice.observedStages.count;
 }
+
 static void stopVoices() {
-    const auto now = monotonicNowNs();
+    auto const now = monotonicNowNs();
     for (auto& [id, voice] : voices) {
         voice.snapshot.markStopped(now, ++nextEpoch);
         voice.snapshot.path.clear();
@@ -284,33 +317,40 @@ static void stopVoices() {
     }
     voices.clear();
 }
-// Samples one live GD music channel into its voice and publishes it. With a level layer (a
-// PlayLayer or the editor), the level's OBS choice can replace the song. With null (menus, shop),
-// OBS plays GD's own file.
+
+// Samples one live GD music channel into its voice and publishes it. A level layer (PlayLayer or
+// the editor) can replace the song with its OBS choice; with null, OBS plays GD's own file.
 static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJBaseGameLayer* play) {
     if (id < 0 || id >= SONG_LINK_MAX_CHANNELS) return false;
     auto channel = engine->getActiveMusicChannel(id);
     bool live = false;
     FMOD::Sound* sound = nullptr;
     if (!channel || channel->isPlaying(&live) != FMOD_OK || !live ||
-        channel->getCurrentSound(&sound) != FMOD_OK || sound != music.m_sound) return false;
+        channel->getCurrentSound(&sound) != FMOD_OK || sound != music.m_sound)
+        return false;
     auto sampled = playbackPosition(channel, sound, engine->m_globalChannel);
     if (!sampled) return false;
     auto [position, sampleTime] = *sampled;
     auto& voice = voices[id];
     auto& out = voice.snapshot;
-    const auto previousTimestamp = out.timestamp;
-    const auto previousPosition = out.position;
-    const auto previousRate = out.rate;
-    const auto previousPlaying = out.playing;
-    const auto previousPath = out.path;
+    auto const previousTimestamp = out.timestamp;
+    auto const previousPosition = out.position;
+    auto const previousRate = out.rate;
+    auto const previousPlaying = out.playing;
+    auto const previousPath = out.path;
     bool newVoice = voice.channel != channel || voice.sound != sound ||
-        voice.source.path != std::string(music.m_filePath) || voice.engineChannelID != music.m_channelID || voice.continuing;
+        voice.source.path != std::string(music.m_filePath) ||
+        voice.engineChannelID != music.m_channelID || voice.continuing;
     if (newVoice) {
-        voice.fadePoints.clear(); voice.lastFade = 1.f; voice.explicitlyStopped = false;
+        voice.fadePoints.clear();
+        voice.lastFade = 1.f;
+        voice.explicitlyStopped = false;
     }
-    voice.engineChannelID = music.m_channelID; voice.dontReset = music.m_dontReset;
-    voice.channel = channel; voice.sound = sound; voice.continuing = false;
+    voice.engineChannelID = music.m_channelID;
+    voice.dontReset = music.m_dontReset;
+    voice.channel = channel;
+    voice.sound = sound;
+    voice.continuing = false;
     voice.source = {std::string(music.m_filePath)};
     auto& observed = dspScratch();
     observed.clear();
@@ -320,32 +360,43 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
     if (play) {
         if (auto entry = play->m_gameState.m_songChannelStates.find(id);
             entry != play->m_gameState.m_songChannelStates.end()) {
-            for (auto trigger : {entry->second.m_songTriggerGameObject1, entry->second.m_songTriggerGameObject2})
-                if (trigger && trigger->m_soundID > 0) voice.source.extraIDs.push_back(trigger->m_soundID);
+            for (auto trigger :
+                 {entry->second.m_songTriggerGameObject1, entry->second.m_songTriggerGameObject2})
+                if (trigger && trigger->m_soundID > 0)
+                    voice.source.extraIDs.push_back(trigger->m_soundID);
         }
     }
-    out.channelID = id; out.timestamp = sampleTime;
+    out.channelID = id;
+    out.timestamp = sampleTime;
     out.position = position;
-    const auto rate = channelRate(channel, sound);
+    auto const rate = channelRate(channel, sound);
     voice.rateStopped = !rate;
-    out.rate = rate.value_or(previousRate > 0 && std::isfinite(previousRate) ? std::min(previousRate, 16.) : 1.);
+    out.rate = rate.value_or(
+        previousRate > 0 && std::isfinite(previousRate) ? std::min(previousRate, 16.) : 1.
+    );
     out.playing = !voice.rateStopped && !channelPaused(channel);
-    double elapsed = previousTimestamp && sampleTime >= previousTimestamp ? (sampleTime - previousTimestamp) / 1e9 : 0.;
-    if (newVoice || !previousTimestamp || musicPositionJump(previousPosition, out.position,
-            previousPlaying ? elapsed : 0., previousRate)) out.epoch = ++nextEpoch;
+    double elapsed = previousTimestamp && sampleTime >= previousTimestamp ?
+        (sampleTime - previousTimestamp) / 1e9 :
+        0.;
+    if (newVoice || !previousTimestamp ||
+        musicPositionJump(previousPosition, out.position, previousPlaying ? elapsed : 0., previousRate))
+        out.epoch = ++nextEpoch;
     unsigned duration = 0;
     sound->getLength(&duration, FMOD_TIMEUNIT_MS);
     voice.duration = duration / 1000.0;
     int loops = 0;
     FMOD_MODE mode = FMOD_DEFAULT;
-    const bool loopMode = channel->getMode(&mode) == FMOD_OK &&
-        (mode & (FMOD_LOOP_NORMAL | FMOD_LOOP_BIDI));
+    bool const loopMode =
+        channel->getMode(&mode) == FMOD_OK && (mode & (FMOD_LOOP_NORMAL | FMOD_LOOP_BIDI));
     channel->getLoopCount(&loops);
     voice.loop = loopMode && loops != 0;
-    out.looping = false; out.loopStart = 0; out.loopEnd = 0;
+    out.looping = false;
+    out.loopStart = 0;
+    out.loopEnd = 0;
     unsigned loopStart = 0, loopEnd = 0;
     float baseFrequency = 0.f;
-    if (loopMode && (mode & FMOD_LOOP_NORMAL) && loops == -1 && sound->getDefaults(&baseFrequency, nullptr) == FMOD_OK && baseFrequency > 0 &&
+    if (loopMode && (mode & FMOD_LOOP_NORMAL) && loops == -1 &&
+        sound->getDefaults(&baseFrequency, nullptr) == FMOD_OK && baseFrequency > 0 &&
         channel->getLoopPoints(&loopStart, FMOD_TIMEUNIT_PCM, &loopEnd, FMOD_TIMEUNIT_PCM) == FMOD_OK &&
         loopEnd >= loopStart) {
         out.looping = true;
@@ -359,15 +410,19 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
     if ((start && parentClock < start) || (end && parentClock >= end)) out.playing = false;
     voice.scheduledStop = stops && end != 0;
     sampleEnvelope(voice, channel, engine->m_sampleRate);
-    auto groupGain = backgroundMusicGain(engine->m_musicFadeStart,
-        engine->m_backgroundMusicFade, engine->m_audioState.m_elapsed);
+    auto groupGain = backgroundMusicGain(
+        engine->m_musicFadeStart, engine->m_backgroundMusicFade, engine->m_audioState.m_elapsed
+    );
     out.triggerGain *= groupGain;
-    for (unsigned i = 0; i < out.fadeCount; ++i) out.fades[i].gain *= groupGain;
+    for (unsigned i = 0; i < out.fadeCount; ++i)
+        out.fades[i].gain *= groupGain;
     settings(out);
     out.status = out.playing ? "Playing" : "Paused";
-    out.level = state.level; out.attempt = state.attempt;
+    out.level = state.level;
+    out.attempt = state.attempt;
     bool replaced = false;
-    if (play) replaced = jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
+    if (play)
+        replaced = jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
     else {
         if (newVoice || out.path.empty())
             out.path = CCFileUtils::get()->fullPathForFilename(music.m_filePath.c_str(), false);
@@ -379,6 +434,7 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
     bridge().publish(out);
     return true;
 }
+
 // Publishes a stop for a voice whose channel is gone and forgets it.
 static std::map<int, MusicVoice>::iterator endVoice(std::map<int, MusicVoice>::iterator it, uint64_t now) {
     auto& out = it->second.snapshot;
@@ -387,13 +443,14 @@ static std::map<int, MusicVoice>::iterator endVoice(std::map<int, MusicVoice>::i
     bridge().publish(out);
     return voices.erase(it);
 }
+
 static void sampleMusic(PlayLayer* play) {
     if (!play || play != activePlayLayer) return;
     if (play->m_level) {
         state.level = play->m_level->m_levelName;
     }
     state.attempt = play->m_attempts;
-    const auto now = monotonicNowNs();
+    auto const now = monotonicNowNs();
     state.song.clear();
     auto engine = FMODAudioEngine::get();
     if (!engine) return;
@@ -402,18 +459,30 @@ static void sampleMusic(PlayLayer* play) {
         if (sampleChannel(engine, id, music, play)) seen.insert(id);
     for (auto it = voices.begin(); it != voices.end();) {
         auto& [id, voice] = *it;
-        if (seen.contains(id)) { ++it; continue; }
+        if (seen.contains(id)) {
+            ++it;
+            continue;
+        }
         auto& out = voice.snapshot;
         double elapsed = now >= out.timestamp ? (now - out.timestamp) / 1e9 : 0.;
-        bool continueEOF = id == 0 && (voice.continuing || (out.playing &&
-            canContinueMusicEOF(out.position, voice.duration, elapsed, out.rate,
-                voice.loop, voice.scheduledStop || voice.explicitlyStopped)));
+        bool continueEOF = id == 0 &&
+            (voice.continuing ||
+             (out.playing &&
+              canContinueMusicEOF(
+                  out.position,
+                  voice.duration,
+                  elapsed,
+                  out.rate,
+                  voice.loop,
+                  voice.scheduledStop || voice.explicitlyStopped
+              )));
         if (continueEOF) {
             if (out.playing) out.position += elapsed * out.rate;
             voice.continuing = true;
             out.timestamp = std::max(now, out.timestamp);
             bool paused = false;
-            if (engine->m_backgroundMusicChannel) engine->m_backgroundMusicChannel->getPaused(&paused);
+            if (engine->m_backgroundMusicChannel)
+                engine->m_backgroundMusicChannel->getPaused(&paused);
             bool deathPause = play->m_player1 && play->m_player1->m_isDead &&
                 !play->m_gameState.m_audioOnDeath && !voice.dontReset &&
                 !(play->m_isPracticeMode && !play->m_practiceMusicSync);
@@ -432,35 +501,50 @@ static void sampleMusic(PlayLayer* play) {
                 out.fadeCount = count;
             }
             settings(out);
-            const bool replaced = jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
+            bool const replaced =
+                jukebox_link::fill(out, playingSongs ? &*playingSongs : nullptr, voice.source);
             applyObservedStages(out, voice, replaced);
             if (id == 0 || state.song.empty()) state.song = out.song;
-            bridge().publish(out); ++it;
-        } else it = endVoice(it, now);
+            bridge().publish(out);
+            ++it;
+        }
+        else it = endVoice(it, now);
     }
     bool dead = play->m_player1 && play->m_player1->m_isDead;
-    publish(play->m_hasCompletedLevel ? "Complete" : play->m_isPaused ? "Paused" : dead ? "Death" : "Playing",
-        !play->m_isPaused);
+    publish(
+        play->m_hasCompletedLevel ? "Complete" :
+            play->m_isPaused      ? "Paused" :
+            dead                  ? "Death" :
+                                    "Playing",
+        !play->m_isPaused
+    );
 }
+
 // Stops the level's songs in OBS and drops its name and attempt count from the status.
 static void leaveLevel() {
-    activePlayLayer = nullptr; playingSongs.reset(); stopVoices();
-    state.level.clear(); state.song.clear(); state.attempt = 0;
+    activePlayLayer = nullptr;
+    playingSongs.reset();
+    stopVoices();
+    state.level.clear();
+    state.song.clear();
+    state.attempt = 0;
     publish("Ready", false);
 }
+
 // Share a real-time gate between level updates and the scheduler. At 0.01x, a game-time 10 ms
 // timer can wait a second, beyond OBS's 400 ms freshness window.
 static bool musicSampleDue() {
     static uint64_t last = 0;
-    const auto now = monotonicNowNs();
+    auto const now = monotonicNowNs();
     if (now - last < 10000000) return false;
     last = now;
     return true;
 }
+
 // Outside a level OBS mirrors whatever GD plays: the menu song, shop music, editor playtests.
 // In the editor the level's OBS choice applies, as it does when the level is played.
 static void sampleMusicOutsideLevels() {
-    const auto now = monotonicNowNs();
+    auto const now = monotonicNowNs();
     state.song.clear();
     auto editor = LevelEditorLayer::get();
     if (editor && !editor->m_level) editor = nullptr;
@@ -482,16 +566,24 @@ $on_mod(Loaded) {
     enabled = Mod::get()->getSettingValue<bool>("enabled");
     pitchShiftReplacement = Mod::get()->getSettingValue<bool>("pitch-shift-replacement");
     audio_tap::enable(enabled);
-    listenForSettingChanges<bool>("enabled", [](bool value) { enabled = value; audio_tap::enable(value); });
-    listenForSettingChanges<bool>("pitch-shift-replacement",
-                                  [](bool value) { pitchShiftReplacement = value; });
-    SettingChangedEventV3(Mod::get(), "offset").listen([](std::shared_ptr<SettingV3> setting) {
-        auto offset = std::dynamic_pointer_cast<offset_setting::OffsetSetting>(setting);
-        if (!offset || loadingOffset || offsetLevel.empty()) return;
-        auto values = Mod::get()->getSavedValue<matjson::Value>("obs-level-offsets", matjson::Value::object());
-        values[offsetLevel] = offset->getValue();
-        Mod::get()->setSavedValue("obs-level-offsets", values);
-    }).leak();
+    listenForSettingChanges<bool>("enabled", [](bool value) {
+        enabled = value;
+        audio_tap::enable(value);
+    });
+    listenForSettingChanges<bool>("pitch-shift-replacement", [](bool value) {
+        pitchShiftReplacement = value;
+    });
+    SettingChangedEventV3(Mod::get(), "offset")
+        .listen([](std::shared_ptr<SettingV3> setting) {
+            auto offset = std::dynamic_pointer_cast<offset_setting::OffsetSetting>(setting);
+            if (!offset || loadingOffset || offsetLevel.empty()) return;
+            auto values = Mod::get()->getSavedValue<matjson::Value>(
+                "obs-level-offsets", matjson::Value::object()
+            );
+            values[offsetLevel] = offset->getValue();
+            Mod::get()->setSavedValue("obs-level-offsets", values);
+        })
+        .leak();
     selectOffsetLevel(nullptr);
     jukebox_link::initialize();
     settings(state);
@@ -505,6 +597,7 @@ class $modify(SeparateSongMusicEvents, FMODAudioEngine) {
         cancelVoice(id);
         FMODAudioEngine::stopAndRemoveMusic(id);
     }
+
     void stopAllMusic(bool clear) {
         for (auto& [id, voice] : voices) {
             auto entry = m_fmodMusic.find(id);
@@ -512,30 +605,38 @@ class $modify(SeparateSongMusicEvents, FMODAudioEngine) {
         }
         FMODAudioEngine::stopAllMusic(clear);
     }
+
     void clearAllAudio() {
-        for (auto& [id, voice] : voices) cancelVoice(id);
+        for (auto& [id, voice] : voices)
+            cancelVoice(id);
         FMODAudioEngine::clearAllAudio();
     }
+
     void stopChannel(FMOD::Channel* channel, bool loop, float delay) {
-        for (auto& [id, voice] : voices) if (voice.channel == channel) cancelVoice(id);
+        for (auto& [id, voice] : voices)
+            if (voice.channel == channel) cancelVoice(id);
         FMODAudioEngine::stopChannel(channel, loop, delay);
     }
+
     void setMusicTimeMS(unsigned time, bool dontWait, int id) {
         cancelVoice(id, false);
         FMODAudioEngine::setMusicTimeMS(time, dontWait, id);
     }
+
     float stopAndGetFade(FMOD::Channel* channel) {
         auto result = FMODAudioEngine::stopAndGetFade(channel);
         clearVoiceFade(channel);
         return result;
     }
 };
+
 class $modify(SeparateSongPlay, PlayLayer) {
     struct Fields {
         GJGameLevel* observedLevel = nullptr;
         std::optional<MusicVoice> suspendedContinuation;
         bool quit = false;
     };
+
     void activateLink() {
         if (m_fields->quit) return; // a level that has quit never takes the link back from GD music
         activePlayLayer = this;
@@ -549,6 +650,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
             m_fields->suspendedContinuation.reset();
         }
     }
+
     bool init(GJGameLevel* level, bool replay, bool dontCreateObjects) {
         stopVoices();
         jukebox_link::prepare(level);
@@ -562,14 +664,18 @@ class $modify(SeparateSongPlay, PlayLayer) {
         if (activePlayLayer == this) leaveLevel();
         return false;
     }
-    void startMusic() { activateLink(); PlayLayer::startMusic(); sampleMusic(this); }
+
+    void startMusic() {
+        activateLink();
+        PlayLayer::startMusic();
+        sampleMusic(this);
+    }
+
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
-        // A switcher can reuse the current layer without a scene-enter or
-        // resume callback. Reclaim only the live current layer, never one
-        // retained by an outgoing scene.
-        if (activePlayLayer != this && PlayLayer::get() == this && isRunning())
-            activateLink();
+        // A switcher can reuse this layer without a scene-enter or resume callback, so reclaim only
+        // the live layer, never one retained by an outgoing scene.
+        if (activePlayLayer != this && PlayLayer::get() == this && isRunning()) activateLink();
         if (m_fields->observedLevel != m_level) {
             m_fields->observedLevel = m_level;
             if (m_level) playingSongs = jukebox_link::snapshotSongs(m_level);
@@ -578,24 +684,44 @@ class $modify(SeparateSongPlay, PlayLayer) {
         }
         if (musicSampleDue()) sampleMusic(this);
     }
+
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         PlayLayer::destroyPlayer(player, object);
         sampleMusic(this);
     }
+
     void resetLevel() {
         m_fields->suspendedContinuation.reset();
         activateLink();
         // A paused restart can reuse channel/sound pointers. Rebuild voice
         // state for the new attempt, including its envelope and epoch.
         stopVoices();
-        PlayLayer::resetLevel(); sampleMusic(this);
+        PlayLayer::resetLevel();
+        sampleMusic(this);
     }
-    void pauseGame(bool unfocused) { PlayLayer::pauseGame(unfocused); sampleMusic(this); }
-    void resume() { activateLink(); PlayLayer::resume(); sampleMusic(this); }
+
+    void pauseGame(bool unfocused) {
+        PlayLayer::pauseGame(unfocused);
+        sampleMusic(this);
+    }
+
+    void resume() {
+        activateLink();
+        PlayLayer::resume();
+        sampleMusic(this);
+    }
+
     void onEnterTransitionDidFinish() {
-        PlayLayer::onEnterTransitionDidFinish(); activateLink(); sampleMusic(this);
+        PlayLayer::onEnterTransitionDidFinish();
+        activateLink();
+        sampleMusic(this);
     }
-    void levelComplete() { PlayLayer::levelComplete(); sampleMusic(this); }
+
+    void levelComplete() {
+        PlayLayer::levelComplete();
+        sampleMusic(this);
+    }
+
     // Quitting stops the level's songs and starts the menu song, but this PlayLayer lives on until
     // GD has torn the level down. GD's music is mirrored from here instead of after that.
     void onQuit() {
@@ -603,6 +729,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         m_fields->quit = true;
         if (activePlayLayer == this) leaveLevel();
     }
+
     void onExit() {
         if (activePlayLayer == this) {
             if (auto found = voices.find(0); found != voices.end() && found->second.continuing)
@@ -617,7 +744,8 @@ static void prepareOBS(GJGameLevel* level) {
     auto result = jukebox_link::prepare(level, true);
     // The reason says what to do; the second part says what OBS plays meanwhile.
     if (!result.ready && !result.error.empty())
-        Notification::create(result.error + "\nOBS plays the game's song for now.", NotificationIcon::Info)->show();
+        Notification::create(result.error + "\nOBS plays the game's song.", NotificationIcon::Info)
+            ->show();
 }
 
 class $modify(SeparateSongInfo, LevelInfoLayer) {
@@ -626,24 +754,28 @@ class $modify(SeparateSongInfo, LevelInfoLayer) {
         selectOffsetLevel(level);
         return true;
     }
+
     void onPlay(CCObject* sender) {
         selectOffsetLevel(m_level);
         prepareOBS(m_level);
         LevelInfoLayer::onPlay(sender);
     }
 };
+
 class $modify(SeparateSongPage, LevelPage) {
     bool init(GJGameLevel* level) {
         if (!LevelPage::init(level)) return false;
         selectOffsetLevel(level);
         return true;
     }
+
     void onPlay(CCObject* sender) {
         selectOffsetLevel(m_level);
         prepareOBS(m_level);
         LevelPage::onPlay(sender);
     }
 };
+
 class $modify(SeparateSongEdit, EditLevelLayer) {
     bool init(GJGameLevel* level) {
         if (!EditLevelLayer::init(level)) return false;
@@ -651,6 +783,7 @@ class $modify(SeparateSongEdit, EditLevelLayer) {
         return true;
     }
 };
+
 class $modify(SeparateSongEditor, LevelEditorLayer) {
     bool init(GJGameLevel* level, bool noUI) {
         if (!LevelEditorLayer::init(level, noUI)) return false;
@@ -660,37 +793,45 @@ class $modify(SeparateSongEditor, LevelEditorLayer) {
         return true;
     }
 };
+
 class $modify(SeparateSongLevelSelect, LevelSelectLayer) {
     void selectCurrentOffset() {
         if (!m_scrollLayer || !m_scrollLayer->m_pages || !m_scrollLayer->m_pages->count()) return;
         auto page = static_cast<LevelPage*>(m_scrollLayer->getPage(m_scrollLayer->m_page));
         if (page) selectOffsetLevel(page->m_level);
     }
+
     bool init(int page) {
         if (!LevelSelectLayer::init(page)) return false;
         selectCurrentOffset();
         return true;
     }
+
     void scrollLayerMoved(CCPoint position) {
         LevelSelectLayer::scrollLayerMoved(position);
         selectCurrentOffset();
     }
 };
+
 // Geode's guidelines flag per-frame hooks, so the service work runs from the scheduler. Unlike the
 // drawScene hook, the scheduler stops while the director is paused; levels sample from postUpdate.
 class SeparateSongService : public CCObject {
 public:
-    // A level samples its own music from postUpdate. Any other PlayLayer that still exists is
-    // only mirrored once it has quit, so a played level's song never reaches OBS as GD music
-    // in place of its OBS choice.
-    static bool outsideLevel(PlayLayer* play) { return !play || static_cast<SeparateSongPlay*>(play)->m_fields->quit; }
+    // A level samples its own music from postUpdate; other PlayLayers are mirrored only after they
+    // quit, so a played level's song never reaches OBS in place of its OBS choice.
+    static bool outsideLevel(PlayLayer* play) {
+        return !play || static_cast<SeparateSongPlay*>(play)->m_fields->quit;
+    }
+
     // Every 100 ms: keep the effects tap attached, refresh the Jukebox list, and report the level.
     void poll(float) {
         auto play = PlayLayer::get();
-        audio_tap::install(); jukebox_link::refreshUI();
+        audio_tap::install();
+        jukebox_link::refreshUI();
         if (play && play == activePlayLayer) sampleMusic(play);
         else if (!outsideLevel(play)) publish("Ready", false);
     }
+
     // Runs each scheduler frame; the monotonic gate limits sampling to once per 10 ms of real
     // time, independent of scaled dt. This also covers slow speedhacks with few level updates.
     void sampleMusicEveryFrame(float) {
@@ -700,12 +841,15 @@ public:
         else sampleMusic(play);
     }
 };
+
 $on_mod(Loaded) {
     // Leaked on purpose, like the bridge: nothing may run during static teardown.
     auto service = new SeparateSongService();
     auto scheduler = CCDirector::get()->getScheduler();
     scheduler->scheduleSelector(schedule_selector(SeparateSongService::poll), service, .1f, false);
-    scheduler->scheduleSelector(schedule_selector(SeparateSongService::sampleMusicEveryFrame), service, 0.f, false);
+    scheduler->scheduleSelector(
+        schedule_selector(SeparateSongService::sampleMusicEveryFrame), service, 0.f, false
+    );
 }
 
 class $modify(SeparateSongMenu, MenuLayer) {
@@ -713,11 +857,13 @@ class $modify(SeparateSongMenu, MenuLayer) {
         MenuLayer::onEnter();
         selectOffsetLevel(nullptr);
     }
+
     bool init() {
         if (!MenuLayer::init()) return false;
         selectOffsetLevel(nullptr);
         publish("Ready", false);
         jukebox_link::showVersionNotice();
+        updater::onMainMenu(this);
         return true;
     }
 };

@@ -10,8 +10,7 @@ struct SongFadePoint {
 };
 
 // One FMOD pitch shifter on the path from a sound to the speakers, in signal order. `instance` is
-// the DSP address: a mod that destroys and recreates its shifter gets fresh state in OBS. `pitch`
-// and `fft` are the parameters as FMOD reads them back.
+// the DSP address, so a shifter a mod recreates gets fresh state in OBS.
 struct PitchStage {
     float pitch = 0;
     uint16_t fft = 0;
@@ -43,17 +42,15 @@ struct SongLinkPacket {
     uint32_t fadeCount = 0;
     SongFadePoint fades[8]{};
     double loopStart = 0, loopEnd = 0;
-    // v7 adds authenticated ordered stages. A voice packet carries its channel's stages only. The global
-    // packet (channelID -1) carries the music group's stages, then each parent group up to the
-    // master, in `stages`; and the SFX group's post-tap stages, then each parent group up to the
-    // master, in `effectsStages`. A group on both paths (the master, for one) appears in both
-    // global lists, because each list is applied once to its own bus; a voice's list and the
-    // global lists are disjoint. A voice packet has no effects stages; flag 8 keeps a replacement
-    // song out of the music group's stages.
+    // v7 stages are authenticated. A voice packet carries its channel's stages only; flag 8 keeps
+    // a replacement song out of the music group's stages.
     uint8_t stageCount = 0;
     uint8_t effectsStageCount = 0;
     uint8_t stageReserved[2]{};
+    // Global packet (channelID -1): the music group's stages, then each parent up to the master.
     PitchStage stages[8]{};
+    // Global packet only: the SFX group's post-tap stages, then each parent up to the master. The
+    // master is in both lists, because each list is applied once to its own bus.
     PitchStage effectsStages[8]{};
     uint8_t tag[16]{};
 };

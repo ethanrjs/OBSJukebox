@@ -1,5 +1,4 @@
-// The pitch stage's AVX loops (declared in PitchShifter.hpp), defined once here rather than inline
-// in the header that every stage user includes.
+// The pitch stage's AVX loops, out of line so they are defined once, not in every user's header.
 #include "../src/LinkPacket.hpp" // PitchShifter.hpp uses PitchStage without including it
 #include "PitchShifter.hpp"
 #include <cstdlib>
@@ -16,7 +15,7 @@
 
 namespace pitch_simd {
 // AVX in the CPU (CPUID 1, ECX bit 28) and its 256-bit registers saved by the OS: OSXSAVE (bit 27)
-// and the SSE and AVX state bits (1 and 2) of XCR0.
+// plus the SSE and AVX state bits (1 and 2) of XCR0.
 bool available() {
     static bool const supported = [] {
     #ifdef _MSC_VER
@@ -57,7 +56,7 @@ PITCH_AVX_TARGET void butterflies(
     }
     _mm256_zeroupper(); // the caller's SSE code runs next
 }
-} // namespace pitch_simd
+}
 #else
 namespace pitch_simd {
 bool available() {
@@ -68,5 +67,5 @@ bool available() {
 void butterflies(float*, float*, float*, float*, size_t, float const*, float const*) {
     std::abort();
 }
-} // namespace pitch_simd
+}
 #endif

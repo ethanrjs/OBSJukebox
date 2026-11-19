@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
   pull_request:
   push:
+    branches: ['**']
 permissions:
   contents: read
 jobs:
@@ -19,7 +20,7 @@ jobs:
         uses: ./.github/actions/apt-install
         timeout-minutes: 4
         with:
-          packages: libobs-dev pkg-config xvfb libgl1-mesa-dri python3-tk ccache
+          packages: libobs-dev pkg-config xvfb libgl1-mesa-dri python3-tk ccache zsh
       - uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
         with:
           key: ${{ github.job }}-${{ runner.os }}-${{ hashFiles('scripts/dependencies.lock.json') }}
@@ -43,6 +44,13 @@ jobs:
         run: python3 tools/qa/test_link_protocol.py
       - name: Check the mod package check
         run: python3 tools/qa/test_check_mod_package.py
+      - name: Check updater rules, signatures and wrapper outcomes
+        run: |
+          python3 tools/qa/test_update_manifest.py
+          python3 tools/qa/test_update_wrapper.py
+          bash tools/qa/make-update-fixtures.sh "$RUNNER_TEMP/update-fixtures"
+          c++ -std=c++20 -Wall -Wextra -DUPDATE_RULES_ONLY tools/qa/update-rules-validation.cpp src/UpdateRules.cpp -o "$RUNNER_TEMP/update-rules"
+          "$RUNNER_TEMP/update-rules" "$RUNNER_TEMP/update-fixtures"
       - name: Check Proton paths
         run: |
           c++ -std=c++20 -O2 tools/qa/linux-paths-check.cpp -o build-linux/linux-paths-check
@@ -51,7 +59,6 @@ jobs:
         run: |
           cmake -S tools/qa -B build-linux/qa -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build-linux/qa --parallel 2
-          # Verbose, so the log says whether the transport tests checked the SHA instructions.
           ctest --test-dir build-linux/qa -V
       - name: Check OBS audio
         env:

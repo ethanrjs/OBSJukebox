@@ -6,7 +6,7 @@ Play one song in Geometry Dash and a different one on your OBS stream. In Jukebo
 
 This mod works only together with the OBS Jukebox plugin for OBS Studio, which adds a **GD Sounds** audio source to OBS.
 
-1. Download the setup for your system from the [releases page](https://github.com/ethanrjs/OBSJukebox/releases) and run it with Geometry Dash and OBS closed. It installs the plugin, and this mod too if needed. The setup needs Jukebox 3.8.0.
+1. Download the setup for your system from the [releases page](https://github.com/navinor/OBSJukebox/releases) and run it with Geometry Dash and OBS closed. It installs the plugin, and this mod too if needed. The setup needs Jukebox 3.8.0.
 2. In OBS, add **GD Sounds** to your scene once (Sources, then +, then GD Sounds). On Windows, the setup can do this for you if you tick "Add GD Sounds to my existing OBS scenes".
 3. Turn off any other capture of Geometry Dash's audio in OBS, or viewers hear the game twice. Keep Audio Monitoring off for GD Sounds.
 
@@ -15,6 +15,10 @@ This mod works only together with the OBS Jukebox plugin for OBS Studio, which a
 - In a level's Jukebox list, tick **Game** for the song you hear and **OBS** for the song your stream hears. Right-clicking a row also picks it for OBS.
 - In the pause menu, the **Game / OBS** button switches the volume sliders between the game and OBS.
 - GD Sounds shows what it is playing, or what it is waiting for, in its properties in OBS.
+
+## Updates
+
+Unless **Updates** is set to **Don't check**, the mod asks github.com once per launch whether a new OBS Jukebox is out. A new release is offered in a small panel on the main menu. The mod and the OBS plugin update together when Geometry Dash and OBS are closed; the updater never closes OBS.
 
 ## Requirements
 
@@ -26,4 +30,4 @@ This mod works only together with the OBS Jukebox plugin for OBS Studio, which a
 
 [Jukebox](https://github.com/Fleeym/jukebox) by Fleeym (MIT license).
 
-Source code and bug reports: https://github.com/ethanrjs/OBSJukebox
+Source code and bug reports: https://github.com/navinor/OBSJukebox

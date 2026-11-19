@@ -14,12 +14,8 @@
 #include <new>
 #include <vector>
 
-// Declared in Decoder.hpp. ma_dr_mp3_calculate_seek_points reads every frame header twice, once to
-// count the frames and once to place the points, and without a Xing frame count the length takes a
-// third pass. This takes one pass and repeats the placement on what it recorded, so the table and
-// length are the ones miniaudio would give. Out of memory for its frame list, the file falls back to
-// miniaudio's own passes, as any other failure does. It reads the MP3 backend's internals and repeats
-// miniaudio 0.11.23's placement, so a miniaudio update must re-check it against decoderSeekPointsTest.
+// One pass instead of miniaudio's two or three, producing the same seek table and length it would.
+// It reads the MP3 backend's internals, so a miniaudio update must re-check it.
 static_assert(
     MA_VERSION_MAJOR == 0 && MA_VERSION_MINOR == 11 && MA_VERSION_REVISION == 23,
     "indexMp3 mirrors miniaudio 0.11.23's ma_dr_mp3_calculate_seek_points; re-check it"
@@ -55,7 +51,7 @@ bool indexMp3(ma_decoder& decoder, ma_uint32 wanted, ma_uint64& lengthFrames) tr
     else {
         ma_uint32 const count = ma_uint32(std::min<ma_uint64>(wanted, frames.size() - 1));
         ma_uint64 const between = totalPcm / (count + 1);
-        // As ma_dr_mp3__accumulate_running_pcm_frame_count, in the same float arithmetic.
+        // Same float arithmetic as ma_dr_mp3__accumulate_running_pcm_frame_count.
         ma_uint64 running = 0;
         float fraction = 0;
         size_t next = 0;

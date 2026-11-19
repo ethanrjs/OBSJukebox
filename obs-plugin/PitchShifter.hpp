@@ -8,13 +8,9 @@
 #include <memory>
 #include <vector>
 
-// FMOD's FMOD_DSP_TYPE_PITCHSHIFT is Stephan M. Bernsee's smbPitchShift: a phase vocoder that
-// changes pitch without changing speed, using frames of fftSize samples that overlap four times.
-// OBS applies the same processing to the audio it plays so another mod's pitch shifter sounds in
-// OBS as it does in game. The differences from the published code, measured from GD's fmod.dll
-// 2.02.31, are that the bin shift rounds instead of truncating and that a silent block is skipped
-// without moving the stage's state at all.
-//
+// FMOD's FMOD_DSP_TYPE_PITCHSHIFT is Stephan M. Bernsee's smbPitchShift phase vocoder; this mirrors
+// fmod.dll 2.02.31 so another mod's pitch shifter sounds in OBS as it does in game.
+
 // This file is a derivative of smbPitchShift.cpp v1.2:
 //
 // COPYRIGHT 1999-2015 Stephan M. Bernsee <s.bernsee [AT] zynaptiq [DOT] com>
@@ -26,10 +22,8 @@
 // appear in all source copies. THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT EXPRESS OR IMPLIED
 // WARRANTY OF ANY KIND. See http://www.dspguru.com/wol.htm for more information.
 
-// AVX versions of PitchShifter's FFT loops (PitchSimd.cpp): eight lanes of the same statements,
-// separate multiplies and adds with no FMA, so each element gets the same IEEE operations in the
-// same order. available() is true only where the CPU has AVX and the OS saves its registers, and
-// always false off x86.
+// AVX versions of PitchShifter's FFT loops: eight lanes of the same statements, no FMA, so each
+// element gets the same IEEE operations in the same order. available() checks AVX and OS state.
 namespace pitch_simd {
 bool available();
 // PitchShifter::butterflies for a `half` that is a multiple of 8.
@@ -37,7 +31,7 @@ void butterflies(
     float* lowRe, float* lowIm, float* highRe, float* highIm, size_t half, float const* cosines,
     float const* sines
 );
-} // namespace pitch_simd
+}
 
 class PitchShifter {
     static constexpr size_t overlap = 4, maxFft = 4096, maxBins = maxFft / 2 + 1;
@@ -46,8 +40,8 @@ class PitchShifter {
     struct Tables {
         size_t size = 0, step = 0, latency = 0;
         std::vector<float> window;
-        // The twiddle factors of each FFT pass in the order it uses them; the pass that combines
-        // halves of `half` points starts at index half - 1.
+        // Twiddle factors in the order each pass uses them; the pass that combines halves of
+        // `half` points starts at index half - 1.
         std::vector<float> cosines, sines, inverseSines;
         std::vector<size_t> reversed;
     };
@@ -111,13 +105,10 @@ class PitchShifter {
     Tables const* tables = nullptr;
     std::array<Channel, 2> channels;
     std::array<float, maxBins> phase{}, frequency{}, shiftedMagnitude{}, shiftedFrequency{};
-    std::array<float, maxFft> real{}, imaginary{}; // the spectrum
+    std::array<float, maxFft> real{}, imaginary{};
 
-    // Combines `half` pairs: each low point a and high point b become a + bw and a - bw. It rounds as
-    // std::complex<float> does: each product is its own statement, as in libc++, so clang's default
-    // contraction can't fuse it into a multiply-add (x86-64 builds have no FMA to fuse with). GCC
-    // contracts across statements by default, so a GCC arm64 build, which nothing ships, could fuse. The
-    // halves never overlap, which lets the compiler vectorize the loop.
+    // Combines `half` pairs: low a and high b become a + bw and a - bw. Rounds as
+    // std::complex<float>: each product its own statement, so clang cannot fuse it into an FMA.
     static void butterflies(
         float* __restrict lowRe, float* __restrict lowIm, float* __restrict highRe,
         float* __restrict highIm, size_t half, float const* __restrict cosines,
@@ -134,8 +125,8 @@ class PitchShifter {
         }
     }
 
-    // The forward FFT's last pass without the highs above the first, which no one reads: the
-    // spectrum is used up to bin N/2 only. Same operations as butterflies() for what it keeps.
+    // The forward FFT's last pass without the bins above N/2, which no one reads. Same operations
+    // as butterflies() for what it keeps.
     static void lowButterflies(
         float* __restrict lowRe, float* __restrict lowIm, float const* __restrict highRe,
         float const* __restrict highIm, size_t half, float const* __restrict cosines,
@@ -150,7 +141,7 @@ class PitchShifter {
         }
     }
 
-    // The inverse FFT's last pass without the imaginary parts: overlap-add reads the real part only.
+    // The inverse FFT's last pass without imaginary parts: overlap-add reads only the real part.
     static void realButterflies(
         float* __restrict lowRe, float* __restrict highRe, float const* __restrict highIm,
         size_t half, float const* __restrict cosines, float const* __restrict sines
@@ -176,16 +167,8 @@ class PitchShifter {
         lowIm = lowIm + bi;
     }
 
-    // The FFT is radix-2 on a spectrum in bit-reversed order (point k at reversed[k]), unscaled when
-    // inverse as in Bernsee's code. Its first two passes are too short to vectorize, so they run on
-    // groups of four points in registers, pairs and then pairs of pairs, while the group is loaded.
-    // Point k of group 4i is reversed[4i] + groupOffsets[k]: bit reversal sends 1, 2, 3 to N/2,
-    // N/4, 3N/4.
-    //
-    // Many of those first-pass inputs are known +0s, and a product with a known +0 is a constant
-    // of the twiddle, computed once: the forward input is real, so a pair's imaginary parts are +0
-    // and the products with them are +0 * sine and +0 * cosine; an inverse pair whose high bin is
-    // above N/2 is +0 + +0i, so its b*w is (+0*cos - +0*sin, +0*sin + +0*cos).
+    // Radix-2 FFT on a bit-reversed spectrum, unscaled when inverse as in Bernsee. The first two
+    // passes are too short to vectorize, and known +0 inputs make their products constants.
     struct ZeroProducts {
         float sine, cosine;
     };
@@ -225,6 +208,8 @@ class PitchShifter {
         std::copy_n(im, 4, &imaginary[at]);
     }
 
+    // Point k of group 4i is reversed[4i] + offsets[k], where bit reversal maps 1, 2, 3 to
+    // N/2, N/4, 3N/4.
     std::array<size_t, 4> groupOffsets() const {
         return {0, tables->size / 2, tables->size / 4, tables->size / 4 * 3};
     }
@@ -248,8 +233,8 @@ class PitchShifter {
             }
     }
 
-    // The spectrum of the channel's windowed frame, up to bin N/2. The input is real, so every point
-    // starts with a +0 imaginary part.
+    // The spectrum of the channel's windowed frame, up to bin N/2. The input is real, so every
+    // point starts with a +0 imaginary part.
     void forwardTransform(Channel const& c) {
         auto const& t = *tables;
         auto const offsets = groupOffsets();
@@ -281,16 +266,13 @@ class PitchShifter {
         );
     }
 
-    // The real part of the inverse FFT of the channel's synthesized bins 0..N/2 (shiftedMagnitude at
-    // phaseSum); bins above N/2 are +0. In the groups of four, those leave only points 0 and 2 set,
-    // apart from the first group, which also holds bin N/2.
+    // The real part of the inverse FFT of bins 0..N/2 (shiftedMagnitude at phaseSum). Bins above
+    // N/2 are +0, so groups of four have only points 0 and 2 set; the first group also has N/2.
     void inverseTransform(Channel const& c) {
         auto const& t = *tables;
         auto const offsets = groupOffsets();
-        // A bin nothing was shifted into stays silent; std::polar would give it a signed zero. That can
-        // only change the sign of a zero in real[]. With default rounding and neither flush-to-zero nor
-        // denormals-are-zero, adding +-0 to the overlap-add accumulator, which starts at +0, never
-        // gives -0, so retained state is the same as with std::polar.
+        // A bin nothing was shifted into stays silent; std::polar would give it a signed zero.
+        // That only flips a zero's sign in real[]; adding it to the +0 accumulator never gives -0.
         auto bin = [&](size_t k, float& re, float& im) {
             auto const value = shiftedMagnitude[k] == 0 ?
                 std::complex<float>() :
@@ -321,19 +303,16 @@ class PitchShifter {
         );
     }
 
-    // std::round (halfway cases away from zero) without the CRT call MSVC makes for it and without
-    // compares or copysign, which MSVC won't vectorize. The fraction is exact, and doubling it is too,
-    // so its truncation is +-1 exactly when the fraction reaches a half. Exact for |x| < 2^31 (here x
-    // is a phase delta in turns and stays under 600), except that a zero result is always +0. binFrequencies can
-    // take that: the sign could only reach delta when delta is -0, and delta is then added to k >= +0.
+    // std::round semantics without the CRT call MSVC makes, or the compares and copysign it will
+    // not vectorize. Exact for |x| < 2^31; a zero result is +0, which binFrequencies accepts.
     static double roundHalfAway(double x) {
         double const whole = double(int(x));
         double const fraction = x - whole;
         return whole + double(int(2 * fraction));
     }
 
-    // Each bin's true frequency (in bins) from how far its phase moved since the last frame. Takes
-    // separate arrays so the compiler can vectorize it.
+    // Each bin's true frequency (in bins) from how far its phase moved since the last frame.
+    // Separate arrays so the compiler can vectorize it.
     static void binFrequencies(
         float const* __restrict phase, float* __restrict lastPhase, float* __restrict frequency,
         int count, double expected
@@ -346,9 +325,8 @@ class PitchShifter {
         }
     }
 
-    // Moves each bin's output phase on by its new frequency, wrapped as FMOD does: a phase outside
-    // [-pi, pi] loses its whole turns. FMOD tests the range first; there is no need to, since inside
-    // it the turns truncate to 0 and subtracting +0 leaves the phase as it was, -0 included.
+    // Moves each bin's phase on by its new frequency, wrapped as FMOD does: outside [-pi, pi] a
+    // phase loses its whole turns. Inside it, turns truncate to 0, so no range test is needed.
     static void advancePhases(
         float const* __restrict shiftedFrequency, float* __restrict phaseSum, int count, double expected
     ) {
@@ -366,22 +344,20 @@ class PitchShifter {
         size_t const bins = t.size / 2;
         double const expected = 2 * pi * double(t.step) / double(t.size);
         forwardTransform(c);
-        // Analysis. The phases come first, so binFrequencies has no calls in it.
+        // The phases come first, so binFrequencies has no calls in it.
         for (size_t k = 0; k <= bins; ++k)
             phase[k] = std::arg(std::complex<float>(real[k], imaginary[k]));
         binFrequencies(phase.data(), c.lastPhase.data(), frequency.data(), int(bins + 1), expected);
         shiftedMagnitude.fill(0.f);
         shiftedFrequency.fill(0.f);
-        // FMOD rounds the destination bin; Bernsee's code truncates, which does not sound the same.
-        // A bin shifted past the top is dropped, so its magnitude is never needed. Doubling is exact,
-        // so a compiler fusing it into the sum rounds as the separate steps did.
+        // FMOD rounds the destination bin; Bernsee truncates, which does not sound the same.
+        // Doubling is exact, so fusing it into the sum rounds as the separate steps did.
         for (size_t k = 0; k <= bins; ++k) {
             size_t const target = size_t(float(k) * pitch + .5f);
             if (target > bins) break;
             shiftedMagnitude[target] += 2 * std::abs(std::complex<float>(real[k], imaginary[k]));
             shiftedFrequency[target] = frequency[k] * pitch;
         }
-        // Synthesis: the phases first, then the bins from them.
         advancePhases(shiftedFrequency.data(), c.phaseSum.data(), int(bins + 1), expected);
         inverseTransform(c);
         float const scale = 2.f / float(bins * overlap);
@@ -401,8 +377,7 @@ public:
 
     explicit PitchShifter(size_t gateFrames = 512) : gateFrames(gateFrames ? gateFrames : 512) {}
 
-    // Builds the shared tables and checks for AVX. Call before any audio thread starts; process()
-    // would do both lazily on first use otherwise.
+    // Builds the shared tables and checks for AVX before any audio thread starts.
     static void prepareTables() {
         (void)allTables();
         (void)pitch_simd::available();
@@ -429,9 +404,8 @@ public:
         tables = &allTables()[index];
     }
 
-    // Shifts `frames` interleaved stereo frames in place. `gateFrames` is FMOD's mixing block: a
-    // channel whose block sums below 0.001 (scaled for a shorter call) outputs silence and keeps
-    // its state, so a pause or a gap holds the audio still inside the stage.
+    // `gateFrames` is FMOD's mixing block: a channel whose block sums below 0.001, scaled for a
+    // shorter call, outputs silence and keeps its state, so a pause holds the audio in the stage.
     void process(float* audio, size_t frames, float pitch, uint32_t fftSize) {
         if (!audio || !frames) return;
         if (!std::isfinite(pitch)) {
@@ -444,9 +418,8 @@ public:
         for (size_t ch = 0; ch < 2; ++ch) {
             double sum = 0;
             for (size_t i = 0; i < frames; ++i) {
-                // A corrupt float WAV must not poison this stage's retained FFT/phase history: NaN,
-                // Inf, or a finite sample so large (FLT_MAX) that a frame of it overflows the FFT.
-                // 1e6 is 120 dB above full scale, far beyond any mix this plugin builds.
+                // A corrupt float WAV must not poison the retained FFT/phase state: NaN, Inf, or
+                // a sample that overflows the FFT. 1e6 is 120 dB above full scale.
                 auto& sample = audio[i * 2 + ch];
                 if (!(std::abs(sample) <= 1e6f)) sample = 0;
                 sum += std::abs(sample);
@@ -473,13 +446,8 @@ public:
     }
 };
 
-// The ordered pitch stages of one FMOD object (a channel, a music group, a bus). Each slot keeps the
-// DSP instance and FFT size it was built for: a changed instance or a stage that returns after being
-// absent starts fresh, while a pitch change keeps the audio it is holding. A DSP the mod destroys and
-// recreates at the same address between two samples is indistinguishable and is documented as a limit.
-// The effects chain is built with `preallocate` before its audio thread starts; decoder-side chains
-// build a slot the first time a packet names it. A list longer than eight keeps the first eight, as
-// the wire and the mod's observer do.
+// Ordered pitch stages of one FMOD object; a pitch change keeps the audio a stage holds, and a DSP
+// recreated at the same address between samples is indistinguishable, a documented limit.
 class PitchChain {
     struct Slot {
         std::unique_ptr<PitchShifter> shifter;

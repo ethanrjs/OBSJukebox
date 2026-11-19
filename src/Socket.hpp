@@ -53,12 +53,11 @@ inline void nonblocking(SongSocket s) {
 }
 
 // POSIX has no such option. These sockets never connect() and never set IP_RECVERR, so Linux
-// normally does not report a closed peer on receive; the receivers tolerate any receive error anyway.
+// normally does not report a closed peer on receive, and receivers tolerate receive errors.
 inline void ignoreConnReset(SongSocket) {}
 #endif
 
-// Returns a nonblocking UDP socket bound to 127.0.0.1, so it never listens on other interfaces, or
-// BAD_SOCKET on failure.
+// A nonblocking UDP socket bound to 127.0.0.1, or BAD_SOCKET on failure.
 inline SongSocket openLoopbackSocket() {
     if (!socketsReady()) return BAD_SOCKET;
     auto udp = ::socket(AF_INET, SOCK_DGRAM, 0);

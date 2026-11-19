@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,7 +35,8 @@ class CheckModPackageTests(unittest.TestCase):
     def test_refuses_a_second_mod_json(self):
         # zipfile reads the last of two entries with one name; a loader may read the first.
         other = json.dumps(dict(id="other.mod", version="v9.9.9"))
-        with self.assertWarns(UserWarning):  # zipfile warns while writing the duplicate name
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)  # zipfile warns while writing the duplicate
             self.assertNotEqual(check([("mod.json", other), ("mod.json", MOD_JSON), ("mod.dll", "")]), 0)
 
     def test_refuses_an_oversized_mod_json(self):

@@ -8,16 +8,16 @@
   "name": "OBS Jukebox",
   "version": "v1.2.3",
   "developers": [
-    "babbur",
-    "Navinor"
+    "Navinor",
+    "babbur"
   ],
   "description": "Play a different song on your OBS stream than in game, with the OBS Jukebox plugin.",
   "links": {
-    "source": "https://github.com/ethanrjs/OBSJukebox"
+    "source": "https://github.com/navinor/OBSJukebox"
   },
   "issues": {
     "info": "Report problems on GitHub. Include your Geode log and say whether GD Sounds shows up in OBS.",
-    "url": "https://github.com/ethanrjs/OBSJukebox/issues"
+    "url": "https://github.com/navinor/OBSJukebox/issues"
   },
   "settings": {
     "enabled": {
@@ -27,14 +27,21 @@
     },
     "pitch-shift-replacement": {
       "type": "bool",
-      "name": "Pitch shift a different OBS song",
-      "description": "When another mod pitch shifts the game's music, OBS shifts the song it plays instead too.",
+      "name": "Pitch shift the OBS song",
+      "description": "Follow other mods' pitch shift in OBS.",
       "default": true
     },
     "offset": {
       "type": "custom:obs-offset",
       "name": "Song offset (seconds)",
       "default": 0.0
+    },
+    "update-mode": {
+      "type": "string",
+      "name": "Updates",
+      "description": "Checks for updates on launch. Never closes OBS.",
+      "default": "Ask me",
+      "one-of": ["Ask me", "Install when GD and OBS close", "Install right away", "Don't check"]
     }
   },
   "tags": [

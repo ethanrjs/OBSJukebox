@@ -1,4 +1,4 @@
-// ctest builds this in Release, and these asserts are the checks.
+// ctest builds this in Release, which defines NDEBUG and would strip the asserts.
 #undef NDEBUG
 #include "../../../src/AudioDownmix.hpp"
 #include "../../../src/LinkKey.hpp"

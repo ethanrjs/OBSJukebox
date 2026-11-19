@@ -20,7 +20,7 @@ void copyText(char (&out)[N], std::string const& text) {
             --length;
     std::memcpy(out, text.data(), length);
 }
-} // namespace
+}
 
 // Lets at most 32 datagrams through per 50 ms, so a flood can't keep the clock thread spinning.
 struct DatagramBudget {
@@ -71,7 +71,7 @@ bool Bridge::start() {
         DatagramBudget budget;
         while (!stop) {
             if (!waitSocketReadable(socket, 50)) continue;
-            // Over budget, the rest wait in the socket buffer, and the system drops what doesn't fit.
+            // Over budget, the rest wait in the socket buffer; the system drops what doesn't fit.
             if (!budget.spend(monotonicNowNs())) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
@@ -138,7 +138,7 @@ void Bridge::publish(Snapshot const& s) {
         p.effectsStageCount = std::min<uint8_t>(s.effectsStageCount, 8);
         std::copy_n(s.effectsStages.begin(), p.effectsStageCount, p.effectsStages);
     }
-    // Paths are never shortened: a cut path names the wrong file, so a long one stops playback instead.
+    // Paths are never shortened: a cut path names the wrong file, so a long one stops playback.
     // A path that isn't UTF-8 stops playback too: OBS can't open it.
     bool tooLong = s.path.size() >= sizeof(p.path);
     if (!tooLong && validUtf8(s.path)) {
@@ -192,4 +192,4 @@ Bridge& bridge() {
     static auto* b = new Bridge;
     return *b;
 }
-} // namespace separate_song
+}

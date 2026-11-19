@@ -1,6 +1,5 @@
-// These stress the real output thread, including a deliberately slow file open.
-// Timeline arithmetic is checked by the existing sample tests; wall time here
-// detects stalls with scheduler tolerance rather than asserting hard realtime.
+// Stress the real output thread, including a slow file open. Timeline arithmetic has its own
+// sample tests; wall time here only detects stalls, with scheduler tolerance.
 struct StressRun {
     double rate=1,seconds=11;
     bool loop=false,checkBudget=true;
@@ -14,9 +13,8 @@ struct StressRun {
     // The staged effects reset and the 100 ms pause, in seconds into the run; 0 leaves one out.
     double resetAt=0,pauseAt=0;
 };
-// A real-worker stress run: five voices carry ten 4096 stages, the global adds a group stage, and
-// eight post-tap effects stages share the same hop grid. Measured after a 1 s warm-up; the raw miss
-// counts include it. Returns the staged effects frames whose packets came after the worker rendered.
+// Measured after a 1 s warm-up, which the raw miss counts still include. Returns the staged
+// effects frames whose packets arrived after the worker rendered them.
 static uint64_t pitchStressRun(const StressRun& run) {
     const auto rate=run.rate;const bool loop=run.loop;
     const unsigned voiceCount=run.voices,effectsStages=run.effectsStages;
@@ -48,10 +46,8 @@ static uint64_t pitchStressRun(const StressRun& run) {
         SongSource source(nullptr);source.active=true;source.worker=std::thread([&]{source.run();});
         const auto start=os_gettime_ns();auto last=start;
         std::atomic<bool> measuring{false};unsigned rawBefore=0,effectsRawBefore=0;
-        // Effects as the tap sends them: back-to-back packets at their own cadence, each sent
-        // `effectsLatenessNs` after its timestamp. The sender spins, so a coarse timer adds no lateness,
-        // and it runs at audio scheduling, as FMOD's mixer thread does in GD. Its own lateness is
-        // taken once each packet is out, so a slow harness cannot pass for a plugin miss.
+        // Effects as GD's tap sends them: back-to-back packets at their own cadence.
+        // Each is sent `effectsLatenessNs` late; the sender spins, so timers add no lateness.
         std::atomic<bool> stopEffects{false};
         bool sendFailed=false;uint64_t sendLateNs=0; // the sender's own; read after it joins
         std::thread effectsSender([&]{
@@ -143,10 +139,8 @@ static void pitchStressTest() {
 #endif
     pitchStressRun({.seconds=1.5,.checkBudget=false,.voices=64,.voiceStages=false});
 }
-// The worker renders a staged block when the output starts the block before it, at least 20 ms
-// after the block's timestamp, so each frame may arrive up to 10 ms after its own time: a packet up
-// to 10 ms after its timestamp. A packet 20 ms late has frames 10 to 20 ms late, which are lost.
-// Neither run resets the stages or pauses, so the only events are the packets' own lateness.
+// The worker renders a block at least 20 ms after its timestamp, so frames arriving up to 10 ms
+// late survive and a packet 20 ms late loses frames 10 to 20 ms.
 static void effectsLatenessTest() {
     for(const unsigned rate:{48000u,44100u}){
         StressRun light{.seconds=1.6,.voices=0,.effectsStages=1};
@@ -159,10 +153,8 @@ static void effectsLatenessTest() {
                                                      :"staged effects sent 20 ms late lose frames");
     }
 }
-// Slow effects work (a burst of 4096 stages, a reset, a preempted thread) must not hold up the output
-// or the music. Once it catches up, effects play at their own timestamps: each packet carries a
-// marker that names when it was sent, so replayed old audio cannot pass for new. Without SFX stages
-// the output mixes effects itself, so they keep playing through the delay.
+// Slow effects work must not hold up output or music; once caught up, effects play at their own
+// timestamps, and each packet's marker shows replayed audio is not taken for new.
 static void effectsDelayTest(bool staged) {
     receiver=std::make_shared<Receiver>();
     SyncedSender sender(0);auto socketFd=socket(AF_INET,SOCK_DGRAM,0);
@@ -172,8 +164,8 @@ static void effectsDelayTest(bool staged) {
     SongLinkPacket music;music.flags=7;music.loopStart=.1;music.loopEnd=.9;music.position=.1;
     std::strcpy(music.path,"artifacts/audio-tests/half.wav");
     SongLinkPacket global;global.channelID=-1;global.flags=1;global.effectsVolume=1;
-    // Staged effects are one steady level. A fresh FFT 4096 stage fades it in over its first hops;
-    // one that kept its history would play its held audio from before the delay at full level.
+    // Staged effects are one steady level, and a fresh FFT 4096 stage fades it in over its first
+    // hops, so a stage that kept its history would play the held audio at full level.
     constexpr uint64_t delayNs=180000000;
     if(staged){global.effectsStageCount=1;global.effectsStages[0]={1.f,4096,0,77};}
     sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_port=htons(receiverPort());addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);

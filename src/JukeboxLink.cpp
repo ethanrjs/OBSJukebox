@@ -221,9 +221,8 @@ std::filesystem::path base() {
     return Loader::get()->getLoadedMod("fleym.nongd")->getSaveDir();
 }
 
-// CellAccess and UIAccess read Jukebox's protected fields using the vendored headers for
-// JUKEBOX_VERSION (set in CMakeLists.txt). Geode lets the dependency update to any newer 3.x, so
-// skip the row UI on other builds.
+// CellAccess and UIAccess read Jukebox's protected fields through the vendored headers for
+// JUKEBOX_VERSION, but Geode lets the dependency update, so other builds skip the row UI.
 bool cellLayoutMatches() {
     static bool const matches = [] {
         auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
@@ -302,9 +301,8 @@ matjson::Value find(matjson::Value const& data, std::string const& uid, bool ori
     return matjson::Value();
 }
 
-// Jukebox opens local and hosted songs from nongs/<filename> when the entry has one, and uses the
-// stored absolute path only without it (nong_serialize.hpp), so a moved save folder still plays its
-// own copy. YouTube entries have no filename, and GD's original song keeps its stored path.
+// Jukebox opens local and hosted songs from nongs/<filename> when the entry has one, and falls
+// back to the stored absolute path, so a moved save folder still plays its own copy.
 std::string pathFor(matjson::Value const& song, bool original) {
     auto path = song["path"].asString().unwrapOr("");
     auto name = song["filename"].asString().unwrapOr("");
@@ -388,7 +386,7 @@ std::string download(Choice c, bool retry) {
     request = {true, "", Clock::now()};
     log::info("OBS song cache miss: {} ({})", c.name, c.uid);
     if (c.original && c.id > 0) MusicDownloadManager::sharedState()->downloadSong(c.id);
-    else if (c.original) request = {false, "Original song file is unavailable."};
+    else if (c.original) request = {false, "Original song file missing."};
     else if ([&] {
                  auto locals = manifest(c.id)["locals"];
                  if (!locals.isArray()) return false;
@@ -396,14 +394,12 @@ std::string download(Choice c, bool retry) {
                      if (local["unique_id"].asString().unwrapOr("") == c.uid) return true;
                  return false;
              }())
-        request = {false, "Local song file is unavailable.\nChoose an existing file in Jukebox."};
-    // Jukebox makes every song it finishes downloading GD's active song, so asking it to fetch the
-    // OBS song would switch the song GD plays. The user downloads it in Jukebox, which switches it
-    // too, so the message says to pick the Game song again.
+        request = {false, "Song file missing.\nPick another file in Jukebox."};
+    // Jukebox makes every song it downloads GD's active song, so fetching the OBS song would switch
+    // the game's audio. The message tells the user to pick the Game song again.
     else
         request = {
-            false,
-            "OBS song audio is missing.\nDownload it in Jukebox, then pick your Game song again."
+            false, "OBS song not downloaded.\nDownload it in Jukebox, then re-pick your Game song."
         };
     return requests[k].error;
 }
@@ -443,9 +439,8 @@ CachedPlayback& forPlayback(int id) {
     return playback.insert_or_assign(id, std::move(value)).first->second;
 }
 
-// The open Jukebox list. Not a WeakRef: assigning a WeakRef that already holds an object
-// repoints its controller without retaining the new one, which left this dangling once the
-// second list opened was closed. Heap-held so no release runs during static teardown.
+// Not a WeakRef: assigning one that already holds an object repoints its controller without
+// retaining the new one, which left this dangling. Heap-held so nothing releases it at teardown.
 Ref<CCNode>& visibleList() {
     static auto list = new Ref<CCNode>();
     return *list;
@@ -538,10 +533,8 @@ public:
         return control;
     }
 
-    // Jukebox rebuilds the row's buttons menu when the Game song changes, dropping the checkbox.
-    // The scheduler runs before drawing, so re-syncing here restores it in the same frame.
-    // A rebuild destroys the old menu, which clears the checkbox's parent, so these two checks
-    // catch every rebuild. Otherwise the row is still as sync() left it.
+    // Jukebox rebuilds the row's buttons menu when the Game song changes, dropping the checkbox;
+    // the scheduler runs before drawing, so re-syncing here restores it in the same frame.
     void update(float) override {
         auto ui = CellAccess::ui(m_cell);
         if (!ui) return;
@@ -648,7 +641,8 @@ void select(jukebox::NongCell* cell) {
         clear(c.id);
         return;
     }
-    // Jukebox's index serializer can leave parentID null; without it the path falls back to the manifest.
+    // Jukebox's index serializer can leave parentID null; without it the path falls back to
+    // the manifest.
     if (auto index = CellAccess::index(cell); index && *index) {
         c.offset = (*index)->startOffset;
         if ((*index)->parentID)
@@ -658,9 +652,8 @@ void select(jukebox::NongCell* cell) {
     }
     c = resolved(c);
     store(c);
-    // Only rows with a Game button can be picked, and Jukebox lists those because it stores the
-    // song. Asking it to download one fails with "already downloaded" whenever the async file
-    // cache has not caught up. GD's original song is the only one that may still be missing.
+    // Only rows with a Game button can be picked, and only GD's original song may still be missing;
+    // other downloads fail with "already downloaded" while Jukebox's file cache catches up.
     auto error = c.original ? download(c, true) : std::string();
     if (!error.empty()) FLAlertLayer::create("OBS Song", error, "OK")->show();
     refreshUI();
@@ -678,7 +671,7 @@ void showVersionNotice() {
     auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
     auto found = dependency ? dependency->getVersion().toVString() : std::string("none");
     Notification::create(
-        fmt::format("OBS Jukebox doesn't support Jukebox {} yet.\nOBS plays the game's song.", found),
+        fmt::format("Jukebox {} isn't supported yet.\nOBS plays the game's song.", found),
         NotificationIcon::Warning,
         6.f
     )
@@ -715,10 +708,8 @@ void refreshUI() {
         paint(cell);
 }
 
-// Rows get their OBS checkbox as they enter, so a new list or a search rebuild never draws a
-// frame of Jukebox's plain layout while waiting for refreshUI(). This runs for every node that
-// enters a scene, so it leaves gameplay alone and checks types rather than calling getID(),
-// which gives each node it touches its own Geode metadata object.
+// Rows get their OBS checkbox on entry, so a new list or search rebuild never draws a frame of
+// Jukebox's plain layout. Runs on every node, so it checks types rather than calling getID().
 void observeList(CCNode* node) {
     if (inGameplay()) return;
     if (!cellLayoutMatches()) return;
