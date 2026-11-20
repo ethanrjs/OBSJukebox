@@ -26,7 +26,7 @@ bool indexMp3(ma_decoder& decoder, ma_uint32 wanted, ma_uint64& lengthFrames) tr
 
     struct Frame {
         ma_uint64 bytePos;
-        ma_uint32 pcmFrames, sampleRate;
+        ma_uint32 pcmFrames, sampleRate, mp3Frames;
     };
 
     std::vector<Frame> frames;
@@ -35,20 +35,20 @@ bool indexMp3(ma_decoder& decoder, ma_uint32 wanted, ma_uint64& lengthFrames) tr
         ma_uint64 const bytePos = mp3.streamCursor - mp3.dataSize;
         ma_uint32 const pcmFrames = ma_dr_mp3_decode_next_frame_ex(&mp3, NULL, NULL, NULL);
         if (!pcmFrames) break;
-        frames.push_back({bytePos, pcmFrames, mp3.mp3FrameSampleRate});
+        frames.push_back({bytePos, pcmFrames, mp3.mp3FrameSampleRate, 1 + mp3.mp3FramesSkipped});
         totalPcm += pcmFrames;
     }
     if (!ma_dr_mp3_seek_to_start_of_stream(&mp3)) return false;
     std::vector<ma_dr_mp3_seek_point> points;
     constexpr size_t leading = MA_DR_MP3_SEEK_LEADING_MP3_FRAMES;
     if (frames.size() < leading + 1) {
-        points.push_back({0, 0, 0, 0});
+        points.push_back({mp3.streamStartOffset, 0, 0, 0});
     }
     else {
         ma_uint32 const count = ma_uint32(std::min<ma_uint64>(wanted, frames.size() - 1));
         ma_uint64 const between = totalPcm / (count + 1);
         // Same float arithmetic as ma_dr_mp3__accumulate_running_pcm_frame_count.
-        ma_uint64 running = 0;
+        ma_uint64 running = 0, runningMp3 = 0;
         float fraction = 0;
         size_t next = 0;
         auto accumulate = [&] {
@@ -57,32 +57,33 @@ bool indexMp3(ma_decoder& decoder, ma_uint32 wanted, ma_uint64& lengthFrames) tr
             ma_uint32 const whole = (ma_uint32)out;
             fraction = out - whole;
             running += whole;
+            runningMp3 += frames[next].mp3Frames;
             ++next;
         };
 
         struct Info {
-            ma_uint64 bytePos, pcmFrameIndex;
+            ma_uint64 bytePos, pcmFrameIndex, mp3FrameIndex;
         } window[leading + 1];
 
-        for (auto& info : window) {
-            info = {frames[next].bytePos, running};
-            accumulate();
-        }
+        size_t filled = 0;
         ma_uint64 target = 0;
         for (ma_uint32 point = 0; point < count; ++point) {
             target += between;
-            while (target >= running) {
-                // miniaudio places a point at the end of the stream here; that case is left to it.
-                if (next == frames.size()) return false;
-                std::copy(window + 1, window + leading + 1, window);
-                window[leading] = {frames[next].bytePos, running};
+            while (filled == 0 || target >= running) {
+                if (filled == leading + 1) {
+                    std::copy(window + 1, window + filled, window);
+                    --filled;
+                }
+                if (next == frames.size()) break;
+                window[filled++] = {frames[next].bytePos, running, runningMp3};
                 accumulate();
             }
+            auto const& last = window[filled - 1];
             points.push_back(
                 {window[0].bytePos,
                  target,
-                 leading,
-                 (ma_uint16)(target - window[leading - 1].pcmFrameIndex)}
+                 (ma_uint16)(last.mp3FrameIndex - window[0].mp3FrameIndex),
+                 (ma_uint16)(target - last.pcmFrameIndex)}
             );
         }
     }
