@@ -75,4 +75,4 @@ jobs:
           git add -A
           git commit --quiet -m "build(deps): bump Jukebox from $CURRENT to $VERSION"
           git push --quiet --force origin "$BRANCH"
-          gh pr create --base main --head "$BRANCH" --title "build(deps): bump Jukebox from $CURRENT to $VERSION" --body-file "$body"
+          gh pr create --base main --head "$BRANCH" --label dependencies --title "build(deps): bump Jukebox from $CURRENT to $VERSION" --body-file "$body"
