@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in OBS Jukebox doesn't work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a level with a custom song
+        2. Pause the game
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: gd-sounds
+    attributes:
+      label: Does GD Sounds show up in OBS?
+      options:
+        - "Yes"
+        - "No"
+        - I don't know
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - macOS
+        - Linux (Proton)
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: OBS Jukebox, Geode, Geometry Dash and OBS.
+      placeholder: OBS Jukebox v1.2.4, Geode 5.11.2, GD 2.2081, OBS 31.1
+    validations:
+      required: true
+  - type: textarea
+    id: mods
+    attributes:
+      label: Other mods
+      description: Mods that touch audio, pitch or the pause menu matter most, for example Mega Hack.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Drag in your newest Geode log from `geode/logs` in your Geometry Dash folder.
+        For OBS problems, also add the link from OBS **Help > Log Files > Upload Current Log File**.
+    validations:
+      required: true
