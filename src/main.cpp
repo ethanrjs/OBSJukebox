@@ -651,7 +651,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         }
     }
 
-    bool init(GJGameLevel* level, bool replay, bool dontCreateObjects) {
+    bool init(GJGameLevel* level, bool dontCreateObjects) {
         stopVoices();
         jukebox_link::prepare(level);
         selectOffsetLevel(level);
@@ -660,7 +660,7 @@ class $modify(SeparateSongPlay, PlayLayer) {
         if (level) playingSongs = jukebox_link::snapshotSongs(level);
         else playingSongs.reset();
         publish("Preparing", false);
-        if (PlayLayer::init(level, replay, dontCreateObjects)) return true;
+        if (PlayLayer::init(level, dontCreateObjects)) return true;
         if (activePlayLayer == this) leaveLevel();
         return false;
     }

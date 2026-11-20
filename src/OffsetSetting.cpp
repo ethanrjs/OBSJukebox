@@ -1,5 +1,6 @@
 #include "OffsetSetting.hpp"
 #include <Geode/Geode.hpp>
+#include <Geode/ui/Label.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <algorithm>
 #include <cmath>
@@ -11,7 +12,7 @@ namespace {
 std::string selectedLevel;
 
 class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
-    CCLabelBMFont* m_levelLabel = nullptr;
+    geode::Label* m_levelLabel = nullptr;
     TextInput* m_input = nullptr;
     Slider* m_slider = nullptr;
     CCMenuItemSpriteExtra* m_left = nullptr;
@@ -39,8 +40,8 @@ class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
         });
         menu->addChildAtPosition(m_input, Anchor::Center);
         setContentHeight(62);
-        m_levelLabel = CCLabelBMFont::create("", "bigFont.fnt");
-        m_levelLabel->setScale(.25f);
+        m_levelLabel = geode::Label::create("", "bigFont.fnt");
+        m_levelLabel->setLimitLabelWidth(getContentWidth() - 20.f, .25f, .1f);
         addChildAtPosition(m_levelLabel, Anchor::Bottom, ccp(0, 7));
         menu->updateAnchoredPosition(Anchor::Right, ccp(-10, 7));
         m_slider = Slider::create(this, menu_selector(OffsetNode::onSlider));
@@ -54,12 +55,11 @@ class OffsetNode final : public SettingValueNodeV3<OffsetSetting> {
         SettingValueNodeV3::updateState(invoker);
         if (!m_input || !m_slider) return;
         auto enabled = getSetting()->shouldEnable() && !selectedLevel.empty();
-        m_levelLabel->setString(selectedLevel.empty() ? "Select a level" : selectedLevel.c_str());
-        m_levelLabel->limitLabelWidth(getContentWidth() - 20.f, .25f, .1f);
+        m_levelLabel->setText(selectedLevel.empty() ? "Select a level" : selectedLevel);
         m_input->setEnabled(enabled);
         m_left->setEnabled(enabled);
         m_right->setEnabled(enabled);
-        if (invoker != m_input && (invoker || !m_input->getInputNode()->m_selected)) {
+        if (invoker != m_input && (invoker || !m_input->isFocused())) {
             auto displayed = getValue();
             if (std::abs(displayed) < 1e10) displayed = std::round(displayed * 100000.0) / 100000.0;
             m_input->setString(numToString(displayed));

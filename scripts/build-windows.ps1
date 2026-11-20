@@ -2,6 +2,7 @@
     [string]$ObsDirectory = "$env:ProgramFiles\obs-studio",
     [string]$GeodeSdk,
     [string]$DependencyRoot,
+    [string]$LlvmDirectory,
     [string]$Configuration = 'Release',
     [int]$Parallel = 4,
     [switch]$SkipMod
@@ -37,13 +38,21 @@ $loaderDirectory = Join-Path $DependencyRoot "geode-windows-$sdkVersion"
 $loaderResources = Join-Path $loaderDirectory 'geode/resources/geode.loader'
 New-Item -ItemType Directory -Force -Path $loaderResources | Out-Null
 Copy-Item -Path (Join-Path $DependencyRoot 'geode-resources/*') -Destination $loaderResources -Recurse -Force
-$sdkBinaryDirectory = Join-Path $sdk "bin\$sdkVersion"
+# The SDK's CMake links against bin/<PROJECT_VERSION>, which drops any prerelease suffix.
+$sdkBinaryDirectory = Join-Path $sdk "bin\$($sdkVersion.Split('-')[0])"
 New-Item -ItemType Directory -Force -Path $sdkBinaryDirectory | Out-Null
 Copy-Item -LiteralPath "$loaderDirectory\Geode.lib" -Destination "$sdkBinaryDirectory\Geode.lib" -Force
 if (!$SkipMod) {
+    # Geode v6's headers fail on MSVC 19.44 with C3615 in utils/file.hpp.
+    $llvm = if ($LlvmDirectory) { $LlvmDirectory } else { Join-Path $root 'tools\llvm\bin' }
+    if (!(Test-Path -LiteralPath "$llvm\clang++.exe")) {
+        throw "No clang++.exe in $llvm; unpack LLVM into tools\llvm or pass -LlvmDirectory."
+    }
+    $clang = (Join-Path $llvm 'clang.exe').Replace('\', '/')
+    $clangxx = (Join-Path $llvm 'clang++.exe').Replace('\', '/')
     $env:GEODE_SDK = $sdk.Replace('\', '/')
-    Reset-CMakeBuildDirectory -BuildDirectory "$buildRoot\mod" -Generator 'Ninja' -RepositoryRoot $root
-    & cmake -S $root -B "$buildRoot\mod" -G Ninja "-DCMAKE_BUILD_TYPE=$Configuration" "-DGEODE_BINDINGS_REPO_PATH=$DependencyRoot/bindings" "-DGEODE_CLI=$DependencyRoot/geode-cli/geode.exe" '-DGEODE_DISABLE_PRECOMPILED_HEADERS=ON' '-DSKIP_BUILDING_CODEGEN=OFF' '-DOBS_JUKEBOX_QA=OFF' @launcher
+    Reset-CMakeBuildDirectory -BuildDirectory "$buildRoot\mod" -Generator 'Ninja' -RepositoryRoot $root -Compiler $clangxx
+    & cmake -S $root -B "$buildRoot\mod" -G Ninja "-DCMAKE_BUILD_TYPE=$Configuration" "-DCMAKE_C_COMPILER=$clang" "-DCMAKE_CXX_COMPILER=$clangxx" "-DGEODE_BINDINGS_REPO_PATH=$DependencyRoot/bindings" "-DGEODE_CLI=$DependencyRoot/geode-cli/geode.exe" '-DGEODE_DISABLE_PRECOMPILED_HEADERS=ON' '-DSKIP_BUILDING_CODEGEN=OFF' '-DOBS_JUKEBOX_QA=OFF' @launcher
     if ($LASTEXITCODE) { throw 'Mod configuration failed.' }
     & cmake --build "$buildRoot\mod" --parallel $Parallel
     if ($LASTEXITCODE) { throw 'Mod compilation failed.' }

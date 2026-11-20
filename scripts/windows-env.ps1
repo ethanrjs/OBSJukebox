@@ -12,16 +12,21 @@ function Enter-MsvcEnvironment {
     return $vs
 }
 
-# CMake refuses a cache from another generator, and nested codegen/CPM caches survive --fresh, so delete the build directory.
+# CMake refuses a cache from another generator, loses settings when the compiler changes, and nested
+# codegen/CPM caches survive --fresh, so delete the build directory.
 function Reset-CMakeBuildDirectory {
-    param([string]$BuildDirectory, [string]$Generator, [string]$RepositoryRoot)
+    param([string]$BuildDirectory, [string]$Generator, [string]$RepositoryRoot, [string]$Compiler)
     $cache = Join-Path $BuildDirectory 'CMakeCache.txt'
     if (!(Test-Path -LiteralPath $cache)) { return }
-    $cached = [regex]::Match((Get-Content -LiteralPath $cache -Raw), '(?m)^CMAKE_GENERATOR:INTERNAL=(.+)$').Groups[1].Value.Trim()
-    if (!$cached -or $cached -eq $Generator) { return }
+    $text = Get-Content -LiteralPath $cache -Raw -Encoding UTF8
+    $cachedGenerator = [regex]::Match($text, '(?m)^CMAKE_GENERATOR:INTERNAL=(.+)$').Groups[1].Value.Trim()
+    $cachedCompiler = [regex]::Match($text, '(?m)^CMAKE_CXX_COMPILER:\w+=(.+)$').Groups[1].Value.Trim()
+    $sameGenerator = !$cachedGenerator -or $cachedGenerator -eq $Generator
+    $sameCompiler = !$Compiler -or !$cachedCompiler -or $cachedCompiler -eq $Compiler
+    if ($sameGenerator -and $sameCompiler) { return }
     $resolved = [IO.Path]::GetFullPath($BuildDirectory)
     $allowed = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'build-windows')) + [IO.Path]::DirectorySeparatorChar
     if (!$resolved.StartsWith($allowed, [StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to remove ${resolved}: it is outside build-windows." }
-    Write-Host "Removing ${resolved}: it was configured with '$cached'."
+    Write-Host "Removing ${resolved}: it was configured with '$cachedGenerator' and '$cachedCompiler'."
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }

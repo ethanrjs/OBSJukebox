@@ -5,7 +5,9 @@
 #include "UpdateRules.hpp"
 #include <Geode/Geode.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/ui/Label.hpp>
 #include <Geode/utils/web.hpp>
+#include <asp/fs/std.hpp>
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
@@ -49,6 +51,10 @@ struct Paths {
 Paths& paths() {
     static auto* p = new Paths;
     return *p;
+}
+
+asp::fs::Path geodePath(std::filesystem::path const& path) {
+    return asp::fs::Path::fromStdPath(path);
 }
 
 struct Offer {
@@ -138,8 +144,8 @@ bool authentic(std::string_view bytes, std::span<uint8_t const> signature) {
 }
 
 std::optional<Offer> readStaged() {
-    auto read = file::readString(paths().staging / "update.json");
-    auto readSignature = file::readBinary(paths().staging / "update.json.sig");
+    auto read = file::readString(geodePath(paths().staging / "update.json"));
+    auto readSignature = file::readBinary(geodePath(paths().staging / "update.json.sig"));
     if (read.isErr() || readSignature.isErr()) return std::nullopt;
     auto bytes = read.unwrap();
     auto signature = readSignature.unwrap();
@@ -150,7 +156,7 @@ std::optional<Offer> readStaged() {
 }
 
 std::optional<ur::Result> readResult() {
-    auto text = file::readString(paths().result);
+    auto text = file::readString(geodePath(paths().result));
     if (text.isErr()) return std::nullopt;
     auto parsed = matjson::parse(text.unwrap());
     if (parsed.isErr()) return std::nullopt;
@@ -201,7 +207,7 @@ std::optional<std::filesystem::path> stage(Offer const& o, std::function<void(fl
             fmt::format("{}/download/v{}/{}", baseUrl(), ur::toString(o.manifest.version), name);
         auto response = web::WebRequest()
                             .userAgent(userAgent())
-                            .timeout(std::chrono::seconds(600))
+                            .timeout(asp::Duration::fromSecs(600))
                             .onProgress([progress](web::WebProgress const& p) {
                                 if (auto percent = p.downloadProgress()) progress(*percent);
                             })
@@ -211,15 +217,15 @@ std::optional<std::filesystem::path> stage(Offer const& o, std::function<void(fl
             return std::nullopt;
         auto part = setup;
         part += ".part";
-        if (response.into(part).isErr() || !matches(part, entry)) {
+        if (response.into(geodePath(part)).isErr() || !matches(part, entry)) {
             std::filesystem::remove(part, error);
             return std::nullopt;
         }
         std::filesystem::rename(part, setup, error);
         if (error) return std::nullopt;
     }
-    if (file::writeString(paths().staging / "update.json", o.bytes).isErr() ||
-        file::writeBinary(paths().staging / "update.json.sig", o.signature).isErr())
+    if (file::writeString(geodePath(paths().staging / "update.json"), o.bytes).isErr() ||
+        file::writeBinary(geodePath(paths().staging / "update.json.sig"), o.signature).isErr())
         return std::nullopt;
     return setup;
 }
@@ -243,11 +249,11 @@ std::optional<Launch> prepareLaunch(ur::Version version, std::filesystem::path c
     launch.args = {
         "--update",
         "--gd",
-        utils::string::pathToString(gdFolder),
+        geodePath(gdFolder).string(),
         "--result",
-        utils::string::pathToString(paths().result),
+        geodePath(paths().result).string(),
         "--reopen-flag",
-        utils::string::pathToString(paths().reopenFlag)
+        geodePath(paths().reopenFlag).string()
     };
 #elif defined(GEODE_IS_ARM_MAC)
     auto folder =
@@ -261,13 +267,13 @@ std::optional<Launch> prepareLaunch(ur::Version version, std::filesystem::path c
     }
     launch.program = "/bin/zsh";
     launch.args = {
-        utils::string::pathToString(folder / "OBS Jukebox Setup.app/Contents/Resources/Install.command"),
+        geodePath(folder / "OBS Jukebox Setup.app/Contents/Resources/Install.command").string(),
         "--update",
         "--result",
-        utils::string::pathToString(paths().result),
+        geodePath(paths().result).string(),
         "--reopen-flag",
-        utils::string::pathToString(paths().reopenFlag),
-        utils::string::pathToString(gdFolder)
+        geodePath(paths().reopenFlag).string(),
+        geodePath(gdFolder).string()
     };
 #else
     return std::nullopt;
@@ -288,7 +294,7 @@ void startUpdate(bool restart, bool viaNotice) {
     }
     unsigned startedOn = menuGeneration;
 #if defined(GEODE_IS_WINDOWS)
-    auto gdFolder = dirs::getGameDir();
+    auto gdFolder = dirs::getGameDir().toStdPath().unwrap();
 #elif defined(GEODE_IS_ARM_MAC)
     auto gdFolder = update_platform::gdBundle();
 #else
@@ -308,7 +314,7 @@ void startUpdate(bool restart, bool viaNotice) {
         bool trapped = launch && launch->job == update_platform::Job::Trapped;
         bool reopen = false, started = false;
         if (launch && !trapped) {
-            reopen = restart && file::writeString(paths().reopenFlag, "").isOk();
+            reopen = restart && file::writeString(geodePath(paths().reopenFlag), "").isOk();
             if (restart && !reopen)
                 log::warn("Could not write the reopen flag; GD won't reopen after the update");
             started = update_platform::startSetup(
@@ -464,8 +470,10 @@ void decide(Offer o, bool obsRunning, ur::Mode mode) {
 
 void check(ur::Mode mode) {
     auto get = [](std::string const& url, size_t cap) -> std::optional<ByteVector> {
-        auto response =
-            web::WebRequest().userAgent(userAgent()).timeout(std::chrono::seconds(15)).getSync(url);
+        auto response = web::WebRequest()
+                            .userAgent(userAgent())
+                            .timeout(asp::Duration::fromSecs(15))
+                            .getSync(url);
         if (!response.ok() || response.data().size() > cap) return std::nullopt;
         return response.data();
     };
@@ -496,10 +504,11 @@ void firstLaunch() {
     if (Mod::get()->getID() != "local.separate_song" || version.getTag()) return;
     auto mode = ur::parseMode(Mod::get()->getSettingValue<std::string>("update-mode"));
     if (mode == ur::Mode::Off) return;
+    auto saveDir = Mod::get()->getSaveDir().toStdPath().unwrap();
     paths() = {
-        Mod::get()->getSaveDir() / "update",
-        Mod::get()->getSaveDir() / "update-result.json",
-        Mod::get()->getSaveDir() / "update-reopen-gd"
+        saveDir / "update",
+        saveDir / "update-result.json",
+        saveDir / "update-reopen-gd"
     };
 
     if (update_platform::setupWaiting()) return;
@@ -559,12 +568,12 @@ void drawPanel(MenuLayer* menu) {
     background->setContentSize(root->getContentSize());
     background->setAnchorPoint({0.f, 0.f});
     root->addChild(background);
-    auto title = CCLabelBMFont::create(
-        progress ? progressText.c_str() :
-                   fmt::format("OBS Jukebox {} is out", ur::toString(panelVersion)).c_str(),
+    auto title = geode::Label::create(
+        progress ? progressText :
+                   fmt::format("OBS Jukebox {} is out", ur::toString(panelVersion)),
         "bigFont.fnt"
     );
-    title->limitLabelWidth(210.f, .4f, .1f);
+    title->setLimitLabelWidth(210.f, .4f, .1f);
     title->setPosition({115.f, progress ? 14.f : 38.f});
     root->addChild(title);
     auto buttons = CCMenu::create();

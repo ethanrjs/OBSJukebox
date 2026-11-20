@@ -95,7 +95,7 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
             fields->effectsLabel->setString(fields->obs ? "OBS SFX" : fields->gameEffectsLabel.c_str());
         auto audio = FMODAudioEngine::sharedEngine();
         fields->music->setValue(fields->obs ? obs_volume::music() : audio->getBackgroundMusicVolume());
-        fields->effects->setValue(fields->obs ? obs_volume::effects() : audio->getEffectsVolume());
+        fields->effects->setValue(fields->obs ? obs_volume::effects() : audio->m_sfxVolume);
         fields->music->updateBar();
         fields->effects->updateBar();
         // Game callbacks are saved on each switch to OBS, so another mod's callback is restored.

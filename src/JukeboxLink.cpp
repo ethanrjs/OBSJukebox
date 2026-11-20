@@ -1,6 +1,8 @@
 #include "JukeboxLink.hpp"
 #include "PlaybackIdentity.hpp"
 #include "Utf8.hpp"
+#include <asp/fs/std.hpp>
+#include <Geode/ui/Label.hpp>
 #include <Geode/utils/Keyboard.hpp>
 #include <jukebox/ui/list/nong_cell.hpp>
 #include <jukebox/ui/list/nong_list.hpp>
@@ -99,13 +101,11 @@ bool gameButtonShown(jukebox::NongCellUI* ui) {
     return gameCheck && gameCheck->isVisible();
 }
 
-// GD and Jukebox hand over UTF-8 in practice, but nothing guarantees it, and on Windows building a
-// path from anything else throws. Callers treat nullopt as a missing file.
-std::optional<std::filesystem::path> utf8Path(std::string_view path) {
+// GD and Jukebox hand over UTF-8 in practice, but nothing guarantees it, and only UTF-8 paths may
+// reach OBS. Callers treat nullopt as a missing file.
+std::optional<asp::fs::Path> utf8Path(std::string_view path) {
     if (!validUtf8(path)) return std::nullopt;
-    return std::filesystem::path(
-        std::u8string(reinterpret_cast<char8_t const*>(path.data()), path.size())
-    );
+    return asp::fs::Path(std::string(path));
 }
 
 // Filesystem and JSON work never runs on the game/sampling thread. Results are
@@ -156,9 +156,12 @@ class FileCache {
                     if (result && result.unwrap().isObject()) parsed = result.unwrap();
                 }
                 else {
+                    // asp's metadata opens the file and reads any reparse point, such as a
+                    // OneDrive song, as a symlink, so check the attributes instead.
+                    auto file = path->toStdPath().unwrap();
                     std::error_code error;
-                    present = std::filesystem::is_regular_file(*path, error) &&
-                        std::filesystem::file_size(*path, error) > 0 && !error;
+                    present = std::filesystem::is_regular_file(file, error) &&
+                        std::filesystem::file_size(file, error) > 0 && !error;
                 }
             }
             std::lock_guard lock(mutex);
@@ -217,7 +220,7 @@ bool exists(std::string const& path) {
     return files().get(path).first;
 }
 
-std::filesystem::path base() {
+asp::fs::Path base() {
     return Loader::get()->getLoadedMod("fleym.nongd")->getSaveDir();
 }
 
@@ -282,7 +285,7 @@ void clear(int id) {
 }
 
 std::string manifestPath(int id) {
-    return string::pathToString(base() / "manifest" / fmt::format("{}.json", id));
+    return (base() / "manifest" / fmt::format("{}.json", id)).string();
 }
 
 matjson::Value manifest(int id) {
@@ -307,9 +310,9 @@ std::string pathFor(matjson::Value const& song, bool original) {
     auto path = song["path"].asString().unwrapOr("");
     auto name = song["filename"].asString().unwrapOr("");
     auto inNongs = name.empty() ? std::nullopt : utf8Path(name);
-    if (!original && inNongs) return string::pathToString(base() / "nongs" / *inNongs);
+    if (!original && inNongs) return (base() / "nongs" / *inNongs).string();
     if (!path.empty() && (exists(path) || !files().known(path))) return path;
-    if (inNongs) return string::pathToString(base() / "nongs" / *inNongs);
+    if (inNongs) return (base() / "nongs" / *inNongs).string();
     return path;
 }
 
@@ -320,8 +323,7 @@ std::string originalPath(int id) {
     }
     auto folder = utf8Path(MusicDownloadManager::sharedState()->pathForSongFolder(id));
     if (!folder) return {};
-    auto name =
-        string::pathToString(*folder / fmt::format("{}.{}", id, id > 9999999 ? "ogg" : "mp3"));
+    auto name = (*folder / fmt::format("{}.{}", id, id > 9999999 ? "ogg" : "mp3")).string();
     return CCFileUtils::get()->fullPathForFilename(name.c_str(), false);
 }
 
@@ -355,7 +357,9 @@ std::string normalizedMusicPath(std::string const& path) {
     auto full = CCFileUtils::get()->fullPathForFilename(path.c_str(), false);
     auto file = utf8Path(full);
     if (!file) return {};
-    auto value = string::pathToString(file->lexically_normal());
+    // asp's lexicallyNormal rewrites drive-relative and UNC paths, which would merge distinct songs.
+    auto normal = file->toStdPath().unwrap().lexically_normal();
+    auto value = asp::fs::Path::fromStdPath(normal).string();
     std::replace(value.begin(), value.end(), '\\', '/');
 #ifdef GEODE_IS_WINDOWS
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -498,8 +502,8 @@ class OBSRowControl : public CCNode {
     jukebox::NongCell* m_cell = nullptr;
     Ref<CCMenuItemSpriteExtra> m_checkbox;
     CCSprite* m_sprite = nullptr;
-    CCLabelBMFont* m_gameLabel = nullptr;
-    CCLabelBMFont* m_obsLabel = nullptr;
+    geode::Label* m_gameLabel = nullptr;
+    geode::Label* m_obsLabel = nullptr;
     bool m_checked = false;
 
 public:
@@ -521,11 +525,11 @@ public:
         control->m_checkbox->setID("checkbox"_spr);
         control->m_checkbox->setContentSize({30.f, 30.f});
         control->m_sprite->setPosition({15.f, 15.f});
-        control->m_gameLabel = CCLabelBMFont::create("Game", "bigFont.fnt");
+        control->m_gameLabel = geode::Label::create("Game", "bigFont.fnt");
         control->m_gameLabel->setID("game-label"_spr);
         control->m_gameLabel->setScale(.25f);
         control->addChild(control->m_gameLabel);
-        control->m_obsLabel = CCLabelBMFont::create("OBS", "bigFont.fnt");
+        control->m_obsLabel = geode::Label::create("OBS", "bigFont.fnt");
         control->m_obsLabel->setID("obs-label"_spr);
         control->m_obsLabel->setScale(.25f);
         control->addChild(control->m_obsLabel);
@@ -645,10 +649,10 @@ void select(jukebox::NongCell* cell) {
     // the manifest.
     if (auto index = CellAccess::index(cell); index && *index) {
         c.offset = (*index)->startOffset;
-        if ((*index)->parentID)
-            c.path = string::pathToString(
-                base() / "nongs" / fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid)
-            );
+        if ((*index)->parentID) {
+            auto name = fmt::format("{}-{}.mp3", (*index)->parentID->m_id, c.uid);
+            c.path = (base() / "nongs" / name).string();
+        }
     }
     c = resolved(c);
     store(c);
@@ -802,7 +806,7 @@ void initialize() {
                 meta->startOffset,
                 meta->uniqueID,
                 meta->name,
-                song->path().has_value() ? string::pathToString(*song->path()) : "",
+                song->path().has_value() ? song->path()->string() : "",
                 false
             };
             invalidate(meta->gdID);
@@ -827,7 +831,7 @@ void initialize() {
             invalidate(meta->gdID);
             addedSongs.erase(key(meta->gdID, meta->uniqueID));
             if (auto c = choice(meta->gdID); c && c->uid == meta->uniqueID) {
-                c->path = song->path().has_value() ? string::pathToString(*song->path()) : "";
+                c->path = song->path().has_value() ? song->path()->string() : "";
                 c->offset = meta->startOffset;
                 c->name = meta->name;
                 store(*c);

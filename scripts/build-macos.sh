@@ -11,8 +11,10 @@ python3 scripts/fetch-dependencies.py mac --destination "$DEPENDENCY_ROOT"
 : ${MAC_ARCH:=$(uname -m)}
 geode_version=$(/usr/bin/plutil -extract geode raw -o - mod.json)
 geode_version="${geode_version#v}"
-mkdir -p "$GEODE_SDK/bin/$geode_version"
-cp "$DEPENDENCY_ROOT/geode-macos-$geode_version/Geode.dylib" "$GEODE_SDK/bin/$geode_version/Geode.dylib"
+# The SDK's CMake links against bin/<PROJECT_VERSION>, which drops any prerelease suffix.
+sdk_binaries="$GEODE_SDK/bin/${geode_version%%-*}"
+mkdir -p "$sdk_binaries"
+cp "$DEPENDENCY_ROOT/geode-macos-$geode_version/Geode.dylib" "$sdk_binaries/Geode.dylib"
 export GEODE_SDK
 export OBS_SDK="${OBS_SDK:-$DEPENDENCY_ROOT/obs-sdk}"
 export SIMDE_INCLUDE="${SIMDE_INCLUDE:-$DEPENDENCY_ROOT/simde}"
