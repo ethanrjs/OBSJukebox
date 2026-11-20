@@ -8,7 +8,7 @@
 #define MA_NO_RESOURCE_MANAGER
 #define STB_VORBIS_HEADER_ONLY
 #include "../vendor/miniaudio/miniaudio.h"
-#include "../vendor/miniaudio/stb_vorbis.c"
+#include "../vendor/miniaudio/extras/stb_vorbis.c"
 #undef STB_VORBIS_HEADER_ONLY
 #include <array>
 #ifdef OBS_JUKEBOX_QA

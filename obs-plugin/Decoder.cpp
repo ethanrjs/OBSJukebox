@@ -4,21 +4,18 @@
 #define MA_NO_NODE_GRAPH
 #define MA_NO_RESOURCE_MANAGER
 #define STB_VORBIS_HEADER_ONLY
-#include "../vendor/miniaudio/stb_vorbis.c"
+#include "../vendor/miniaudio/extras/stb_vorbis.c"
 #define MINIAUDIO_IMPLEMENTATION
 #include "../vendor/miniaudio/miniaudio.h"
 #undef STB_VORBIS_HEADER_ONLY
-#include "../vendor/miniaudio/stb_vorbis.c"
+#include "../vendor/miniaudio/extras/stb_vorbis.c"
 #include <algorithm>
 #include <cstring>
 #include <new>
 #include <vector>
 
 // One pass instead of miniaudio's two or three, producing the same seek table and length it would.
-static_assert(
-    MA_VERSION_MAJOR == 0 && MA_VERSION_MINOR == 11 && MA_VERSION_REVISION == 23,
-    "indexMp3 mirrors miniaudio 0.11.23's ma_dr_mp3_calculate_seek_points; re-check it"
-);
+// It mirrors ma_dr_mp3_calculate_seek_points; decoderSeekPointsTest checks it after every bump.
 
 bool indexMp3(ma_decoder& decoder, ma_uint32 wanted, ma_uint64& lengthFrames) try {
     lengthFrames = 0;

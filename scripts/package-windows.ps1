@@ -61,6 +61,11 @@ try {
     & git -C $projectRoot archive --format=zip -o $sourceArchive HEAD -- $sourceFiles
     if ($LASTEXITCODE -ne 0) { throw "git archive failed: $LASTEXITCODE" }
     Expand-Archive -LiteralPath $sourceArchive -DestinationPath $source
+    # git archive leaves submodules out.
+    $miniaudioArchive = Join-Path $staging 'miniaudio.zip'
+    & git -C (Join-Path $projectRoot 'vendor/miniaudio') archive --format=zip --prefix=vendor/miniaudio/ -o $miniaudioArchive HEAD -- miniaudio.h extras/stb_vorbis.c LICENSE
+    if ($LASTEXITCODE -ne 0) { throw "git archive of miniaudio failed: $LASTEXITCODE" }
+    Expand-Archive -LiteralPath $miniaudioArchive -DestinationPath $source
     Write-Output "Installer: $exe"
     Write-Output ('SHA256: ' + $hashes[(Split-Path $exe -Leaf)])
 } finally {

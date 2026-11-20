@@ -50,6 +50,9 @@ ditto "$DEPENDENCY_ROOT/geode-resources" "$song_resources/payload/geode/resource
 [[ -z "$(git status --porcelain)" ]] || print -u2 'warning: Source is taken from HEAD; uncommitted changes are not in it.'
 source_paths=("${(@f)$(cat scripts/source-files.txt)}")
 git archive HEAD -- $source_paths | tar -xf - -C "$song_resources/Source"
+# git archive leaves submodules out.
+git -C vendor/miniaudio archive --prefix=vendor/miniaudio/ HEAD -- miniaudio.h extras/stb_vorbis.c LICENSE |
+    tar -xf - -C "$song_resources/Source"
 codesign --force --deep --sign - "$song_app"
 song_archive="$song_root/artifacts/macos/OBS-Jukebox-$song_version-macOS-$MAC_ARCH.zip"
 ditto -c -k --sequesterRsrc --keepParent "$song_app" "$song_archive"
