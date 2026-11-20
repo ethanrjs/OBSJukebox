@@ -1,0 +1,78 @@
+name: Jukebox bump
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+      - name: Find a newer Jukebox release
+        id: release
+        run: |
+          tag=$(gh api repos/Fleeym/jukebox/releases/latest --jq .tag_name)
+          version=${tag#v}
+          current=$(sed -n 's/^set(JUKEBOX_VERSION \(.*\))$/\1/p' CMakeLists.txt)
+          branch=jukebox/v$version
+          prs=$(gh pr list --head "$branch" --state all --json number --jq length)
+          if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n 1)" = "$current" ]; then
+            echo "Jukebox $current is current (latest release $tag)."
+          elif [ "$prs" != 0 ]; then
+            echo "A PR for $branch already exists."
+          else
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "current=$current" >> "$GITHUB_OUTPUT"
+            echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Open the bump PR
+        if: steps.release.outputs.tag
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          CURRENT: ${{ steps.release.outputs.current }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+        run: |
+          release="$RUNNER_TEMP/jukebox"
+          git clone --quiet --depth 1 --branch "$TAG" https://github.com/Fleeym/jukebox.git "$release"
+          gh release download "$TAG" -R Fleeym/jukebox -p fleym.nongd.geode -D "$RUNNER_TEMP"
+          sha=$(sha256sum "$RUNNER_TEMP/fleym.nongd.geode" | cut -d ' ' -f 1)
+          python3 scripts/bump-jukebox.py "$VERSION" "$release" "$sha"
+
+          ours=$(jq -r '.geode' mod.json)
+          theirs=$(jq -r '.geode' "$release/mod.json")
+          body="$RUNNER_TEMP/body.md"
+          if [ "$(echo "${ours#v}" | cut -d . -f 1)" != "$(echo "${theirs#v}" | cut -d . -f 1)" ]; then
+            printf '> [!WARNING]\n> Jukebox %s targets Geode %s, but this branch targets Geode %s. Port to that Geode major before merging.\n\n' \
+              "$VERSION" "$theirs" "$ours" > "$body"
+          fi
+          cat >> "$body" <<EOF
+          Bumps Jukebox from $CURRENT to [$TAG](https://github.com/Fleeym/jukebox/releases/tag/$TAG).
+
+          | | Jukebox $VERSION | OBS Jukebox |
+          |---|---|---|
+          | Geode | $theirs | $ours |
+          | GD (Windows) | $(jq -r '.gd.win' "$release/mod.json") | $(jq -r '.gd.win' mod.json) |
+          | GD (macOS) | $(jq -r '.gd.mac' "$release/mod.json") | $(jq -r '.gd.mac' mod.json) |
+
+          \`scripts/bump-jukebox.py\` has moved every version and SHA-256 pin and replaced the vendored headers. Please review and test in-game before merging.
+          EOF
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch --quiet -c "$BRANCH"
+          git add -A
+          git commit --quiet -m "build(deps): bump Jukebox from $CURRENT to $VERSION"
+          git push --quiet --force origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" --title "build(deps): bump Jukebox from $CURRENT to $VERSION" --body-file "$body"
