@@ -6,14 +6,14 @@
 #include <unordered_map>
 #include <vector>
 
-#include <fmt/core.h>
 #include <Geode/Result.hpp>
 #include <Geode/binding/SongInfoObject.hpp>
 #include <Geode/utils/general.hpp>
 #include <arc/future/Future.hpp>
+#include <fmt/core.h>
 #include <matjson.hpp>
 
-#include <jukebox/nong/index.hpp>
+#include "jukebox/nong/index.hpp"
 
 namespace jukebox {
 
@@ -25,8 +25,14 @@ struct SongMetadata final {
     std::optional<std::string> level;
     int startOffset;
 
-    SongMetadata(int gdID, std::string uniqueID, std::string name, std::string artist,
-                 std::optional<std::string> level = std::nullopt, int offset = 0)
+    SongMetadata(
+        int gdID,
+        std::string uniqueID,
+        std::string name,
+        std::string artist,
+        std::optional<std::string> level = std::nullopt,
+        int offset = 0
+    )
         : gdID(gdID),
           uniqueID(std::move(uniqueID)),
           name(std::move(name)),
@@ -49,9 +55,9 @@ public:
     [[nodiscard]] virtual SongMetadata* metadata() const = 0;
     [[nodiscard]] virtual std::optional<std::string> indexID() const = 0;
     virtual void setIndexID(const std::string& id) = 0;
-
-    [[nodiscard]] virtual std::optional<std::filesystem::path> path() const = 0;
-    virtual void setPath(std::filesystem::path p) = 0;
+    // For local songs, this will always have a value, otherwise do check
+    [[nodiscard]] virtual std::optional<asp::fs::Path> path() const = 0;
+    virtual void setPath(asp::fs::Path p) = 0;
 };
 
 class LocalSong final : public Song {
@@ -61,7 +67,7 @@ private:
     std::unique_ptr<Impl> m_impl;
 
 public:
-    LocalSong(SongMetadata&& metadata, const std::filesystem::path& path);
+    LocalSong(SongMetadata&& metadata, const asp::fs::Path& path);
 
     LocalSong(const LocalSong& other);
     LocalSong& operator=(const LocalSong& other);
@@ -73,8 +79,8 @@ public:
 
     [[nodiscard]] NongType type() const override { return NongType::LOCAL; };
     [[nodiscard]] SongMetadata* metadata() const override;
-    [[nodiscard]] std::optional<std::filesystem::path> path() const override;
-    void setPath(std::filesystem::path p) override;
+    [[nodiscard]] std::optional<asp::fs::Path> path() const override;
+    void setPath(asp::fs::Path p) override;
     [[nodiscard]] std::optional<std::string> indexID() const override { return std::nullopt; }
     void setIndexID(const std::string& id) override {}
 
@@ -89,8 +95,12 @@ private:
     std::unique_ptr<Impl> m_impl;
 
 public:
-    YTSong(SongMetadata&& metadata, std::string youtubeID, std::optional<std::string> m_indexID,
-           std::optional<std::filesystem::path> path = std::nullopt);
+    YTSong(
+        SongMetadata&& metadata,
+        std::string youtubeID,
+        std::optional<std::string> m_indexID,
+        std::optional<asp::fs::Path> path = std::nullopt
+    );
     YTSong(const YTSong& other);
     YTSong& operator=(const YTSong& other);
 
@@ -104,8 +114,8 @@ public:
     [[nodiscard]] std::string youtubeID() const;
     [[nodiscard]] std::optional<std::string> indexID() const override;
     void setIndexID(const std::string& id) override;
-    [[nodiscard]] std::optional<std::filesystem::path> path() const override;
-    void setPath(std::filesystem::path p) override;
+    [[nodiscard]] std::optional<asp::fs::Path> path() const override;
+    void setPath(asp::fs::Path p) override;
     [[nodiscard]] arc::Future<geode::Result<geode::ByteVector>> startDownload() const;
 };
 
@@ -116,8 +126,12 @@ private:
     std::unique_ptr<Impl> m_impl;
 
 public:
-    HostedSong(SongMetadata&& metadata, std::string url, std::optional<std::string> m_indexID,
-               std::optional<std::filesystem::path> path = std::nullopt);
+    HostedSong(
+        SongMetadata&& metadata,
+        std::string url,
+        std::optional<std::string> m_indexID,
+        std::optional<asp::fs::Path> path = std::nullopt
+    );
     HostedSong(const HostedSong& other);
     HostedSong& operator=(const HostedSong& other);
 
@@ -131,8 +145,8 @@ public:
     [[nodiscard]] std::string url() const;
     [[nodiscard]] std::optional<std::string> indexID() const override;
     void setIndexID(const std::string& id) override;
-    [[nodiscard]] std::optional<std::filesystem::path> path() const override;
-    void setPath(std::filesystem::path p) override;
+    [[nodiscard]] std::optional<asp::fs::Path> path() const override;
+    void setPath(asp::fs::Path p) override;
     [[nodiscard]] arc::Future<geode::Result<geode::ByteVector>> startDownload() const;
 };
 
@@ -144,9 +158,9 @@ private:
 
 public:
     Nongs(int songID, LocalSong&& defaultSong);
-    Nongs(int songID);
+    explicit Nongs(int songID);
 
-
+    // No copies for this one
     Nongs(const Nongs&) = delete;
     Nongs& operator=(const Nongs&) = delete;
 
@@ -162,11 +176,13 @@ public:
     [[nodiscard]] bool isDefaultActive() const;
 
     geode::Result<> commit();
-
-
+    /**
+     * Returns Err if there is no NONG with the given path for the song ID
+     * Otherwise, returns ok
+     */
     geode::Result<> setActive(const std::string& uniqueID);
     geode::Result<> merge(Nongs&&);
-
+    // Remove all custom nongs and set the default song as active
     [[nodiscard]] geode::Result<> deleteAllSongs();
     [[nodiscard]] geode::Result<> deleteSong(const std::string& uniqueID, bool audio = true);
     [[nodiscard]] geode::Result<> deleteSongAudio(const std::string& uniqueID) const;
@@ -192,7 +208,7 @@ class Manifest {
 
 private:
     int m_version = s_latestVersion;
-    std::unordered_map<int, std::unique_ptr<Nongs>> m_nongs = {};
+    std::unordered_map<int, std::unique_ptr<Nongs>> m_nongs;
 
 public:
     constexpr static int s_latestVersion = 4;
@@ -206,4 +222,4 @@ public:
     [[nodiscard]] int version() const { return m_version; }
 };
 
-}
+}  // namespace jukebox

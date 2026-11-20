@@ -2,18 +2,18 @@
 
 #include <vector>
 
-#include <Geode/cocos/cocoa/CCObject.h>
-#include <Geode/cocos/menu_nodes/CCMenu.h>
-#include <Geode/cocos/platform/CCPlatformMacros.h>
 #include <Geode/binding/CCMenuItemSpriteExtra.hpp>
 #include <Geode/binding/CustomSongWidget.hpp>
+#include <Geode/cocos/cocoa/CCObject.h>
+#include <Geode/cocos/menu_nodes/CCMenu.h>
+#include <Geode/cocos/platform/CCPlatformMacros.h>  // IWYU pragma: keep
 #include <Geode/loader/Event.hpp>
 #include <Geode/ui/Popup.hpp>
 #include <Geode/utils/cocos.hpp>
 
-#include <jukebox/nong/nong.hpp>
-#include <jukebox/ui/list/nong_list.hpp>
-#include <jukebox/ui/list/song_cell.hpp>
+#include "jukebox/nong/nong.hpp"
+#include "jukebox/ui/list/nong_list.hpp"
+#include "jukebox/ui/list/song_cell.hpp"
 
 namespace jukebox {
 
@@ -37,8 +37,15 @@ protected:
 
     bool m_fetching = false;
 
-    bool init(float width, float height, std::vector<int> ids, CustomSongWidget* parent, int defaultSongID,
-              std::optional<int> levelID, const char* bg);
+    bool init(
+        float width,
+        float height,
+        std::vector<int> ids,
+        CustomSongWidget* parent,
+        int defaultSongID,
+        std::optional<int> levelID,
+        const char* bg
+    );
     void createList();
     cocos2d::CCSize getCellSize() const;
     void deleteAllNongs(cocos2d::CCObject*);
@@ -52,9 +59,10 @@ public:
     void addSong(Nongs&& song, bool popup = true);
     void updateParentWidget(SongMetadata const& song);
 
-    static NongDropdownLayer* create(std::vector<int> ids, CustomSongWidget* parent, const int defaultSongID,
-                                     const std::optional<int> levelID) {
-        auto ret = new NongDropdownLayer;
+    static NongDropdownLayer* create(
+        std::vector<int> ids, CustomSongWidget* parent, const int defaultSongID, const std::optional<int> levelID
+    ) {
+        auto* ret = new NongDropdownLayer;
         if (ret->init(420.f, 280.f, std::move(ids), parent, defaultSongID, levelID, "GJ_square01.png")) {
             ret->autorelease();
             return ret;
@@ -65,4 +73,4 @@ public:
     }
 };
 
-}
+}  // namespace jukebox

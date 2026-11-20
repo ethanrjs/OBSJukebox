@@ -27,4 +27,4 @@ struct SongDownloadFailed : geode::GlobalEvent<SongDownloadFailed, bool(const So
     using GlobalEvent::GlobalEvent;
 };
 
-}
+}  // namespace jukebox::event

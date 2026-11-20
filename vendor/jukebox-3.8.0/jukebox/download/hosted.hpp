@@ -10,4 +10,4 @@ namespace jukebox::download {
 
 arc::Future<geode::Result<geode::ByteVector>> startHostedDownload(std::string_view url);
 
-}
+}  // namespace jukebox::download

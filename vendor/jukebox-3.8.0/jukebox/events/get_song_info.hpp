@@ -26,4 +26,4 @@ struct GetSongInfo final : geode::GlobalEvent<GetSongInfo, bool(const GetSongInf
     using GlobalEvent::GlobalEvent;
 };
 
-}
+}  // namespace jukebox::event

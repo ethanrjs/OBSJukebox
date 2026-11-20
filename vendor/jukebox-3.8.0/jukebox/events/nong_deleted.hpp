@@ -24,4 +24,4 @@ struct NongDeleted : geode::GlobalEvent<NongDeleted, bool(const NongDeletedData&
     using GlobalEvent::GlobalEvent;
 };
 
-}
+}  // namespace jukebox::event

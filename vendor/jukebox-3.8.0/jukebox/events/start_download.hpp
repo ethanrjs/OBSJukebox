@@ -23,4 +23,4 @@ struct StartDownload : geode::Event<StartDownload, bool(const StartDownloadData&
     using Event::Event;
 };
 
-}
+}  // namespace jukebox::event

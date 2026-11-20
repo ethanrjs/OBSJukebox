@@ -1,17 +1,17 @@
 #pragma once
 
-#include <Geode/utils/function.hpp>
-
-#include <Geode/ui/Label.hpp>
 #include <Geode/cocos/cocoa/CCObject.h>
 #include <Geode/cocos/menu_nodes/CCMenu.h>
+#include <Geode/ui/Label.hpp>
+#include <Geode/utils/function.hpp>
 
-#include <jukebox/events/song_download_finished.hpp>
-#include <jukebox/nong/nong.hpp>
+#include "jukebox/events/song_download_finished.hpp"
+#include "jukebox/nong/nong.hpp"
 
 namespace jukebox {
 
-
+// Fields are public because they are meant to be changed and then UI will
+// update when build() is called.
 class NongCellUI : public cocos2d::CCNode {
 protected:
     geode::Label* m_songNameLabel = nullptr;
@@ -30,13 +30,19 @@ protected:
     cocos2d::CCMenu* m_downloadProgressContainer = nullptr;
     cocos2d::CCProgressTimer* m_downloadProgressTimer = nullptr;
 
-    bool init(const cocos2d::CCSize& size, geode::Function<void()> onSelect, geode::Function<void()> onTrash,
-              geode::Function<void()> onFixDefault, geode::Function<void()> onDownload, geode::Function<void()> onEdit);
+    bool init(
+        const cocos2d::CCSize& size,
+        geode::Function<void()> onSelect,
+        geode::Function<void()> onTrash,
+        geode::Function<void()> onFixDefault,
+        geode::Function<void()> onDownload,
+        geode::Function<void()> onEdit
+    );
 
 public:
     std::string m_songName = "None";
     std::string m_authorName = "None";
-    std::string m_metadata = "";
+    std::string m_metadata;
 
     cocos2d::CCSize m_size;
 
@@ -55,12 +61,17 @@ public:
     bool m_isDownloaded = false;
     bool m_isSelected = false;
 
-    bool m_isDownloading = 0;
+    bool m_isDownloading = false;
     float m_downloadProgress = 0;
 
-    static NongCellUI* create(const cocos2d::CCSize& size, geode::Function<void()> onSelect,
-                              geode::Function<void()> onTrash, geode::Function<void()> onFixDefault,
-                              geode::Function<void()> onDownload, geode::Function<void()> onEdit);
+    static NongCellUI* create(
+        const cocos2d::CCSize& size,
+        geode::Function<void()> onSelect,
+        geode::Function<void()> onTrash,
+        geode::Function<void()> onFixDefault,
+        geode::Function<void()> onDownload,
+        geode::Function<void()> onEdit
+    );
 
     void build();
     void buildOnlyDownloadProgress();
@@ -72,4 +83,4 @@ public:
     void onEdit(CCObject*);
 };
 
-}
+}  // namespace jukebox

@@ -26,4 +26,4 @@ struct SongDownloadProgress : geode::GlobalEvent<SongDownloadProgress, bool(cons
     using GlobalEvent::GlobalEvent;
 };
 
-}
+}  // namespace jukebox::event

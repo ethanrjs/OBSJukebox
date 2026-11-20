@@ -1,13 +1,13 @@
 #pragma once
 
-#include <Geode/utils/function.hpp>
 #include <vector>
 
 #include <Geode/cocos/cocoa/CCObject.h>
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/ScrollLayer.hpp>
+#include <Geode/utils/function.hpp>
 
-#include <jukebox/nong/index.hpp>
+#include "jukebox/nong/index.hpp"
 
 namespace jukebox {
 
@@ -29,4 +29,4 @@ public:
     static IndexesPopup* create(std::vector<index::IndexSource>, IndexesCallback setIndexesCallback);
 };
 
-}
+}  // namespace jukebox

@@ -24,4 +24,4 @@ struct SongError : geode::Event<SongError, bool(const SongErrorData&)> {
     using Event::Event;
 };
 
-}
+}  // namespace jukebox::event

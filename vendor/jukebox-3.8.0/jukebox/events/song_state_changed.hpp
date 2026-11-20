@@ -2,7 +2,7 @@
 
 #include <Geode/loader/Event.hpp>
 
-#include <jukebox/nong/nong.hpp>
+#include "jukebox/nong/nong.hpp"
 
 namespace jukebox::event {
 
@@ -20,4 +20,4 @@ struct SongStateChanged : geode::Event<SongStateChanged, bool(const SongStateCha
     using Event::Event;
 };
 
-}
+}  // namespace jukebox::event

@@ -4,14 +4,12 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <fmt/core.h>
 #include <matjson.hpp>
-#include <vector>
 
-namespace jukebox {
-
-namespace index {
+namespace jukebox::index {
 
 class IndexSongMetadata;
 
@@ -21,8 +19,7 @@ struct IndexSource final {
     bool m_enabled;
 
     bool operator==(IndexSource const& other) const {
-        return m_url == other.m_url && m_userAdded == other.m_userAdded &&
-               m_enabled == other.m_enabled;
+        return m_url == other.m_url && m_userAdded == other.m_userAdded && m_enabled == other.m_enabled;
     }
 };
 
@@ -93,6 +90,4 @@ struct IndexSongMetadata final {
     IndexMetadata* parentID;
 };
 
-}
-
-}
+}  // namespace jukebox::index

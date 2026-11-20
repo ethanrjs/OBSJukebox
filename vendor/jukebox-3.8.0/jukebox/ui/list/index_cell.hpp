@@ -1,15 +1,14 @@
 #pragma once
 
-#include <Geode/utils/function.hpp>
-
+#include <Geode/binding/CCMenuItemToggler.hpp>
 #include <Geode/cocos/base_nodes/CCNode.h>
 #include <Geode/cocos/cocoa/CCGeometry.h>
 #include <Geode/cocos/cocoa/CCObject.h>
-#include <Geode/binding/CCMenuItemToggler.hpp>
 #include <Geode/utils/cocos.hpp>
+#include <Geode/utils/function.hpp>
 
-#include <jukebox/nong/index.hpp>
-#include <jukebox/ui/indexes_popup.hpp>
+#include "jukebox/nong/index.hpp"
+#include "jukebox/ui/indexes_popup.hpp"
 
 namespace jukebox {
 
@@ -25,15 +24,17 @@ protected:
 
     geode::Ref<CCMenuItemToggler> m_toggleButton;
 
-    bool init(IndexesPopup* parentPopup, IndexSource* index, geode::Function<void()> onDelete,
-              cocos2d::CCSize const& size);
+    bool init(
+        IndexesPopup* parentPopup, IndexSource* index, geode::Function<void()> onDelete, cocos2d::CCSize const& size
+    );
 
 public:
-    static IndexCell* create(IndexesPopup* parentPopup, IndexSource* index, geode::Function<void()> onDelete,
-                             cocos2d::CCSize const& size);
+    static IndexCell* create(
+        IndexesPopup* parentPopup, IndexSource* index, geode::Function<void()> onDelete, cocos2d::CCSize const& size
+    );
     void updateUI();
     void onToggle(CCObject*);
     void onDelete(CCObject*);
 };
 
-}
+}  // namespace jukebox
