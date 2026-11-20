@@ -47,6 +47,8 @@ jobs:
         run: python3 tools/qa/test_link_protocol.py
       - name: Check the mod package check
         run: python3 tools/qa/test_check_mod_package.py
+      - name: Check the Jukebox bump script
+        run: python3 tools/qa/test_bump_jukebox.py
       - name: Check updater rules, signatures and wrapper outcomes
         run: |
           python3 tools/qa/test_update_manifest.py
