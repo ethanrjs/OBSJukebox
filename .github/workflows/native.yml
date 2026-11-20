@@ -39,7 +39,7 @@ jobs:
       - name: Fetch locked inputs
         run: python scripts/fetch-dependencies.py windows --include-obs
       - name: Build mod and OBS plugin
-        run: ./scripts/build-windows.ps1 -ObsDirectory "$PWD/tools/pinned/obs"
+        run: ./scripts/build-windows.ps1 -ObsDirectory "$PWD/tools/pinned/obs" -LlvmDirectory "$env:ProgramFiles\LLVM\bin"
       - name: Package installer
         run: ./scripts/package-windows.ps1
       - name: Generate updater test fixtures
