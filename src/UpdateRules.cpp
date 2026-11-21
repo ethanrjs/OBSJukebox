@@ -49,8 +49,7 @@ std::optional<Manifest> parseManifest(std::string_view bytes) {
     if (!m[1].matched && !m[4].matched) return std::nullopt;
     Manifest out{*parseVersion(m[7].str()), m[6].str(), {}, {}};
     auto entry = [](std::csub_match const& sha, std::csub_match const& size) {
-        // stoull can throw, and the guideline says avoid throwing calls. The regex matches digits
-        // only, so from_chars cannot fail here, exactly as it does in parseVersion.
+        // The regex allows at most 12 digits, so from_chars cannot fail or overflow here.
         uint64_t sizeValue = 0;
         std::from_chars(size.first, size.first + size.length(), sizeValue);
         FileEntry e{*hash(sha.str()), sizeValue};

@@ -192,8 +192,7 @@ struct Tap {
             dsp = nullptr;
             return false;
         }
-        // A DSP joined to the graph must find its sender: a failed thread start returns an attach
-        // failure and lets the caller retire the tap instead of throwing out of the scheduler.
+        // A DSP joined to the graph must find its sender, so a failed thread start fails the attach.
         try {
             worker = std::thread([this] {
                 sockaddr_in target{};
@@ -229,7 +228,6 @@ struct Tap {
     }
 };
 
-// Explicit application lifecycle owns cleanup; never join from a DLL destructor.
 Tap* effects = nullptr;
 Tap* reference = nullptr;
 bool attachFailureLogged = false;

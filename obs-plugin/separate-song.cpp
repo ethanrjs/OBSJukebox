@@ -182,7 +182,6 @@ static std::optional<SongLinkPacket> parseSongPacket(unsigned char const* data, 
          p.loopEnd <= p.loopStart || p.loopEnd > 86400))
         return std::nullopt;
     p.status[23] = p.level[95] = p.song[95] = p.path[1023] = 0;
-    // The mod only sends UTF-8. Anything else would throw when the decoder builds a path from it.
     if (!separate_song::validUtf8(p.path)) return std::nullopt;
     return p;
 }
@@ -320,7 +319,6 @@ class Receiver {
 #endif
     }
 
-    // The key that signed a song packet, if it is the followed game's or one in a key file.
     std::optional<LinkKey> signingKey(SongLinkPacket const& p, uint64_t now) {
         auto known = [&]() -> std::optional<LinkKey> {
             if (session && signedWith(sessionKey, p)) return sessionKey;
@@ -356,7 +354,6 @@ class Receiver {
         state.connected = false;
     }
 
-    // Forgets the previous sender's clock, waiting packets, effects ports and timeline.
     void resetSession(uint64_t id) {
         session = id;
         clock.reset();
@@ -626,19 +623,16 @@ public:
         return sock != BAD_SOCKET;
     }
 
-    // Whether a mod that doesn't sign its packets has sent some within sessionTimeoutNs.
     bool oldModSending(uint64_t now) {
         std::lock_guard lock(mutex);
         return lastOldModPacket && since(lastOldModPacket, now) <= sessionTimeoutNs;
     }
 
-    // Whether a mod newer than this plugin has sent packets within sessionTimeoutNs.
     bool newModSending(uint64_t now) {
         std::lock_guard lock(mutex);
         return lastNewModPacket && since(lastNewModPacket, now) <= sessionTimeoutNs;
     }
 
-    // Whether song packets no known link key signed have arrived within sessionTimeoutNs.
     bool unverifiedSending(uint64_t now) {
         std::lock_guard lock(mutex);
         return lastUnverifiedPacket && since(lastUnverifiedPacket, now) <= sessionTimeoutNs;
@@ -672,7 +666,6 @@ public:
         return window;
     }
 
-    // Fills `window` in place, so an audio thread that reuses it allocates nothing once grown.
     void playbackWindow(uint64_t start, uint64_t end, int channel, std::vector<SongLinkPacket>& window) {
         std::lock_guard lock(mutex);
         window.clear();
@@ -751,7 +744,6 @@ static void forEachRun(std::vector<SongLinkPacket> const& window, uint64_t start
     }
 }
 #ifdef OBS_JUKEBOX_QA
-// A lock-free maximum for the output thread's QA counters; no allocation or logging.
 static void qaMax(std::atomic<uint64_t>& value, uint64_t next) {
     auto current = value.load(std::memory_order_relaxed);
     while (next > current && !value.compare_exchange_weak(current, next, std::memory_order_relaxed)) {
@@ -786,8 +778,6 @@ struct SongSource {
     static constexpr uint64_t blockNs = blockFrames * 1000000000ULL / blockRate,
                               bufferingNs = 40000000, staleNs = 400000000;
 
-    // The output thread owns no decoder, filesystem object or pitch stage: two workers render
-    // timestamped blocks ahead of it, one for music and one for effects, each into a bounded queue.
     struct BlockQueue {
         struct Block {
             uint64_t timestamp = 0;
@@ -874,7 +864,7 @@ struct SongSource {
     std::atomic<unsigned> testMusicMisses{0}, testMusicMissesRaw{0}, testEffectsMisses{0},
         testEffectsMissesRaw{0};
     std::atomic<bool> testMeasure{false};
-    std::atomic<bool> testWorkersStarted{false}; // run() has started both workers
+    std::atomic<bool> testWorkersStarted{false};
 #endif
     explicit SongSource(obs_source_t* s) : source(s), linkReceiver(receiver) {}
 
@@ -936,7 +926,6 @@ struct SongSource {
     uint64_t groupSession = 0;
     PitchChain effectsChain{true}; // the SFX stages after the tap; effects worker only
     uint64_t effectsSession = 0;
-    // The global packets for the block each thread is on; kept so neither allocates per block.
     std::vector<SongLinkPacket> effectsWindow; // effects worker only
     std::vector<SongLinkPacket> outputWindow; // output thread only
     bool outputActive = false; // output thread only
@@ -957,7 +946,6 @@ struct SongSource {
         resolved = paths.resolve(newPath);
 #endif
         std::error_code error;
-        // Never stat a URL or network share: a stat reaches the network, and open refuses them.
         bool local = !resolved.empty() && localSongPath(resolved);
         auto file = std::filesystem::path(std::u8string(resolved.begin(), resolved.end()));
 #ifdef OBS_JUKEBOX_QA
@@ -1371,11 +1359,9 @@ struct SongSource {
 
     void run() {
         AudioThreadScheduling const scheduling;
-        // Prefill one block while retaining the existing 40 ms output timeline delay.
         uint64_t timestamp = os_gettime_ns() - bufferingNs + blockNs;
         wantedTimestamp = timestamp;
-        // The threads this starts belong to OBS: an uncaught thread-start failure would terminate
-        // the whole process. Stopping ends any started worker's loop promptly, so joining is short.
+        // Stopping ends any started worker's loop promptly, so joining is short.
         try {
             decoderWorker = std::thread([this] {
                 decodeMusic();
@@ -1465,8 +1451,7 @@ static char const* sourceName(void*) {
     return "GD Sounds";
 }
 
-// libobs calls create as plain C, so nothing here may throw: a failed thread or allocation must
-// not cross out of C code. A null result tells OBS the source is unavailable.
+// A null result tells OBS the source is unavailable.
 static void* create(obs_data_t*, obs_source_t* source) {
     try {
         auto s = std::make_unique<SongSource>(source);
@@ -1505,8 +1490,6 @@ static obs_properties_t* properties(void* data) {
 }
 
 bool obs_module_load(void) {
-    // obs_module_load is a C boundary, and both calls allocate, so a failure becomes a failed
-    // module load OBS reports instead of a terminating escape.
     try {
         PitchShifter::prepareTables();
         receiver = std::make_shared<Receiver>();

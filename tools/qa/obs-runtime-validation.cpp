@@ -805,8 +805,6 @@ int main(int argc, char** argv) {
         // A stage holds the audio for its FFT size, 64 ms at 4096, before it outputs anything, so
         // these cases settle longer than the rest.
         phase("channel_stage_three_quarters", .18, .17, 330, 2, 3);
-        // A stage keeps its instance at a new pitch, so its level depends on the carried phase:
-        // it measured .026 against .19, so this level only proves the stage is not silent.
         packet.stages[0].pitch = 1.5f;
         expectedRms = 0;
         phase(

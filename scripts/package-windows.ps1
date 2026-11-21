@@ -52,7 +52,6 @@ try {
     foreach ($file in @($exe, $ModPath, $PluginPath)) { $hashes[(Split-Path $file -Leaf)] = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash }
     $hashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'SHA256.json') -Encoding utf8
     Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $OutputDirectory -Force
-    # Source comes from the commit, so untracked files in a developer's tree never ship.
     if (& git -C $projectRoot status --porcelain) { Write-Warning 'Source is taken from HEAD; uncommitted changes are not in it.' }
     $source = Join-Path $OutputDirectory 'Source'
     if (Test-Path -LiteralPath $source) { Remove-Item -LiteralPath $source -Recurse -Force }

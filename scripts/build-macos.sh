@@ -16,7 +16,6 @@ cp "$DEPENDENCY_ROOT/geode-macos-$geode_version/Geode.dylib" "$GEODE_SDK/bin/$ge
 export GEODE_SDK
 export OBS_SDK="${OBS_SDK:-$DEPENDENCY_ROOT/obs-sdk}"
 export SIMDE_INCLUDE="${SIMDE_INCLUDE:-$DEPENDENCY_ROOT/simde}"
-# ccache is optional locally; CI installs it, which makes repeated GeodeBindings builds cheap.
 launcher=()
 command -v ccache > /dev/null && launcher=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
 "$CMAKE" -S . -B build-mac -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$MAC_ARCH" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DGEODE_BINDINGS_REPO_PATH="$GEODE_BINDINGS" -DGEODE_CLI="$GEODE_CLI" -DGEODE_DISABLE_PRECOMPILED_HEADERS=ON -DSKIP_BUILDING_CODEGEN=OFF -DOBS_JUKEBOX_QA=OFF "${launcher[@]}" "$@"

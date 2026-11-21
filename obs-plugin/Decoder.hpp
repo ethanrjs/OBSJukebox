@@ -24,8 +24,7 @@
 #ifdef _WIN32
     #include <memory>
 #endif
-// Paths arrive over loopback UDP; Media Foundation would also fetch URLs and network shares, so
-// only local file strings pass. A colon before any separator is a URL scheme, bar a drive letter.
+// A colon before any separator is a URL scheme, bar a drive letter.
 inline bool localSongPath(std::string const& path) {
     auto separator = [](char c) {
         return c == '/' || c == '\\';

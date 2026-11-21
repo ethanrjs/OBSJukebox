@@ -209,7 +209,6 @@ static void settings(Snapshot& snapshot) {
     snapshot.offset = playingSongs ? offset_setting::value() : 0.0;
 }
 
-// One main-thread scratch list, so the 10 ms sampling does not allocate a vector each time.
 static std::vector<ObservedDsp>& dspScratch() {
     static std::vector<ObservedDsp> scratch;
     return scratch;
@@ -435,7 +434,6 @@ static bool sampleChannel(FMODAudioEngine* engine, int id, FMODMusic& music, GJB
     return true;
 }
 
-// Publishes a stop for a voice whose channel is gone and forgets it.
 static std::map<int, MusicVoice>::iterator endVoice(std::map<int, MusicVoice>::iterator it, uint64_t now) {
     auto& out = it->second.snapshot;
     out.markStopped(now, ++nextEpoch);
@@ -520,7 +518,6 @@ static void sampleMusic(PlayLayer* play) {
     );
 }
 
-// Stops the level's songs in OBS and drops its name and attempt count from the status.
 static void leaveLevel() {
     activePlayLayer = nullptr;
     playingSongs.reset();
@@ -531,8 +528,6 @@ static void leaveLevel() {
     publish("Ready", false);
 }
 
-// Share a real-time gate between level updates and the scheduler. At 0.01x, a game-time 10 ms
-// timer can wait a second, beyond OBS's 400 ms freshness window.
 static bool musicSampleDue() {
     static uint64_t last = 0;
     auto const now = monotonicNowNs();
@@ -812,8 +807,6 @@ class $modify(SeparateSongLevelSelect, LevelSelectLayer) {
     }
 };
 
-// Geode's guidelines flag per-frame hooks, so the service work runs from the scheduler. Unlike the
-// drawScene hook, the scheduler stops while the director is paused; levels sample from postUpdate.
 class SeparateSongService : public CCObject {
 public:
     // A level samples its own music from postUpdate; other PlayLayers are mirrored only after they
@@ -822,7 +815,6 @@ public:
         return !play || static_cast<SeparateSongPlay*>(play)->m_fields->quit;
     }
 
-    // Every 100 ms: keep the effects tap attached, refresh the Jukebox list, and report the level.
     void poll(float) {
         auto play = PlayLayer::get();
         audio_tap::install();
@@ -831,8 +823,6 @@ public:
         else if (!outsideLevel(play)) publish("Ready", false);
     }
 
-    // Runs each scheduler frame; the monotonic gate limits sampling to once per 10 ms of real
-    // time, independent of scaled dt. This also covers slow speedhacks with few level updates.
     void sampleMusicEveryFrame(float) {
         auto play = PlayLayer::get();
         if (!musicSampleDue()) return;
@@ -842,7 +832,6 @@ public:
 };
 
 $on_mod(Loaded) {
-    // Leaked on purpose, like the bridge: nothing may run during static teardown.
     auto service = new SeparateSongService();
     auto scheduler = CCDirector::get()->getScheduler();
     scheduler->scheduleSelector(schedule_selector(SeparateSongService::poll), service, .1f, false);

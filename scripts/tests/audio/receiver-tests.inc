@@ -1,4 +1,3 @@
-// Included after Simulation, SyncedSender and the shared test helpers.
 static void receiverIsolationTest() {
     Simulation sim;
     auto first=sim.game(0,50001),second=sim.game(0,50003);

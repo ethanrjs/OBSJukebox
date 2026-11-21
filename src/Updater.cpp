@@ -40,8 +40,6 @@ ur::Platform platform() {
 #endif
 }
 
-// Heap-held, like the bridge and the file cache: an app exit runs static destructors while an
-// update thread may still touch these paths.
 struct Paths {
     std::filesystem::path staging, result, reopenFlag;
 };

@@ -99,8 +99,7 @@ bool gameButtonShown(jukebox::NongCellUI* ui) {
     return gameCheck && gameCheck->isVisible();
 }
 
-// GD and Jukebox hand over UTF-8 in practice, but nothing guarantees it, and on Windows building a
-// path from anything else throws. Callers treat nullopt as a missing file.
+// Callers treat nullopt as a missing file.
 std::optional<std::filesystem::path> utf8Path(std::string_view path) {
     if (!validUtf8(path)) return std::nullopt;
     return std::filesystem::path(
@@ -207,7 +206,6 @@ public:
     }
 };
 
-// Shutdown is explicit before the game exits, never joined under the DLL loader lock.
 FileCache& files() {
     static auto cache = new FileCache();
     return *cache;
@@ -221,8 +219,6 @@ std::filesystem::path base() {
     return Loader::get()->getLoadedMod("fleym.nongd")->getSaveDir();
 }
 
-// CellAccess and UIAccess read Jukebox's protected fields through the vendored headers for
-// JUKEBOX_VERSION, but Geode lets the dependency update, so other builds skip the row UI.
 bool cellLayoutMatches() {
     static bool const matches = [] {
         auto dependency = Loader::get()->getLoadedMod("fleym.nongd");
@@ -440,7 +436,7 @@ CachedPlayback& forPlayback(int id) {
 }
 
 // Not a WeakRef: assigning one that already holds an object repoints its controller without
-// retaining the new one, which left this dangling. Heap-held so nothing releases it at teardown.
+// retaining the new one.
 Ref<CCNode>& visibleList() {
     static auto list = new Ref<CCNode>();
     return *list;

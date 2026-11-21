@@ -23,10 +23,9 @@ struct StageList {
     bool overflow = false;
 };
 
-// The pitch shifters another mod put on a path, in the order they process audio. Pure: no FMOD or
-// Geode types, so it can be tested without either.
+// The pitch shifters another mod put on a path, in the order they process audio.
 inline StageList pitchStages(std::span<ObservedDsp const> dsps) {
-    constexpr int pitchShiftType = 13; // FMOD_DSP_TYPE_PITCHSHIFT, kept numeric so this stays pure
+    constexpr int pitchShiftType = 13; // FMOD_DSP_TYPE_PITCHSHIFT
     StageList list;
     for (auto const& dsp : dsps) {
         if (dsp.type != pitchShiftType || !dsp.usable || !std::isfinite(dsp.pitch) ||

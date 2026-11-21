@@ -14,8 +14,6 @@ if ($LASTEXITCODE) { throw 'Dependency verification failed.' }
 $buildRoot = Join-Path $root 'build-windows'
 $output = Join-Path $root 'artifacts\windows'
 New-Item -ItemType Directory -Force -Path $buildRoot, $output | Out-Null
-# Ninja is single-config and is the only generator that honours a compiler launcher, which is
-# what lets ccache cache these builds. It needs the MSVC environment rather than a -A flag.
 . (Join-Path $PSScriptRoot 'windows-env.ps1')
 $vs = Enter-MsvcEnvironment
 $missing = @('cmake', 'ninja') | Where-Object { !(Get-Command "$_.exe" -ErrorAction SilentlyContinue) }

@@ -8,9 +8,6 @@
 #include <memory>
 #include <vector>
 
-// FMOD's FMOD_DSP_TYPE_PITCHSHIFT is Stephan M. Bernsee's smbPitchShift phase vocoder; this mirrors
-// fmod.dll 2.02.31 so another mod's pitch shifter sounds in OBS as it does in game.
-
 // This file is a derivative of smbPitchShift.cpp v1.2:
 //
 // COPYRIGHT 1999-2015 Stephan M. Bernsee <s.bernsee [AT] zynaptiq [DOT] com>
@@ -214,7 +211,6 @@ class PitchShifter {
         return {0, tables->size / 2, tables->size / 4, tables->size / 4 * 3};
     }
 
-    // The passes between the second and the last.
     void middlePasses(std::vector<float> const& sines) {
         auto const& t = *tables;
         bool const wide = !portableOnly && pitch_simd::available();
@@ -446,8 +442,7 @@ public:
     }
 };
 
-// Ordered pitch stages of one FMOD object; a pitch change keeps the audio a stage holds, and a DSP
-// recreated at the same address between samples is indistinguishable, a documented limit.
+// Ordered pitch stages of one FMOD object; a pitch change keeps the audio a stage holds.
 class PitchChain {
     struct Slot {
         std::unique_ptr<PitchShifter> shifter;

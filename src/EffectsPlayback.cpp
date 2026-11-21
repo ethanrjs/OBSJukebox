@@ -5,8 +5,6 @@
 
 using namespace geode::prelude;
 
-// GD returns without starting an effect while its SFX volume is 0, so muted effects would never
-// reach OBS. The volume reads 1 as GD starts one; the tap sits before the group's fader.
 class $modify(SeparateSongEffectsPlayback, FMODAudioEngine) {
     int playEffectAdvanced(
         gd::string path, float speed, float unknown, float volume, float pitch,

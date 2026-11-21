@@ -1911,7 +1911,6 @@ static void speedhackTest(
     check(heard >= expected - 1 && worst <= tolerance && seeks <= voices, what);
 }
 
-// Rates below the old 0.25x floor are the beat-repeat case; the ceiling is the decoder cache.
 static void slowSpeedhackTest() {
     speedhackTest(
         .1,
