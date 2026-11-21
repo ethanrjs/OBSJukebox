@@ -264,7 +264,7 @@ guint subscribe(GDBusConnection* bus, char const* signal, Answer& answer) {
 
 std::string sessionBus() {
     std::string address;
-    if (auto listed = g_getenv("DBUS_SESSION_BUS_ADDRESS")) {
+    if (auto listed = g_getenv("DBUS_SESSION_BUS_ADDRESS"); listed && *listed) {
         auto entries = g_strsplit(listed, ";", -1);
         for (auto entry = entries; *entry; ++entry)
             if (**entry && !std::string_view(*entry).starts_with("autolaunch:"))
