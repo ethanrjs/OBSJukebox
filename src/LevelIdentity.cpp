@@ -10,7 +10,6 @@ using namespace geode::prelude;
 namespace {
 constexpr auto identityKey = "local.separate_song/level-identity";
 
-// Heap-held, like the mod's other globals, so no WeakRef releases a level during static teardown.
 std::unordered_map<std::string, WeakRef<GJGameLevel>>& owners() {
     static auto map = new std::unordered_map<std::string, WeakRef<GJGameLevel>>();
     return *map;
@@ -23,8 +22,6 @@ class $modify(OBSLevelIdentity, GJGameLevel) {
     };
 
     std::string identity() {
-        // Only inspect the claimed key; sweeping every loaded level was quadratic.
-        // Periodic cleanup is amortized across additions, not every save.
         static size_t nextSweep = 1024;
         if (owners().size() >= nextSweep) {
             std::erase_if(owners(), [](auto const& entry) {

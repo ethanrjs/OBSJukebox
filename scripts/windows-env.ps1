@@ -1,6 +1,5 @@
 ﻿# Dot-source this file for the Windows build environment helpers.
 
-# Puts cl.exe, the Windows SDK and the linker tools on PATH for the current session.
 function Enter-MsvcEnvironment {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath

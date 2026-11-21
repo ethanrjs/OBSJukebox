@@ -1,5 +1,4 @@
 #pragma once
-// Updater decisions with no Geode or OS calls, so QA tests can build them.
 #include <array>
 #include <compare>
 #include <cstdint>

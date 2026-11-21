@@ -235,8 +235,7 @@ static void pitchSplitTest() {
         }
         return audio;
     };
-    // Each call is long enough that a tone cannot sum below the gate: a one-frame call at a zero
-    // crossing would legitimately be treated as silence, which is the documented divergence.
+    // Each call is long enough that a tone cannot sum below the gate.
     const std::vector<size_t> whole{frames}, uneven{64, 113, 256, 480, 31};
     const auto one = run(whole), split = run(uneven);
     double error = 0;

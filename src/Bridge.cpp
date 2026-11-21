@@ -138,7 +138,6 @@ void Bridge::publish(Snapshot const& s) {
         std::copy_n(s.effectsStages.begin(), p.effectsStageCount, p.effectsStages);
     }
     // Paths are never shortened: a cut path names the wrong file, so a long one stops playback.
-    // A path that isn't UTF-8 stops playback too: OBS can't open it.
     bool tooLong = s.path.size() >= sizeof(p.path);
     if (!tooLong && validUtf8(s.path)) {
         std::strncpy(p.path, s.path.c_str(), sizeof(p.path) - 1);
@@ -186,7 +185,6 @@ void Bridge::publish(Snapshot const& s) {
     );
 }
 
-// Shutdown is explicit before FMOD/application teardown, never under DLL loader lock.
 Bridge& bridge() {
     static auto* b = new Bridge;
     return *b;

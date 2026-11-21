@@ -1,6 +1,4 @@
 #pragma once
-// A random key the mod makes at launch and keeps in this user's app data. It never travels:
-// packets carry an HMAC-SHA256 tag, so the trust boundary is the user account, not loopback.
 #include <algorithm>
 #include <array>
 #include <cstddef>

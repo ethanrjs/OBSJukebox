@@ -9,7 +9,6 @@ cd "$song_root"
 song_version=$(/usr/bin/plutil -extract version raw -o - mod.json)
 rm -rf -- dist/separate-song.plugin
 mkdir -p dist/separate-song.plugin/Contents/MacOS
-# ccache is optional locally; CI installs it.
 launcher=()
 command -v ccache > /dev/null && launcher=(ccache)
 "${launcher[@]}" clang++ -std=c++20 -O2 -bundle -arch "$MAC_ARCH" -mmacosx-version-min=13.0 \

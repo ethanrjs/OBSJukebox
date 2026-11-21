@@ -4,8 +4,6 @@
 #include <string_view>
 
 namespace separate_song {
-// Paths cross from GD to OBS as UTF-8, and on Windows building a std::filesystem::path from
-// anything else throws.
 inline bool validUtf8(std::string_view text) {
     std::size_t i = 0;
     while (i < text.size()) {

@@ -1,5 +1,4 @@
 #pragma once
-// The OS calls the updater needs, kept out of Updater.cpp.
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -9,7 +8,6 @@ namespace update_platform {
 bool obsRunning();
 // An update setup holds its lock.
 bool setupWaiting();
-// GD runs under Wine or Proton.
 bool underWine();
 // Some existing part of the path is a symlink, junction or other reparse point.
 bool pathHasLink(std::filesystem::path const& path);

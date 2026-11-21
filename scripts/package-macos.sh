@@ -46,7 +46,6 @@ ditto "$GEODE_PAYLOAD" "$song_resources/payload/geode"
 cp "$DEPENDENCY_ROOT/geode-sdk/loader/include/link/macos/libfmod.dylib" "$song_resources/payload/geode/libfmod.dylib"
 mkdir -p "$song_resources/payload/geode/resources/geode.loader"
 ditto "$DEPENDENCY_ROOT/geode-resources" "$song_resources/payload/geode/resources/geode.loader"
-# Source comes from the commit, so untracked files in a developer's tree never ship.
 [[ -z "$(git status --porcelain)" ]] || print -u2 'warning: Source is taken from HEAD; uncommitted changes are not in it.'
 source_paths=("${(@f)$(cat scripts/source-files.txt)}")
 git archive HEAD -- $source_paths | tar -xf - -C "$song_resources/Source"
