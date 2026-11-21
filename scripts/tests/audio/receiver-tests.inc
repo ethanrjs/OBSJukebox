@@ -1,3 +1,5 @@
+#include "harness.hpp"
+
 static void receiverIsolationTest() {
     Simulation sim;
     auto first=sim.game(0,50001),second=sim.game(0,50003);

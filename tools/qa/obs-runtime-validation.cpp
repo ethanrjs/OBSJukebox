@@ -22,6 +22,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using Clock = std::chrono::steady_clock;
@@ -166,18 +167,21 @@ double stageRms(float pitch, uint16_t fft, bool pilotNoise = false, double fract
 }
 
 bool validGroupFixture() {
-    double const reference = stageRms(1.25f, 2048, true);
-    for (double fraction : {.25, .5, .75}) {
-        double const actual = stageRms(1.25f, 2048, true, fraction);
-        if (std::abs(actual - reference) > reference * .05) {
-            fprintf(
-                stderr,
-                "Group fixture interpolation %.2f changed RMS %.6f to %.6f beyond 5%%\n",
-                fraction,
-                reference,
-                actual
-            );
-            return false;
+    for (auto [pitch, fft] : {std::pair{1.25f, uint16_t(2048)}, {1.5f, uint16_t(4096)}}) {
+        double const reference = stageRms(pitch, fft, true);
+        for (double fraction : {.25, .5, .75}) {
+            double const actual = stageRms(pitch, fft, true, fraction);
+            if (std::abs(actual - reference) > reference * .05) {
+                fprintf(
+                    stderr,
+                    "Fixture interpolation %.2f changed pitch %.2f's RMS %.6f to %.6f beyond 5%%\n",
+                    fraction,
+                    pitch,
+                    reference,
+                    actual
+                );
+                return false;
+            }
         }
     }
     return true;
@@ -187,7 +191,7 @@ bool validGroupFixture() {
 // measures a 4.4 Hz tone as well as 7 kHz, where counting zero crossings needs many cycles.
 double dominantHz(std::vector<float> const& samples, double expected) {
     double best = 0, bestPower = -1;
-    for (double hz = expected * .5; hz <= expected * 2; hz *= 1.002) {
+    for (double hz = expected * .5; hz <= expected * 2; hz *= 1.0005) {
         double const coefficient = 2 * std::cos(2 * 3.141592653589793 * hz / 48000);
         double s1 = 0, s2 = 0;
         for (float sample : samples) {
@@ -447,9 +451,9 @@ int main(int argc, char** argv) {
     SongLinkPacket global;
     global.channelID = -1;
     // With `spectral` a case measures its frequency by DFT; with `expectedRms` its level must be
-    // within 5% of that oracle. Both stay set until changed, like the packets' volumes.
+    // within `rmsTolerance` of that oracle. They stay set until changed, like the packets' volumes.
     bool spectral = false;
-    double expectedRms = 0;
+    double expectedRms = 0, rmsTolerance = .05;
     std::ofstream json(output / "runtime-results.json");
     json << "{\"host\":\"Installed OBS libobs\",\"plugin\":\""
          << std::filesystem::path(argv[1]).filename().string() << "\",\"cases\":[\n";
@@ -581,6 +585,7 @@ int main(int argc, char** argv) {
         }
         double cpuPercent = double(cpuTicks() - cpu) / 1e7 / seconds * 100;
         Metric m;
+        std::vector<float> spectrum;
         {
             std::lock_guard lock(capture.mutex);
             m.frames = capture.samples.size();
@@ -598,15 +603,17 @@ int main(int argc, char** argv) {
                 m.hz = double(crosses) * 48000 / m.frames;
                 m.mutedFraction = double(capture.mutedFrames) / m.frames;
             }
-            if (spectral && expected > 0) m.hz = dominantHz(capture.samples, expected);
+            if (spectral && expected > 0) spectrum = capture.samples;
         }
+        if (!spectrum.empty()) m.hz = dominantHz(spectrum, expected);
         m.pass = m.frames > 1000 &&
             (expected == 0    ? m.rms < .00001 :
                  expected < 0 ? m.rms > .05 :
                                 m.rms > .05 && std::abs(m.hz - expected) < expected * .08) &&
             (expectedMuted ? m.mutedFraction > .99 : m.mutedFraction < .01) &&
             (!expectEffectMean || m.mean > .03);
-        if (expectedRms > 0 && std::abs(m.rms - expectedRms) > expectedRms * .05) m.pass = false;
+        if (expectedRms > 0 && std::abs(m.rms - expectedRms) > expectedRms * rmsTolerance)
+            m.pass = false;
         if (effects == 2) {
             std::lock_guard lock(capture.mutex);
             for (float sample : capture.samples)
@@ -805,26 +812,36 @@ int main(int argc, char** argv) {
         // A stage holds the audio for its FFT size, 64 ms at 4096, before it outputs anything, so
         // these cases settle longer than the rest.
         phase("channel_stage_three_quarters", .18, .17, 330, 2, 3);
+        // The 440 Hz pilot sits 15 dB below the noise and only just above the noise's band, so the
+        // DFT needs a long window to pick it out.
+        auto groupTone = output / "group-pilot-noise.wav";
+        wave(groupTone, 1, 48000 * 6, true, true);
+        auto groupUtf8 = groupTone.u8string();
+        std::memset(packet.path, 0, sizeof(packet.path));
+        std::memcpy(packet.path, groupUtf8.data(), std::min(groupUtf8.size(), sizeof(packet.path) - 1));
+        // The phases a stage keeps across a pitch change swing a tone's level tenfold; noise stays
+        // within 5%, so this case allows 10%.
         packet.stages[0].pitch = 1.5f;
-        expectedRms = 0;
+        expectedRms = stageRms(1.5f, 4096, true);
+        rmsTolerance = .1;
         phase(
-            "channel_stage_same_instance_pitch_change", .55, 1.45, 660, 4, 3, 1, 0, true, 0, false, false, false
+            "channel_stage_same_instance_pitch_change", .55, 1.45, 660, 1, 3, 1, 0, true, 0, false, false, false
+        );
+        rmsTolerance = .05;
+        std::memset(packet.path, 0, sizeof(packet.path));
+        std::memcpy(
+            packet.path, constantUtf8.data(), std::min(constantUtf8.size(), sizeof(packet.path) - 1)
         );
         packet.stages[0] = {1.f, 4096, 0, 0x7002};
         expectedRms = stageRms(1.f, 4096);
         phase("channel_stage_pitch_one_gain", .18, .17, 440, 2, 3);
         packet.stageCount = 0;
         packet.stages[0] = {};
-        auto groupTone = output / "group-pilot-noise.wav";
-        wave(groupTone, 1, 48000 * 6, true, true);
-        auto groupUtf8 = groupTone.u8string();
         std::memset(packet.path, 0, sizeof(packet.path));
         std::memcpy(packet.path, groupUtf8.data(), std::min(groupUtf8.size(), sizeof(packet.path) - 1));
         global.stageCount = 1;
         global.stages[0] = {1.25f, 2048, 0, 0x7003};
         expectedRms = stageRms(1.25f, 2048, true);
-        // The 440 Hz pilot sits 33 dB below the noise and only just above the noise's band, so the
-        // DFT needs a long window to pick it out.
         phase("group_stage_shifts_music", .18, 1.0, 550, 0, 3);
         std::memset(packet.path, 0, sizeof(packet.path));
         std::memcpy(

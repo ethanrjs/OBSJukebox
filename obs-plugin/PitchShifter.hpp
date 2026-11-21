@@ -1,4 +1,5 @@
 #pragma once
+#include "../src/LinkPacket.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
