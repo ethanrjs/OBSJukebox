@@ -60,6 +60,15 @@ std::optional<Manifest> parseManifest(std::string_view bytes) {
     return out;
 }
 
+std::optional<Version> parseBuildVersion(std::string_view text) {
+    if (text.starts_with('v')) text.remove_prefix(1);
+    return parseVersion(text.substr(0, text.find('-')));
+}
+
+bool needsOtherGd(Manifest const& latest, Version running, std::string_view gd) {
+    return latest.version > running && latest.gd != gd;
+}
+
 std::optional<FileEntry> entryFor(Manifest const& manifest, Platform platform) {
     if (platform == Platform::Windows) return manifest.windows;
     if (platform == Platform::MacArm64) return manifest.macArm64;

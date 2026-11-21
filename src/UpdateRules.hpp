@@ -36,6 +36,8 @@ struct Manifest {
 
 // Accepts only the exact bytes scripts/make-update-manifest.py writes; any other form fails.
 std::optional<Manifest> parseManifest(std::string_view bytes);
+std::optional<Version> parseBuildVersion(std::string_view text);
+bool needsOtherGd(Manifest const& latest, Version running, std::string_view gd);
 std::optional<FileEntry> entryFor(Manifest const& manifest, Platform platform);
 std::string assetName(Version version, Platform platform);
 

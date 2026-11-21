@@ -8,7 +8,7 @@ try {
     if ($LASTEXITCODE) { throw 'MP3 fixture generation failed.' }
     . ./scripts/windows-env.ps1
     Enter-MsvcEnvironment | Out-Null
-    & cl.exe /nologo /DOBS_JUKEBOX_QA /std:c++20 /O2 /EHsc /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS /Iscripts/tests/audio/stubs "scripts/tests/audio/$program.cpp" obs-plugin/Decoder.cpp obs-plugin/PitchSimd.cpp /Foartifacts/audio-tests/ "/Feartifacts/audio-tests/$program.exe" /link ws2_32.lib mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib winmm.lib avrt.lib
+    & cl.exe /nologo /DOBS_JUKEBOX_QA /std:c++20 /O2 /EHsc /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS /Iscripts/tests/audio/stubs "scripts/tests/audio/$program.cpp" obs-plugin/Decoder.cpp obs-plugin/PitchSimd.cpp scripts/tests/audio/stubs/UpdateNotice.cpp /Foartifacts/audio-tests/ "/Feartifacts/audio-tests/$program.exe" /link ws2_32.lib mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib winmm.lib avrt.lib
     if ($LASTEXITCODE) { throw 'Audio test compilation failed.' }
     if (!$BuildOnly) {
         & "./artifacts/audio-tests/$program.exe" @Arguments

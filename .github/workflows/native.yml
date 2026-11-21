@@ -163,7 +163,7 @@ jobs:
         uses: ./.github/actions/apt-install
         timeout-minutes: 8
         with:
-          packages: libobs-dev pkg-config
+          packages: libobs-dev libcurl4-openssl-dev libglib2.0-dev pkg-config
       - run: bash scripts/build-linux.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
