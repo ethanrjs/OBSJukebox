@@ -9,7 +9,6 @@ add_library(separate-song MODULE separate-song.cpp Decoder.cpp PitchSimd.cpp Upd
   UpdateNoticePlatform.cpp ../src/UpdateRules.cpp)
 # The plugin shows its release version in the source properties. mod.json is the release's single
 # source of truth, so read the version from it here rather than duplicating the number in the code.
-# The update notice compares the GD version against the latest release's.
 set(OBS_JUKEBOX_VERSION "dev")
 set(OBS_JUKEBOX_GD "")
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../mod.json")
@@ -43,7 +42,6 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(LIBOBS REQUIRED IMPORTED_TARGET libobs)
   pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
-  # Only libcurl's headers: the update notice loads the library at run time.
   pkg_check_modules(CURL REQUIRED libcurl)
   target_include_directories(separate-song PRIVATE ${CURL_INCLUDE_DIRS})
   find_package(Threads REQUIRED)

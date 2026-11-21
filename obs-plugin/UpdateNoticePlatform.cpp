@@ -16,7 +16,6 @@
 namespace update_notice::platform {
 #ifdef _WIN32
 namespace {
-// Recursive: WinHTTP may run the next callback inside the call that issues it, on this thread.
 std::recursive_mutex mutex;
 HINTERNET request = nullptr;
 DWORD askingThread = 0;
@@ -43,8 +42,6 @@ struct Fetch {
     char buffer[4096];
 };
 
-// The request closes exactly once, from a callback or from cancel(); its closing callback is the
-// last one, so get() waits for it before the plugin can unload.
 void close(HINTERNET handle) {
     {
         std::lock_guard lock(mutex);
@@ -92,22 +89,12 @@ void CALLBACK onStatus(HINTERNET handle, DWORD_PTR context, DWORD status, LPVOID
         case WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING: SetEvent(fetch.closed); break;
     }
 }
-}
 
-std::optional<std::string> get(std::string const& url, size_t cap) {
-    auto address = wide(url);
-    URL_COMPONENTS parts{sizeof(parts)};
-    parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength = DWORD(-1);
-    if (!WinHttpCrackUrl(address.c_str(), 0, 0, &parts)) return std::nullopt;
+std::optional<std::string> fetch(HINTERNET session, URL_COMPONENTS const& parts, size_t cap) {
     std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
     std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength + parts.dwExtraInfoLength);
-    Handle session{WinHttpOpen(
-        L"OBS-Jukebox", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-        WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC
-    )};
-    if (!session.handle || !WinHttpSetTimeouts(session.handle, 15000, 15000, 15000, 15000))
-        return std::nullopt;
-    Handle connection{WinHttpConnect(session.handle, host.c_str(), parts.nPort, 0)};
+    if (!WinHttpSetTimeouts(session, 15000, 15000, 15000, 15000)) return std::nullopt;
+    Handle connection{WinHttpConnect(session, host.c_str(), parts.nPort, 0)};
     if (!connection.handle) return std::nullopt;
     Handle opened{WinHttpOpenRequest(
         connection.handle, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
@@ -134,10 +121,37 @@ std::optional<std::string> get(std::string const& url, size_t cap) {
             handle, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, context
         );
     });
-    WaitForSingleObject(fetch.closed, INFINITE);
+    if (WaitForSingleObject(fetch.closed, 15000) == WAIT_TIMEOUT) {
+        close(handle);
+        WaitForSingleObject(fetch.closed, INFINITE);
+    }
     CloseHandle(fetch.closed);
     if (!fetch.complete) return std::nullopt;
     return std::move(fetch.body);
+}
+}
+
+std::optional<std::string> get(std::string const& url, size_t cap) {
+    auto address = wide(url);
+    URL_COMPONENTS parts{sizeof(parts)};
+    parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength = DWORD(-1);
+    if (!WinHttpCrackUrl(address.c_str(), 0, 0, &parts)) return std::nullopt;
+    auto session = WinHttpOpen(
+        L"OBS-Jukebox", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC
+    );
+    if (!session) return std::nullopt;
+    auto unloaded = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!unloaded ||
+        !WinHttpSetOption(session, WINHTTP_OPTION_UNLOAD_NOTIFY_EVENT, &unloaded, sizeof(unloaded))) {
+        WinHttpCloseHandle(session);
+        if (unloaded) CloseHandle(unloaded);
+        return std::nullopt;
+    }
+    auto body = fetch(session, parts, cap);
+    WinHttpCloseHandle(session);
+    if (WaitForSingleObject(unloaded, 5000) == WAIT_OBJECT_0) CloseHandle(unloaded);
+    return body;
 }
 
 std::optional<bool> ask(Notice const& notice) {
@@ -217,6 +231,7 @@ void onSignal(
     GVariant* parameters, gpointer user
 ) {
     auto& answer = *static_cast<Answer*>(user);
+    if (answer.ended) return;
     guint32 id = 0;
     char const* action = "";
     if (std::string_view(signal) == "ActionInvoked") g_variant_get(parameters, "(u&s)", &id, &action);
@@ -246,25 +261,35 @@ guint subscribe(GDBusConnection* bus, char const* signal, Answer& answer) {
     );
 }
 
-// A private connection that never exits OBS when the bus goes away, unlike the shared one.
+std::string sessionBus() {
+    if (auto address = g_getenv("DBUS_SESSION_BUS_ADDRESS"))
+        return std::string_view(address).starts_with("autolaunch:") ? "" : address;
+    auto socket = g_build_filename(g_get_user_runtime_dir(), "bus", nullptr);
+    std::string address;
+    if (g_file_test(socket, G_FILE_TEST_EXISTS)) {
+        auto escaped = g_dbus_address_escape_value(socket);
+        address = std::string("unix:path=") + escaped;
+        g_free(escaped);
+    }
+    g_free(socket);
+    return address;
+}
+
 GDBusConnection* connect(GCancellable* cancellable, GError** error) {
-    auto address = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SESSION, cancellable, error);
-    if (!address) return nullptr;
+    auto address = sessionBus();
+    if (address.empty()) return nullptr;
     auto bus = g_dbus_connection_new_for_address_sync(
-        address,
+        address.c_str(),
         GDBusConnectionFlags(
             G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION
         ),
         nullptr, cancellable, error
     );
-    g_free(address);
     if (bus) g_dbus_connection_set_exit_on_close(bus, false);
     return bus;
 }
 }
 
-// Loaded at run time: OBS already has libcurl loaded, and linking it would refuse to load the
-// whole plugin on a distribution whose libcurl uses other symbol versions.
 std::optional<std::string> get(std::string const& url, size_t cap) {
     static auto library = dlopen("libcurl.so.4", RTLD_NOW | RTLD_LOCAL);
     if (!library) return std::nullopt;
@@ -294,8 +319,6 @@ std::optional<std::string> get(std::string const& url, size_t cap) {
     return std::move(download.body);
 }
 
-// A desktop notification through org.freedesktop.Notifications. Flatpak OBS may talk to it (its
-// manifest grants --talk-name=org.freedesktop.Notifications).
 std::optional<bool> ask(Notice const& notice) {
     auto cancellable = g_cancellable_new();
     {
@@ -344,7 +367,6 @@ std::optional<bool> ask(Notice const& notice) {
                 std::lock_guard lock(mutex);
                 waiting = nullptr;
             }
-            // OBS is closing; a button left behind would open nothing.
             if (!answer.ended)
                 if (auto closed = notifications(
                         bus, "CloseNotification", g_variant_new("(u)", answer.id), 1000, nullptr, nullptr

@@ -9,13 +9,8 @@ struct Notice {
     std::string latest, latestGd, running, runningGd;
 };
 
-// An HTTPS GET of at most `cap` bytes that follows redirects. cancel() ends it early.
 std::optional<std::string> get(std::string const& url, size_t cap);
-// Shows the notice and waits for the player: true means open the download page, nothing means
-// it couldn't be shown.
 std::optional<bool> ask(Notice const& notice);
-// Ends a get() or ask() running on another thread. One that hasn't started yet may still run,
-// so the caller repeats this until its worker finishes.
 void cancel();
 void open(char const* url);
 }

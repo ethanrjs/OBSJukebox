@@ -1473,7 +1473,6 @@ static void* create(obs_data_t*, obs_source_t* source) {
 static obs_properties_t* properties(void* data) {
     auto props = obs_properties_create();
     obs_properties_add_text(props, "version", "OBS Jukebox " OBS_JUKEBOX_VERSION, OBS_TEXT_INFO);
-    // The update warning says why GD isn't connecting, so the link status would repeat it.
     if (!update_notice::addProperties(props)) {
         std::string detail = "Playback follows GD automatically.";
         if (data) {

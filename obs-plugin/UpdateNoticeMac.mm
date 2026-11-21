@@ -15,8 +15,6 @@ std::optional<std::string> get(std::string const& url, size_t cap) {
     if (!address) return std::nullopt;
     auto configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.timeoutIntervalForResource = 15;
-    // The completion handler runs on this queue; draining it before returning keeps the handler
-    // from running after the plugin unloads.
     auto queue = [NSOperationQueue new];
     auto session = [NSURLSession sessionWithConfiguration:configuration delegate:nil delegateQueue:queue];
     auto done = dispatch_semaphore_create(0);
@@ -32,13 +30,10 @@ std::optional<std::string> get(std::string const& url, size_t cap) {
                           }];
     {
         std::lock_guard lock(mutex);
-        if (cancelled) {
-            [session invalidateAndCancel];
-            return std::nullopt;
-        }
         task = started;
     }
     [started resume];
+    if (cancelled) [started cancel];
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     {
         std::lock_guard lock(mutex);

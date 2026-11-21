@@ -22,8 +22,6 @@ std::optional<ur::Manifest> latest;
 std::atomic<bool> finished = false;
 std::thread worker;
 
-// Tests point this at a local server. The button only ever opens the real releases page, so
-// another manifest can change the text but not where the player goes.
 std::string manifestUrl() {
     if (auto base = std::getenv("OBS_JUKEBOX_UPDATE_BASE_URL"))
         return std::string(base) + "/latest/download/update.json";
@@ -47,7 +45,6 @@ bool outputActive() {
     return active;
 }
 
-// The version whose notice the player last saw, kept in the plugin's config folder.
 std::string shownVersion() {
     char* file = obs_module_config_path("update-notice");
     char* text = file ? os_quick_read_utf8_file(file) : nullptr;
@@ -69,7 +66,6 @@ void recordShown(std::string const& version) {
 void check(ur::Version running) {
     {
         std::unique_lock lock(mutex);
-        // Long enough for OBS's window to open first, so the dialog lands on top of it.
         if (wake.wait_for(lock, std::chrono::seconds(5), [] { return stopping; })) return;
     }
     auto body = platform::get(manifestUrl(), 16 * 1024);
