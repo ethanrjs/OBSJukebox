@@ -61,9 +61,9 @@ void next(HINTERNET handle, Call call) {
 }
 
 void CALLBACK onStatus(HINTERNET handle, DWORD_PTR context, DWORD status, LPVOID, DWORD length) {
-    auto& fetch = *reinterpret_cast<Fetch*>(context);
+    auto& state = *reinterpret_cast<Fetch*>(context);
     auto read = [&] {
-        return WinHttpReadData(handle, fetch.buffer, sizeof(fetch.buffer), nullptr);
+        return WinHttpReadData(handle, state.buffer, sizeof(state.buffer), nullptr);
     };
     switch (status) {
         case WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE:
@@ -80,13 +80,13 @@ void CALLBACK onStatus(HINTERNET handle, DWORD_PTR context, DWORD status, LPVOID
             break;
         }
         case WINHTTP_CALLBACK_STATUS_READ_COMPLETE:
-            if (!length) fetch.complete = true;
-            else fetch.body.append(fetch.buffer, length);
-            if (!length || fetch.body.size() > fetch.cap) close(handle);
+            if (!length) state.complete = true;
+            else state.body.append(state.buffer, length);
+            if (!length || state.body.size() > state.cap) close(handle);
             else next(handle, read);
             break;
         case WINHTTP_CALLBACK_STATUS_REQUEST_ERROR: close(handle); break;
-        case WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING: SetEvent(fetch.closed); break;
+        case WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING: SetEvent(state.closed); break;
     }
 }
 
@@ -100,15 +100,15 @@ std::optional<std::string> fetch(HINTERNET session, URL_COMPONENTS const& parts,
         connection.handle, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
         WINHTTP_DEFAULT_ACCEPT_TYPES, parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0
     )};
-    Fetch fetch{{}, cap, CreateEventW(nullptr, TRUE, FALSE, nullptr)};
-    auto context = reinterpret_cast<DWORD_PTR>(&fetch);
-    if (!opened.handle || !fetch.closed ||
+    Fetch state{{}, cap, CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    auto context = reinterpret_cast<DWORD_PTR>(&state);
+    if (!opened.handle || !state.closed ||
         !WinHttpSetOption(opened.handle, WINHTTP_OPTION_CONTEXT_VALUE, &context, sizeof(context)) ||
         WinHttpSetStatusCallback(
             opened.handle, onStatus,
             WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS | WINHTTP_CALLBACK_FLAG_HANDLES, 0
         ) == WINHTTP_INVALID_STATUS_CALLBACK) {
-        if (fetch.closed) CloseHandle(fetch.closed);
+        if (state.closed) CloseHandle(state.closed);
         return std::nullopt;
     }
     auto handle = std::exchange(opened.handle, nullptr);
@@ -121,13 +121,13 @@ std::optional<std::string> fetch(HINTERNET session, URL_COMPONENTS const& parts,
             handle, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, context
         );
     });
-    if (WaitForSingleObject(fetch.closed, 15000) == WAIT_TIMEOUT) {
+    if (WaitForSingleObject(state.closed, 15000) == WAIT_TIMEOUT) {
         close(handle);
-        WaitForSingleObject(fetch.closed, INFINITE);
+        WaitForSingleObject(state.closed, INFINITE);
     }
-    CloseHandle(fetch.closed);
-    if (!fetch.complete) return std::nullopt;
-    return std::move(fetch.body);
+    CloseHandle(state.closed);
+    if (!state.complete) return std::nullopt;
+    return std::move(state.body);
 }
 }
 
@@ -150,7 +150,8 @@ std::optional<std::string> get(std::string const& url, size_t cap) {
     }
     auto body = fetch(session, parts, cap);
     WinHttpCloseHandle(session);
-    if (WaitForSingleObject(unloaded, 5000) == WAIT_OBJECT_0) CloseHandle(unloaded);
+    WaitForSingleObject(unloaded, INFINITE);
+    CloseHandle(unloaded);
     return body;
 }
 
@@ -262,10 +263,18 @@ guint subscribe(GDBusConnection* bus, char const* signal, Answer& answer) {
 }
 
 std::string sessionBus() {
-    if (auto address = g_getenv("DBUS_SESSION_BUS_ADDRESS"))
-        return std::string_view(address).starts_with("autolaunch:") ? "" : address;
-    auto socket = g_build_filename(g_get_user_runtime_dir(), "bus", nullptr);
     std::string address;
+    if (auto listed = g_getenv("DBUS_SESSION_BUS_ADDRESS")) {
+        auto entries = g_strsplit(listed, ";", -1);
+        for (auto entry = entries; *entry; ++entry)
+            if (**entry && !std::string_view(*entry).starts_with("autolaunch:"))
+                address += (address.empty() ? "" : ";") + std::string(*entry);
+        g_strfreev(entries);
+        return address;
+    }
+    auto runtime = g_getenv("XDG_RUNTIME_DIR");
+    if (!runtime || !*runtime) return address;
+    auto socket = g_build_filename(runtime, "bus", nullptr);
     if (g_file_test(socket, G_FILE_TEST_EXISTS)) {
         auto escaped = g_dbus_address_escape_value(socket);
         address = std::string("unix:path=") + escaped;
