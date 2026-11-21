@@ -36,6 +36,11 @@ struct Manifest {
 
 // Accepts only the exact bytes scripts/make-update-manifest.py writes; any other form fails.
 std::optional<Manifest> parseManifest(std::string_view bytes);
+// mod.json's version as the plugin is built with it: "v1.2.5", or "v1.2.5-beta.3" for a beta.
+std::optional<Version> parseBuildVersion(std::string_view text);
+// The OBS plugin still loads after a GD update stops the mod loading, so it reports a newer
+// release for another GD. A newer release for the same GD is the mod's updater's to offer.
+bool needsOtherGd(Manifest const& latest, Version running, std::string_view gd);
 std::optional<FileEntry> entryFor(Manifest const& manifest, Platform platform);
 std::string assetName(Version version, Platform platform);
 

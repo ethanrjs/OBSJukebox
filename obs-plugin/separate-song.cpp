@@ -5,6 +5,7 @@
 #include "Decoder.hpp"
 #include "LinkClock.hpp"
 #include "PitchShifter.hpp"
+#include "UpdateNotice.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1472,13 +1473,16 @@ static void* create(obs_data_t*, obs_source_t* source) {
 static obs_properties_t* properties(void* data) {
     auto props = obs_properties_create();
     obs_properties_add_text(props, "version", "OBS Jukebox " OBS_JUKEBOX_VERSION, OBS_TEXT_INFO);
-    std::string detail = "Playback follows GD automatically.";
-    if (data) {
-        auto s = static_cast<SongSource*>(data);
-        std::lock_guard lock(s->mutex);
-        detail = s->detail;
+    // The update warning says why GD isn't connecting, so the link status would repeat it.
+    if (!update_notice::addProperties(props)) {
+        std::string detail = "Playback follows GD automatically.";
+        if (data) {
+            auto s = static_cast<SongSource*>(data);
+            std::lock_guard lock(s->mutex);
+            detail = s->detail;
+        }
+        obs_properties_add_text(props, "link", detail.c_str(), OBS_TEXT_INFO);
     }
-    obs_properties_add_text(props, "link", detail.c_str(), OBS_TEXT_INFO);
     obs_properties_add_text(
         props,
         "help",
@@ -1521,9 +1525,11 @@ bool obs_module_load(void) {
     };
     obs_register_source(&info);
     blog(LOG_INFO, "[OBS Jukebox] Native GD Sounds source registered");
+    update_notice::start();
     return true;
 }
 
 void obs_module_unload(void) {
+    update_notice::stop();
     receiver.reset();
 }

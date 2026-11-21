@@ -379,6 +379,17 @@ static void rulesPart2() {
         noticeText(Notice::Failed, v125) == "OBS Jukebox: Update failed",
         "failed text leaves the reason to the log"
     );
+
+    check(parseBuildVersion("v1.2.5") == v125, "reads mod.json's version");
+    check(parseBuildVersion("v1.2.5-beta.15") == v125, "a beta reads as its release");
+    check(!parseBuildVersion("dev") && !parseBuildVersion("v1.2"), "a dev build has no version");
+    auto release = [](Version version, char const* gd) {
+        return Manifest{version, gd, {}, {}};
+    };
+    check(needsOtherGd(release(v126, "2.2091"), v125, "2.2081"), "a newer release for another GD");
+    check(!needsOtherGd(release(v126, "2.2081"), v125, "2.2081"), "same GD is the mod's to offer");
+    check(!needsOtherGd(release(v125, "2.2091"), v125, "2.2081"), "the running version");
+    check(!needsOtherGd(release(v124, "2.2091"), v125, "2.2081"), "an older release");
 }
 #ifndef UPDATE_RULES_ONLY
 static void cryptoChecks(std::filesystem::path const& fixtures) {
