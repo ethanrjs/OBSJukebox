@@ -1,5 +1,4 @@
 // The pitch stage's AVX loops, out of line so they are defined once, not in every user's header.
-#include "../src/LinkPacket.hpp"
 #include "PitchShifter.hpp"
 #include <cstdlib>
 
