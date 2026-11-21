@@ -22,6 +22,7 @@ class $modify(OBSLevelIdentity, GJGameLevel) {
     };
 
     std::string identity() {
+        // Sweep dead entries only when the map doubles, so claims stay amortized O(1).
         static size_t nextSweep = 1024;
         if (owners().size() >= nextSweep) {
             std::erase_if(owners(), [](auto const& entry) {
