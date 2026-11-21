@@ -1,6 +1,7 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PauseLayer.hpp>
 #include "ObsVolume.hpp"
+#include <algorithm>
 
 using namespace geode::prelude;
 using namespace separate_song;
@@ -30,10 +31,8 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
         // these after setup. It then only changes the detached nodes.
         Ref<Slider> music;
         Ref<Slider> effects;
-        Ref<CCLabelBMFont> musicLabel;
-        Ref<CCLabelBMFont> effectsLabel;
-        std::string gameMusicLabel;
-        std::string gameEffectsLabel;
+        Ref<CCSprite> musicIcon;
+        Ref<CCSprite> effectsIcon;
         SliderCallback gameMusic;
         SliderCallback gameEffects;
         ButtonSprite* button = nullptr;
@@ -46,19 +45,15 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
         // the checks below leave the pause menu alone.
         fields->music = typeinfo_cast<Slider*>(getChildByIDRecursive("music-slider"));
         fields->effects = typeinfo_cast<Slider*>(getChildByIDRecursive("sfx-slider"));
-        fields->musicLabel = typeinfo_cast<CCLabelBMFont*>(getChildByIDRecursive("music-label"));
-        fields->effectsLabel = typeinfo_cast<CCLabelBMFont*>(getChildByIDRecursive("sfx-label"));
+        fields->musicIcon = typeinfo_cast<CCSprite*>(getChildByIDRecursive("music-icon"));
+        fields->effectsIcon = typeinfo_cast<CCSprite*>(getChildByIDRecursive("sfx-icon"));
         if (!fields->music || !fields->effects || fields->music == fields->effects) return;
         if (!thumbOf(fields->music) || !thumbOf(fields->effects)) return;
-        if (fields->musicLabel) fields->gameMusicLabel = fields->musicLabel->getString();
-        if (fields->effectsLabel) fields->gameEffectsLabel = fields->effectsLabel->getString();
+        auto play = getChildByIDRecursive("play-button");
+        if (!play) return;
 
-        auto musicPosition = convertToNodeSpace(
-            fields->music->getParent()->convertToWorldSpace(fields->music->getPosition())
-        );
-        auto effectsPosition = convertToNodeSpace(
-            fields->effects->getParent()->convertToWorldSpace(fields->effects->getPosition())
-        );
+        // The toggle shares main-layer with the sliders, so GD 2.2091's hide-UI button hides it too.
+        auto layer = fields->music->getParent();
         auto menu = CCMenu::create();
         menu->setID("obs-volume-menu"_spr);
         menu->setPosition(ccp(0, 0));
@@ -68,31 +63,47 @@ class $modify(ObsJukeboxPauseVolume, PauseLayer) {
             fields->button, this, menu_selector(ObsJukeboxPauseVolume::onVolumeTarget)
         );
         button->setID("volume-target-toggle"_spr);
-        auto targetPosition = (musicPosition + effectsPosition) / 2.f + ccp(0, 23);
-        if (fields->musicLabel && fields->effectsLabel) {
-            auto musicHeading = convertToNodeSpace(
-                fields->musicLabel->getParent()->convertToWorldSpace(fields->musicLabel->getPosition())
-            );
-            auto effectsHeading =
-                convertToNodeSpace(fields->effectsLabel->getParent()->convertToWorldSpace(
-                    fields->effectsLabel->getPosition()
-                ));
-            targetPosition.y = (musicHeading.y + effectsHeading.y) / 2.f;
-        }
-        button->setPosition(targetPosition);
+
+        auto playBox = play->boundingBox();
+        float playBottom = layer->convertToNodeSpace(
+            play->getParent()->convertToWorldSpace(ccp(playBox.getMinX(), playBox.getMinY()))
+        ).y;
+        auto thumbTopOf = [layer](Slider* slider) {
+            auto thumb = thumbOf(slider);
+            auto box = thumb->boundingBox();
+            return layer->convertToNodeSpace(
+                thumb->getParent()->convertToWorldSpace(ccp(box.getMinX(), box.getMaxY()))
+            ).y;
+        };
+        float thumbTop = std::max(thumbTopOf(fields->music), thumbTopOf(fields->effects));
+        float margin = 2.f;
+        float shift = std::max(
+            0.f,
+            button->getScaledContentSize().height + 2.f * margin - (playBottom - thumbTop)
+        );
+        fields->music->setPositionY(fields->music->getPositionY() - shift);
+        fields->effects->setPositionY(fields->effects->getPositionY() - shift);
+        if (fields->musicIcon)
+            fields->musicIcon->setPositionY(fields->musicIcon->getPositionY() - shift);
+        if (fields->effectsIcon)
+            fields->effectsIcon->setPositionY(fields->effectsIcon->getPositionY() - shift);
+
+        button->setPosition(ccp(
+            (fields->music->getPositionX() + fields->effects->getPositionX()) / 2.f,
+            (playBottom + thumbTop - shift) / 2.f
+        ));
         menu->addChild(button);
-        addChild(menu, 10);
+        layer->addChild(menu, 10);
     }
 
     void onVolumeTarget(CCObject*) {
         auto fields = m_fields.self();
         fields->obs = !fields->obs;
         fields->button->setString(fields->obs ? "OBS" : "Game");
-        fields->button->setColor(fields->obs ? ccc3(120, 210, 255) : ccc3(255, 255, 255));
-        if (fields->musicLabel)
-            fields->musicLabel->setString(fields->obs ? "OBS Music" : fields->gameMusicLabel.c_str());
-        if (fields->effectsLabel)
-            fields->effectsLabel->setString(fields->obs ? "OBS SFX" : fields->gameEffectsLabel.c_str());
+        auto color = fields->obs ? ccc3(120, 210, 255) : ccc3(255, 255, 255);
+        fields->button->setColor(color);
+        if (fields->musicIcon) fields->musicIcon->setColor(color);
+        if (fields->effectsIcon) fields->effectsIcon->setColor(color);
         auto audio = FMODAudioEngine::sharedEngine();
         fields->music->setValue(fields->obs ? obs_volume::music() : audio->getBackgroundMusicVolume());
         fields->effects->setValue(fields->obs ? obs_volume::effects() : audio->m_sfxVolume);
