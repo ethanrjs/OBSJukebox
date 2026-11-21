@@ -1,8 +1,6 @@
 // Measures the plugin's audio cost and pitch fidelity against GD's FMOD. It reports numbers and
 // fails nothing; run it with run.ps1 -Bench <mode> or run.sh --bench <mode>, both in this folder.
-#define main playbackTests
-#include "playback-tests.cpp"
-#undef main
+#include "pitch-harness.hpp"
 #include <cstdlib>
 #include <cstring>
 #include <map>

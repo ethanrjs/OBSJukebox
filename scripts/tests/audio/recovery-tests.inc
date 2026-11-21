@@ -1,3 +1,4 @@
+#include "harness.hpp"
 
 static void sourceRecoveryTest(bool failedSeek) {
     receiver=std::make_shared<Receiver>();resetOutput();

@@ -1,3 +1,5 @@
+#include "harness.hpp"
+
 // Stress the real output thread, including a slow file open. Timeline arithmetic has its own
 // sample tests; wall time here only detects stalls, with scheduler tolerance.
 struct StressRun {
