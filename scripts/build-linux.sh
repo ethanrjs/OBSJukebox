@@ -38,8 +38,8 @@ for song_tool in cmake pkg-config c++ python3; do
     }
 done
 python3 "$song_root/scripts/check-mod-package.py" "$song_mod" local.separate_song.dll
-pkg-config --exists libobs || {
-    printf 'Install the OBS development package (libobs-dev on Ubuntu).\n' >&2
+pkg-config --exists libobs libcurl gio-2.0 || {
+    printf 'Install the OBS, libcurl and GIO development packages (libobs-dev libcurl4-openssl-dev libglib2.0-dev on Ubuntu).\n' >&2
     exit 1
 }
 mkdir -p "$song_output"

@@ -6,9 +6,8 @@
 namespace update_notice::platform {
 namespace {
 std::mutex mutex;
-bool cancelled = false;
+std::atomic<bool> cancelled = false;
 NSURLSessionDataTask* task = nil;
-CFUserNotificationRef alert = nullptr;
 }
 
 std::optional<std::string> get(std::string const& url, size_t cap) {
@@ -16,12 +15,15 @@ std::optional<std::string> get(std::string const& url, size_t cap) {
     if (!address) return std::nullopt;
     auto configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.timeoutIntervalForResource = 15;
-    auto session = [NSURLSession sessionWithConfiguration:configuration];
+    // The completion handler runs on this queue; draining it before returning keeps the handler
+    // from running after the plugin unloads.
+    auto queue = [NSOperationQueue new];
+    auto session = [NSURLSession sessionWithConfiguration:configuration delegate:nil delegateQueue:queue];
     auto done = dispatch_semaphore_create(0);
     __block std::optional<std::string> body;
     auto started = [session dataTaskWithURL:address
                           completionHandler:^(NSData* data, NSURLResponse* response, NSError* error) {
-                              auto http = [response isKindOfClass:NSHTTPURLResponse.class]
+                              auto http = [response isKindOfClass:[NSHTTPURLResponse class]]
                                   ? static_cast<NSHTTPURLResponse*>(response)
                                   : nil;
                               if (!error && http.statusCode == 200 && data.length <= cap)
@@ -43,10 +45,11 @@ std::optional<std::string> get(std::string const& url, size_t cap) {
         task = nil;
     }
     [session finishTasksAndInvalidate];
+    [queue waitUntilAllOperationsAreFinished];
     return body;
 }
 
-bool ask(Notice const& notice) {
+std::optional<bool> ask(Notice const& notice) {
     auto header = "OBS Jukebox " + notice.latest + " is out for Geometry Dash " + notice.latestGd;
     auto message = "Your version (" + notice.running + ") only works with GD " + notice.runningGd +
         ", so the game mod stops loading after the GD update. Install " + notice.latest +
@@ -58,23 +61,20 @@ bool ask(Notice const& notice) {
         (__bridge NSString*)kCFUserNotificationAlternateButtonTitleKey: @"Later",
     };
     SInt32 error = 0;
-    auto created = CFUserNotificationCreate(
+    auto alert = CFUserNotificationCreate(
         kCFAllocatorDefault, 0, kCFUserNotificationNoteAlertLevel, &error,
         (__bridge CFDictionaryRef)content
     );
-    if (!created) return false;
-    {
-        std::lock_guard lock(mutex);
-        alert = created;
-        if (cancelled) CFUserNotificationCancel(created);
-    }
+    if (!alert) return std::nullopt;
     CFOptionFlags response = kCFUserNotificationCancelResponse;
-    CFUserNotificationReceiveResponse(created, 0, &response);
-    {
-        std::lock_guard lock(mutex);
-        alert = nullptr;
+    while (CFUserNotificationReceiveResponse(alert, .25, &response) != 0) {
+        if (cancelled) {
+            CFUserNotificationCancel(alert);
+            response = kCFUserNotificationCancelResponse;
+            break;
+        }
     }
-    CFRelease(created);
+    CFRelease(alert);
     return (response & 3) == kCFUserNotificationDefaultResponse;
 }
 
@@ -82,7 +82,6 @@ void cancel() {
     std::lock_guard lock(mutex);
     cancelled = true;
     [task cancel];
-    if (alert) CFUserNotificationCancel(alert);
 }
 
 void open(char const* url) {

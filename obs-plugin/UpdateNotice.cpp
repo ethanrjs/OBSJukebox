@@ -47,21 +47,23 @@ bool outputActive() {
     return active;
 }
 
-// True the first time this version comes up, which it records.
-bool firstShowing(ur::Version version) {
-    auto text = ur::toString(version);
+// The version whose notice the player last saw, kept in the plugin's config folder.
+std::string shownVersion() {
+    char* file = obs_module_config_path("update-notice");
+    char* text = file ? os_quick_read_utf8_file(file) : nullptr;
+    std::string shown = text ? text : "";
+    bfree(text);
+    bfree(file);
+    return shown;
+}
+
+void recordShown(std::string const& version) {
     char* folder = obs_module_config_path("");
     char* file = obs_module_config_path("update-notice");
-    bool first = false;
-    if (folder && file && os_mkdirs(folder) != MKDIR_ERROR) {
-        char* shown = os_quick_read_utf8_file(file);
-        first = !shown || text != shown;
-        if (first) os_quick_write_utf8_file(file, text.data(), text.size(), false);
-        bfree(shown);
-    }
+    if (folder && file && os_mkdirs(folder) != MKDIR_ERROR)
+        os_quick_write_utf8_file(file, version.data(), version.size(), false);
     bfree(folder);
     bfree(file);
-    return first;
 }
 
 void check(ur::Version running) {
@@ -78,11 +80,12 @@ void check(ur::Version running) {
         if (stopping) return;
         latest = manifest;
     }
-    if (outputActive() || !firstShowing(manifest->version)) return;
-    platform::Notice notice{
-        ur::toString(manifest->version), manifest->gd, ur::toString(running), OBS_JUKEBOX_GD
-    };
-    if (platform::ask(notice)) platform::open(DOWNLOAD_PAGE);
+    auto version = ur::toString(manifest->version);
+    if (outputActive() || shownVersion() == version) return;
+    auto answer =
+        platform::ask({version, manifest->gd, ur::toString(running), OBS_JUKEBOX_GD});
+    if (answer) recordShown(version);
+    if (answer.value_or(false)) platform::open(DOWNLOAD_PAGE);
 }
 }
 
